@@ -17,10 +17,10 @@ function el<K extends keyof HTMLElementTagNameMap>(
 	className?: string,
 	text?: string,
 ): HTMLElementTagNameMap[K] {
-	const node = document.createElement(tag);
-	if (className) node.className = className;
-	if (text !== undefined) node.textContent = text;
-	return node;
+	// Obsidian's own createEl rather than document.createElement, per its
+	// plugin guidelines. Detached on purpose — callers append these
+	// themselves, so this can't build straight into a parent.
+	return createEl(tag, { cls: className, text });
 }
 
 // A full-width top toolbar for the shared annotation tool module — the

@@ -10,6 +10,12 @@
 .inkling-pdf-page-placeholder {
 	position: relative;
 	max-width: 100%;
+	/* Both fed from src/pdfView.ts, which knows each page's real size from
+	   pdf.js. Height comes from the ratio rather than being set directly, so
+	   a page narrower than its natural width scales down whole instead of
+	   being squashed. */
+	width: var(--inkling-page-width);
+	aspect-ratio: var(--inkling-page-aspect);
 	/* The parent is a flex column, so these shrink by default — and since a
 	   placeholder is an empty div until its page renders, `min-height: auto`
 	   resolves to 0 and lets them collapse to *nothing*, explicit pixel
@@ -275,6 +281,9 @@
 .inkling-ink-block-surface {
 	position: relative;
 	width: 100%;
+	/* Set from src/markdown/inkBlock.ts, from the block's stored size and
+	   whatever the resize handle has been dragged to. */
+	aspect-ratio: var(--inkling-block-aspect);
 	overflow: hidden;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-s);

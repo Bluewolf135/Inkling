@@ -11,6 +11,9 @@ export default defineConfig(
 		'versions.json',
 		'main.js',
 		'pdf.worker.js',
+		// Bundled build output, like the two above it — added when the
+		// annotation writer moved into its own worker.
+		'annotation-writer.worker.js',
 		'package.json',
 		'package-lock.json',
 		'tsconfig.json',

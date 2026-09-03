@@ -117,7 +117,7 @@ let momentumFrame: number | null = null;
 
 function stopMomentum(): void {
 	if (momentumFrame === null) return;
-	cancelAnimationFrame(momentumFrame);
+	window.cancelAnimationFrame(momentumFrame);
 	momentumFrame = null;
 }
 
@@ -142,10 +142,10 @@ function startMomentum(scrollParent: HTMLElement, velocity: number): void {
 
 		current *= Math.pow(MOMENTUM_FRICTION, elapsed / 16);
 		if (Math.abs(current) < MOMENTUM_MIN_VELOCITY) return;
-		momentumFrame = requestAnimationFrame(step);
+		momentumFrame = window.requestAnimationFrame(step);
 	};
 
-	momentumFrame = requestAnimationFrame(step);
+	momentumFrame = window.requestAnimationFrame(step);
 }
 
 // Palm rejection: touch pans/scrolls the page, pen and mouse draw — required

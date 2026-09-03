@@ -72,7 +72,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 			},
 			(error: unknown) => {
 				window.clearTimeout(timeout);
-				reject(error);
+				// Rewrapped rather than passed straight through: pdf.js can
+				// reject with values that aren't Errors, and callers here log
+				// whatever comes out.
+				reject(error instanceof Error ? error : new Error(String(error)));
 			},
 		);
 	});
@@ -167,7 +170,11 @@ async function computeTextLines(page: PDFPageProxy, viewport: PageViewport): Pro
 	const boxes: Box[] = [];
 	for (const item of content.items) {
 		if (!('str' in item) || !item.str.trim()) continue;
-		const [, , , , e, f] = item.transform;
+		// pdf.js types `transform` loosely; it is always the six-element
+		// matrix [a, b, c, d, e, f], whose last two entries are the item's
+		// origin. Typed as a fixed-length tuple so those two read as the
+		// numbers they are rather than as possibly-missing array entries.
+		const [, , , , e, f] = item.transform as [number, number, number, number, number, number];
 		// `f` is the text's *baseline*, not the bottom of its glyphs, so the
 		// box runs from a descender's depth below it to the rest of the line
 		// height above — see BASELINE_DESCENT_RATIO.
@@ -224,9 +231,10 @@ async function computeTextLines(page: PDFPageProxy, viewport: PageViewport): Pro
 // pointer input is mapped through each canvas's own backing-store scale
 // (see src/annotate/pointer.ts), not assumed to be 1:1 with CSS pixels.
 function sizePlaceholder(placeholder: HTMLElement, width: number, height: number): void {
-	placeholder.style.width = `${width}px`;
-	placeholder.style.aspectRatio = `${width} / ${height}`;
-	placeholder.style.height = '';
+	// Handed to the stylesheet as custom properties rather than set as
+	// inline styles: the actual rules stay in styles.css (and stay
+	// themeable), and only the two data-derived numbers cross over.
+	placeholder.setCssProps({ '--inkling-page-width': `${width}px`, '--inkling-page-aspect': `${width} / ${height}` });
 }
 
 // Accepts both shapes this view can be handed a position in: `{ page: N }`,

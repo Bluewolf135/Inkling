@@ -1,4 +1,4 @@
-import { FileView, ItemView, Notice, Plugin, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { FileView, ItemView, Plugin, WorkspaceLeaf, normalizePath } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
 import { registerInkBlock } from './markdown/inkBlock';
 import { registerNoteCreation } from './noteCreation';
@@ -27,6 +27,9 @@ export default class InklingPlugin extends Plugin {
 	// active-leaf-change fires repeatedly for the same leaf, and addAction
 	// has no de-dupe of its own, so without this the button would multiply.
 	private readonly decoratedViews = new WeakSet<ItemView>();
+	// The action buttons added to core PDF views, kept so onunload can take
+	// them back off again.
+	private readonly actions: HTMLElement[] = [];
 
 	async onload() {
 		this.configurePdfWorker();
@@ -51,8 +54,11 @@ export default class InklingPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			// Not "…with Inkling": Obsidian already prefixes a command with
+			// the plugin's name in the palette, so saying it again reads as
+			// "Inkling: Annotate this PDF with Inkling".
 			id: 'annotate-pdf',
-			name: 'Annotate this PDF with Inkling',
+			name: 'Annotate this PDF',
 			checkCallback: (checking) => {
 				const view = this.app.workspace.getActiveViewOfType(FileView);
 				if (!view || view.getViewType() !== CORE_PDF_VIEW_TYPE) return false;
@@ -60,8 +66,15 @@ export default class InklingPlugin extends Plugin {
 				return true;
 			},
 		});
+	}
 
-		new Notice('Inkling loaded');
+	onunload(): void {
+		// The "annotate" buttons live on Obsidian's *own* PDF views, not on
+		// anything this plugin owns and Obsidian would tear down for it — so
+		// without this they'd outlive the plugin, still sitting in the
+		// toolbar of every open PDF with nothing behind them.
+		for (const action of this.actions) action.remove();
+		this.actions.length = 0;
 	}
 
 	private decorateIfCorePdfLeaf(leaf: WorkspaceLeaf | null): void {
@@ -69,7 +82,7 @@ export default class InklingPlugin extends Plugin {
 		if (!leaf || !(view instanceof ItemView) || view.getViewType() !== CORE_PDF_VIEW_TYPE) return;
 		if (this.decoratedViews.has(view)) return;
 		this.decoratedViews.add(view);
-		view.addAction('pencil', 'Annotate with Inkling', () => void this.switchToInkling(leaf));
+		this.actions.push(view.addAction('pencil', 'Annotate with Inkling', () => void this.switchToInkling(leaf)));
 	}
 
 	private async switchToInkling(leaf: WorkspaceLeaf): Promise<void> {

@@ -149,7 +149,7 @@ export class AnnotationWriterClient {
 				};
 				worker.onerror = (event) => {
 					window.clearTimeout(timeout);
-					reject(new Error(`Inkling: annotation writer worker failed to start. ${String((event as ErrorEvent).message ?? '')}`));
+					reject(new Error(`Inkling: annotation writer worker failed to start. ${event.message}`));
 				};
 			});
 
@@ -205,7 +205,7 @@ export class AnnotationWriterClient {
 				this.pending.delete(requestId);
 				reject(new Error('Inkling: annotation writer timed out.'));
 			}, REQUEST_TIMEOUT_MS);
-			this.pending.set(requestId, { resolve: resolve as (value: never) => void, reject, timeout });
+			this.pending.set(requestId, { resolve, reject, timeout });
 		});
 	}
 

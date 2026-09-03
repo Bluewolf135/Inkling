@@ -1,5 +1,5 @@
 import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
-import { AnnotationController, buildToolbar, type Annotation } from '../annotate';
+import { AnnotationController, buildToolbar } from '../annotate';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
@@ -49,7 +49,7 @@ class InkBlockView {
 	private disposeToolbar: (() => void) | null = null;
 	private writeHandle: number | null = null;
 	private readonly toolbarHost: HTMLElement;
-	// Assigned in the constructor; held because growth (see growIfNeeded)
+	// Assigned in the constructor; held because resizing (see applyHeight)
 	// restates the aspect ratio that gives this element its height.
 	private readonly surfaceEl!: HTMLElement;
 	private detached = false;
@@ -96,7 +96,7 @@ class InkBlockView {
 		// is mapped through that backing scale (see annotate/pointer.ts), so
 		// a block drawn on a phone and reopened on a desktop still puts every
 		// stroke where it was drawn.
-		surface.style.aspectRatio = `${data.width} / ${data.height}`;
+		surface.setCssProps({ '--inkling-block-aspect': `${data.width} / ${data.height}` });
 		this.controller.mountPage(BLOCK_PAGE, content, data.width, data.height);
 		this.controller.seedPage(BLOCK_PAGE, data.annotations);
 
@@ -148,7 +148,7 @@ class InkBlockView {
 		if (clamped === this.data.height) return;
 
 		this.data = { ...this.data, height: clamped };
-		this.surfaceEl.style.aspectRatio = `${this.data.width} / ${clamped}`;
+		this.surfaceEl.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${clamped}` });
 		// Goes through the store's live-update path, so a resize counts as
 		// exactly that rather than an edit: no history entry of its own, and
 		// no change notification recursing back into the save path.
@@ -195,14 +195,14 @@ class InkBlockView {
 			const cssWidth = this.surfaceEl.getBoundingClientRect().width;
 			const scale = cssWidth > 0 ? this.data.width / cssWidth : 1;
 			pendingHeight = drag.startHeight + (event.clientY - drag.startY) * scale;
-			frame ??= requestAnimationFrame(flush);
+			frame ??= window.requestAnimationFrame(flush);
 		});
 
 		const end = (event: PointerEvent) => {
 			if (!drag || event.pointerId !== drag.pointerId) return;
 			drag = null;
 			if (frame !== null) {
-				cancelAnimationFrame(frame);
+				window.cancelAnimationFrame(frame);
 				frame = null;
 			}
 			flush();

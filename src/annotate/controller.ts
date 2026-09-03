@@ -128,19 +128,15 @@ export class AnnotationController {
 	mountPage(pageNumber: number, host: HTMLElement, width: number, height: number): void {
 		this.unmountPage(pageNumber);
 
-		const baseCanvas = document.createElement('canvas');
-		baseCanvas.className = 'inkling-annotation-layer inkling-annotation-base';
+		const baseCanvas = host.createEl('canvas', { cls: 'inkling-annotation-layer inkling-annotation-base' });
 		baseCanvas.width = width;
 		baseCanvas.height = height;
-		host.appendChild(baseCanvas);
 
 		// The overlay sits on top and is the only one that receives pointer
 		// events — the base layer is purely a picture underneath it.
-		const overlayCanvas = document.createElement('canvas');
-		overlayCanvas.className = 'inkling-annotation-layer inkling-annotation-overlay';
+		const overlayCanvas = host.createEl('canvas', { cls: 'inkling-annotation-layer inkling-annotation-overlay' });
 		overlayCanvas.width = width;
 		overlayCanvas.height = height;
-		host.appendChild(overlayCanvas);
 
 		const base = baseCanvas.getContext('2d');
 		const overlay = overlayCanvas.getContext('2d');
