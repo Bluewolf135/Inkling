@@ -1,0 +1,239 @@
+.inkling-pdf-view {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+	padding: 8px;
+	overflow: auto;
+}
+
+.inkling-pdf-page-placeholder {
+	position: relative;
+	max-width: 100%;
+	/* The parent is a flex column, so these shrink by default — and since a
+	   placeholder is an empty div until its page renders, `min-height: auto`
+	   resolves to 0 and lets them collapse to *nothing*, explicit pixel
+	   height notwithstanding. A single-page note barely showed it (one
+	   placeholder shrinking from 999px to the container's 954px looks
+	   normal), but a 195-page book collapsed every page to 0px: a blank
+	   (so, on a dark theme, black) page area, with all 195 pages stacked
+	   inside one viewport — which then made the IntersectionObserver below
+	   report ~130 pages visible at once and render them all simultaneously,
+	   three canvases apiece. That is what "loads in Obsidian's view fine,
+	   goes black when toggling to edit" was. */
+	flex: none;
+	/* Fixed-size viewport for pinch-zoom (see pointer.ts): the zoomable
+	   content inside can grow past this box's bounds without it — or the
+	   scrolling list of pages around it — ever resizing to match. */
+	overflow: hidden;
+	box-shadow: 0 0 4px var(--background-modifier-border);
+}
+
+.inkling-page-content {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	transform-origin: 0 0;
+}
+
+.inkling-pdf-page {
+	width: 100%;
+	height: 100%;
+}
+
+.inkling-annotation-layer {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	/* Deliberately `none`, not `pan-y` — `touch-action: pan-y` doesn't just
+	   permit touch to scroll, it authorizes the browser to recognize a
+	   vertical pan from ANY pointer's movement (pen included) without
+	   waiting on preventDefault(), which is what let a downward pen stroke
+	   get taken over mid-draw as a page-scroll on real-device testing.
+	   Panning (touch always; pen/mouse only when the 'pan' hand tool is
+	   selected) is instead implemented by hand in src/annotate/pointer.ts,
+	   for full control instead of depending on cross-device native-gesture
+	   timing. */
+	touch-action: none;
+}
+
+/* Two stacked canvases per page (see AnnotationController's PageMount) — a
+   `base` layer for committed annotations, repainted only when that page's
+   content actually changes, and an `overlay` layer for the in-progress
+   draft/lasso/selection/eraser-cursor, repainted on every pointer move. The
+   base layer is purely a picture (pointer-events: none); only the overlay,
+   sitting on top, receives input. */
+.inkling-annotation-base {
+	pointer-events: none;
+}
+
+.inkling-annotation-overlay {
+	z-index: 1;
+}
+
+/* A full-width top toolbar (Xodo/Samsung-Notes style), sticky within the
+   scrollable page view rather than a small draggable floating palette. */
+.inkling-toolbar {
+	position: sticky;
+	top: 0;
+	z-index: 20;
+	width: 100%;
+	align-self: stretch;
+	background-color: var(--background-secondary);
+	border-bottom: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	font-size: var(--font-ui-small);
+	/* Without this, dragging the width slider (or any other control here)
+	   near a screen edge on mobile gets picked up by Obsidian's own
+	   edge-swipe-to-open-sidebar gesture instead of the control itself —
+	   the same class of native-gesture-hijack bug as the canvas's
+	   touch-action handling in src/annotate/pointer.ts, just triggered by a
+	   different app-level gesture recognizer instead of page scrolling. */
+	touch-action: none;
+}
+
+.inkling-toolbar-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px;
+	padding: 6px 8px;
+	/* Belt-and-suspenders: with every group below also wrapping internally,
+	   nothing should ever need this, but a stray overflow no longer means
+	   "silently invisible off-screen" — it's at least reachable by scroll. */
+	max-width: 100%;
+	overflow-x: auto;
+}
+
+.inkling-toolbar-group {
+	display: flex;
+	/* The action group (Undo/Redo/Delete/Clear page/Add page — text-labeled,
+	   so wider than the icon-only tool buttons) was wider than a phone
+	   screen on its own. The parent's flex-wrap only breaks *between*
+	   groups, not inside one, so a single over-wide group didn't drop to a
+	   new line — it just ran off the right edge of the viewport, reachable
+	   only by scrolling sideways, which is what read as "not viewable at
+	   all." Wrapping every group internally means every control finds room
+	   somewhere instead of ever being pushed off-screen. */
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+}
+
+/* Flex items default to `min-width: auto`/`min-height: auto`, which for a
+   <button>/<input> falls back to the browser's own intrinsic minimum size
+   for that control — and wins over an explicit `width` if the explicit
+   value is smaller. That's what turned the round 18px color swatches into
+   pills (their explicit width lost to the intrinsic button minimum, while
+   height held), even though the same explicit-size approach looked fine on
+   the larger 28px tool buttons, which happened to already be close to
+   their own intrinsic minimum. */
+.inkling-toolbar-group > * {
+	min-width: 0;
+	min-height: 0;
+}
+
+.inkling-tool-button {
+	cursor: pointer;
+	width: 28px;
+	height: 28px;
+	line-height: 1;
+	border: 1px solid transparent;
+	border-radius: var(--radius-s);
+	background-color: transparent;
+}
+
+.inkling-tool-button.is-active {
+	background-color: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+}
+
+.inkling-color-swatch {
+	cursor: pointer;
+	/* !important throughout: Obsidian's mobile theme applies its own button
+	   sizing (almost certainly a minimum touch-target height/width, a common
+	   mobile-accessibility default) through a selector with higher
+	   specificity than a single class here — `appearance: none` alone wasn't
+	   enough to stop it from still winning on width/height, which is what
+	   kept these pill-shaped despite being sized as perfect squares. This is
+	   a deliberately narrow, cosmetic override of the host app's styles, not
+	   a pattern to reach for elsewhere. */
+	width: 18px !important;
+	height: 18px !important;
+	min-width: 18px !important;
+	min-height: 18px !important;
+	max-width: 18px !important;
+	max-height: 18px !important;
+	padding: 0 !important;
+	border: 2px solid transparent;
+	border-radius: 50% !important;
+	appearance: none;
+	-webkit-appearance: none;
+	box-sizing: border-box !important;
+}
+
+.inkling-color-swatch.is-active {
+	border-color: var(--text-normal);
+}
+
+.inkling-color-custom {
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: none;
+	background: none;
+	cursor: pointer;
+}
+
+.inkling-zoom-label {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	white-space: nowrap;
+	padding: 0 2px;
+}
+
+.inkling-width-slider {
+	width: 80px;
+}
+
+.inkling-width-number {
+	/* Generous on purpose — two narrower attempts (42px, then 38px with the
+	   native spinner stripped) both still clipped the second digit on
+	   mobile, so this leaves clear headroom rather than trimming further. */
+	width: 3em;
+	min-width: 3em;
+	box-sizing: content-box;
+	text-align: center;
+	padding: 2px 0;
+	font-size: inherit;
+	/* All three needed across Firefox/Safari (`appearance`/`-moz-appearance`)
+	   and Chromium (`-webkit-appearance`, plus the pseudo-elements below) to
+	   drop the native up/down spinner — redundant anyway with the slider
+	   right next to it, and it was eating into the box's own width. */
+	appearance: textfield;
+	-moz-appearance: textfield;
+	-webkit-appearance: textfield;
+}
+
+.inkling-width-number::-webkit-outer-spin-button,
+.inkling-width-number::-webkit-inner-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
+}
+
+.inkling-toolbar-button {
+	cursor: pointer;
+	padding: 4px 8px;
+}
+
+.inkling-toolbar-button:disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+
+.inkling-pdf-load-error {
+	padding: 24px 16px;
+	color: var(--text-muted);
+	text-align: center;
+}
