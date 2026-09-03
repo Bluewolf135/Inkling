@@ -1,5 +1,6 @@
 import { FileView, ItemView, Notice, Plugin, WorkspaceLeaf, normalizePath } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
+import { registerInkBlock } from './markdown/inkBlock';
 import { registerNoteCreation } from './noteCreation';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
 import { CORE_PDF_VIEW_TYPE, PdfAnnotateView, VIEW_TYPE_PDF } from './pdfView';
@@ -33,6 +34,7 @@ export default class InklingPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf));
 		registerNoteCreation(this);
+		registerInkBlock(this);
 
 		// Obsidian's own core PDF view stays the default for opening a .pdf —
 		// full native chrome (page number, zoom, outline) and no pdf-lib
