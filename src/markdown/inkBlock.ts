@@ -1,5 +1,5 @@
 import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
-import { AnnotationController, buildToolbar } from '../annotate';
+import { AnnotationController, buildToolbar, type Annotation } from '../annotate';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
@@ -25,6 +25,20 @@ const GESTURE_RETRY_MS = 250;
 // (where the key is a real page number) always gets the same key here.
 const BLOCK_PAGE = 1;
 
+// Manual resizing, via the drag handle along a block's bottom edge.
+//
+// Height only, never width. The surface always spans the note's column, so
+// the stored width is what fixes the scale between stored coordinates and
+// screen pixels — changing it would rescale every stroke already drawn
+// rather than give more room. Height is free to change because it only adds
+// or removes space below; nothing already drawn moves.
+//
+// Shrinking past existing ink is allowed and non-destructive: strokes are
+// kept in full and simply fall outside the visible area, so dragging back
+// down brings them straight back.
+const MIN_BLOCK_HEIGHT = 120;
+const MAX_BLOCK_HEIGHT = 4000;
+
 // One live ink block in a rendered note. Instances are created per render —
 // Obsidian re-runs the post-processor whenever the block's section is
 // re-rendered — so everything here is torn down through the render child
@@ -35,6 +49,9 @@ class InkBlockView {
 	private disposeToolbar: (() => void) | null = null;
 	private writeHandle: number | null = null;
 	private readonly toolbarHost: HTMLElement;
+	// Assigned in the constructor; held because growth (see growIfNeeded)
+	// restates the aspect ratio that gives this element its height.
+	private readonly surfaceEl!: HTMLElement;
 	private detached = false;
 	// Set when the source held something this build couldn't fully read, in
 	// which case this block renders but never saves — see the banner below.
@@ -71,6 +88,7 @@ class InkBlockView {
 		// box by walking up from the canvas it's attached to, so pinch-zoom
 		// and panning work here for free by matching that shape.
 		const surface = containerEl.createDiv({ cls: 'inkling-ink-block-surface' });
+		this.surfaceEl = surface;
 		const content = surface.createDiv({ cls: 'inkling-ink-block-content' });
 
 		// Width comes from the note's own column width; the stored size sets
@@ -95,6 +113,10 @@ class InkBlockView {
 		}
 
 		this.buildToolbarToggle();
+		// A read-only block never saves, so offering a handle that appears to
+		// resize it and then silently forgets would be worse than not having
+		// one.
+		if (!this.readOnly) this.buildResizeHandle();
 	}
 
 	private buildToolbarToggle(): void {
@@ -114,6 +136,81 @@ class InkBlockView {
 			this.disposeToolbar = buildToolbar(this.toolbarHost, this.controller);
 			toggle.addClass('is-active');
 		});
+	}
+
+	// Applies a new drawing-surface height. Both parts have to move
+	// together: the aspect ratio is what gives the surface its on-screen
+	// height, and the canvases' backing store is what gives the drawing
+	// space its extra room. Width is untouched, so the coordinate-to-screen
+	// scale is unchanged and nothing already drawn shifts or resizes.
+	private applyHeight(height: number): void {
+		const clamped = Math.round(Math.min(Math.max(height, MIN_BLOCK_HEIGHT), MAX_BLOCK_HEIGHT));
+		if (clamped === this.data.height) return;
+
+		this.data = { ...this.data, height: clamped };
+		this.surfaceEl.style.aspectRatio = `${this.data.width} / ${clamped}`;
+		// Goes through the store's live-update path, so a resize counts as
+		// exactly that rather than an edit: no history entry of its own, and
+		// no change notification recursing back into the save path.
+		this.controller.resizePage(BLOCK_PAGE, this.data.width, clamped, this.controller.getPageAnnotations(BLOCK_PAGE));
+	}
+
+	private buildResizeHandle(): void {
+		const handle = this.containerEl.createDiv({ cls: 'inkling-ink-block-handle' });
+		handle.setAttribute('aria-label', 'Drag to resize this ink block');
+
+		let drag: { pointerId: number; startY: number; startHeight: number } | null = null;
+		// Coalesces a burst of pointermoves into one resize per frame —
+		// re-backing two canvases and repainting every stroke on each move
+		// event would make dragging stutter on a long drawing.
+		let pendingHeight: number | null = null;
+		let frame: number | null = null;
+
+		const flush = () => {
+			frame = null;
+			if (pendingHeight === null) return;
+			this.applyHeight(pendingHeight);
+			pendingHeight = null;
+		};
+
+		handle.addEventListener('pointerdown', (event: PointerEvent) => {
+			drag = { pointerId: event.pointerId, startY: event.clientY, startHeight: this.data.height };
+			try {
+				handle.setPointerCapture(event.pointerId);
+			} catch (error) {
+				console.error('Inkling: setPointerCapture failed on the resize handle; continuing without it.', error);
+			}
+			// Stops the drag from also scrolling the note on touch, the same
+			// reason the drawing canvases set touch-action: none.
+			event.preventDefault();
+		});
+
+		handle.addEventListener('pointermove', (event: PointerEvent) => {
+			if (!drag || event.pointerId !== drag.pointerId) return;
+			// The handle moves in CSS pixels but height is stored in the
+			// surface's own coordinate space, so the drag distance has to be
+			// converted through the current on-screen scale — otherwise a
+			// drag moves the edge by a different amount than the pointer on
+			// every screen width but one.
+			const cssWidth = this.surfaceEl.getBoundingClientRect().width;
+			const scale = cssWidth > 0 ? this.data.width / cssWidth : 1;
+			pendingHeight = drag.startHeight + (event.clientY - drag.startY) * scale;
+			frame ??= requestAnimationFrame(flush);
+		});
+
+		const end = (event: PointerEvent) => {
+			if (!drag || event.pointerId !== drag.pointerId) return;
+			drag = null;
+			if (frame !== null) {
+				cancelAnimationFrame(frame);
+				frame = null;
+			}
+			flush();
+			this.scheduleWrite();
+		};
+
+		handle.addEventListener('pointerup', end);
+		handle.addEventListener('pointercancel', end);
 	}
 
 	private scheduleWrite(): void {
