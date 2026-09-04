@@ -1,5 +1,5 @@
 import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, setIcon, setTooltip, TFile } from 'obsidian';
-import { AnnotationController, buildToolbar, capturePointer } from '../annotate';
+import { AnnotationController, buildToolbar, capturePointer, ToolState } from '../annotate';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
@@ -24,6 +24,23 @@ const GESTURE_RETRY_MS = 250;
 // controller, so the page-keyed API the controller shares with the PDF view
 // (where the key is a real page number) always gets the same key here.
 const BLOCK_PAGE = 1;
+
+// Blocks whose tool strip the user has opened, by note path and starting
+// line. Module-level for the same reason tool state is plugin-level: an
+// InkBlockView does not survive its own save. Writing a block rewrites the
+// fence, Obsidian re-renders that section, and the render child — toolbar
+// and all — is torn down and rebuilt, so a strip opened before writing
+// vanished about a second after the pen came up. Remembering it out here
+// means the rebuilt block opens with the strip the user left open.
+//
+// A save replaces the block's body with a single line and so never moves
+// its own fence, which is what makes the line number usable as identity
+// across exactly the case this exists for. Editing prose *above* a block
+// does move it, and can leave an entry pointing at whatever block now
+// starts on that line; the cost is a tool strip opening somewhere it wasn't
+// asked for, one click to dismiss, which is not worth a block-id field in
+// everyone's notes to avoid.
+const openToolStrips = new Set<string>();
 
 // Manual resizing, via the drag handle along a block's bottom edge.
 //
@@ -57,28 +74,41 @@ class InkBlockView {
 	// which case this block renders but never saves — see the banner below.
 	private readOnly = false;
 
+	// Identifies this block across the re-render its own save causes — see
+	// openToolStrips. Null when the block's position can't be read, in which
+	// case the tool strip simply isn't remembered.
+	private readonly stripKey: string | null;
+
 	constructor(
 		private readonly plugin: Plugin,
 		private readonly ctx: MarkdownPostProcessorContext,
 		private readonly containerEl: HTMLElement,
 		source: string,
+		toolState: ToolState,
 	) {
 		const { data, malformed } = parseInkBlock(source);
 		this.data = data;
 
+		const section = ctx.getSectionInfo(containerEl);
+		this.stripKey = section ? `${ctx.sourcePath}::${section.lineStart}` : null;
+
 		this.controller = new AnnotationController({
+			toolState,
 			getCurrentPage: () => BLOCK_PAGE,
 			onAnnotationsChanged: () => this.scheduleWrite(),
 		});
 		// No pages to add or remove inside a note — that's a handwritten-note
 		// concept, and the toolbar hides the control when this is false.
 		this.controller.setCanManagePages(false);
-		// Ready to write immediately. The controller's own default is the
-		// select tool, which suits the PDF view (where you often open a file
-		// to read, and reach for a tool deliberately) but not a block you
-		// added specifically to handwrite into — landing in select mode there
+		// Ready to write immediately. The shared default is the select tool,
+		// which suits the PDF view (where you often open a file to read, and
+		// reach for a tool deliberately) but not a block you added
+		// specifically to handwrite into — landing in select mode there
 		// means a stylus does nothing at all until the toolbar is opened.
-		this.controller.setTool('pen');
+		// A suggestion, not an assignment: this runs again on every save's
+		// re-render, and forcing the pen there would snatch the lasso back
+		// from anyone who had deliberately switched to it.
+		this.controller.suggestTool('pen');
 
 		containerEl.addClass('inkling-ink-block');
 		this.toolbarHost = containerEl.createDiv({ cls: 'inkling-ink-block-toolbar-host' });
@@ -131,23 +161,39 @@ class InkBlockView {
 		if (toggle.childElementCount === 0) toggle.setText('Tools');
 		setTooltip(toggle, 'Show drawing tools');
 		toggle.setAttribute('aria-label', 'Show drawing tools');
+		// Stated up front rather than left to setOpen below, which no-ops
+		// when asked for the state it's already in: a collapsed toggle still
+		// has to announce itself as collapsed, not as un-expandable.
 		toggle.setAttribute('aria-expanded', 'false');
-		toggle.addEventListener('click', () => {
-			if (this.disposeToolbar) {
-				this.disposeToolbar();
+
+		const setOpen = (open: boolean) => {
+			if (open === (this.disposeToolbar !== null)) return;
+			if (open) {
+				// Built on demand, not for every block on screen: a note can
+				// hold many of these, and a full tool strip apiece would crowd
+				// out the writing they're meant to sit alongside. Drawing works
+				// without it, using whatever tool is currently selected.
+				this.disposeToolbar = buildToolbar(this.toolbarHost, this.controller);
+			} else {
+				this.disposeToolbar?.();
 				this.disposeToolbar = null;
-				toggle.removeClass('is-active');
-				toggle.setAttribute('aria-expanded', 'false');
-				return;
 			}
-			// Built on demand, not for every block on screen: a note can hold
-			// many of these, and a full tool strip apiece would crowd out the
-			// writing they're meant to sit alongside. Drawing works without
-			// it, using whatever tool this block was last set to.
-			this.disposeToolbar = buildToolbar(this.toolbarHost, this.controller);
-			toggle.addClass('is-active');
-			toggle.setAttribute('aria-expanded', 'true');
+			toggle.toggleClass('is-active', open);
+			toggle.setAttribute('aria-expanded', String(open));
+		};
+
+		toggle.addEventListener('click', () => {
+			const open = this.disposeToolbar === null;
+			setOpen(open);
+			// Recorded only on a real click. A strip that came and went with a
+			// re-render must not count as the user having opened or closed
+			// anything.
+			if (this.stripKey === null) return;
+			if (open) openToolStrips.add(this.stripKey);
+			else openToolStrips.delete(this.stripKey);
 		});
+
+		setOpen(this.stripKey !== null && openToolStrips.has(this.stripKey));
 	}
 
 	// Applies a new drawing-surface height. Both parts have to move
@@ -320,7 +366,11 @@ class InkBlockView {
 		this.detached = true;
 		this.disposeToolbar?.();
 		this.disposeToolbar = null;
-		this.controller.unmountAll();
+		// destroy, not unmountAll: this controller is one of many built over
+		// the plugin-wide ToolState, and only this drops its subscription to
+		// it. Every save rebuilds this view, so a controller left subscribed
+		// would be a controller leaked per save.
+		this.controller.destroy();
 	}
 }
 
@@ -347,9 +397,9 @@ class InkBlockChild extends MarkdownRenderChild {
 	}
 }
 
-export function registerInkBlock(plugin: Plugin): void {
+export function registerInkBlock(plugin: Plugin, toolState: ToolState): void {
 	plugin.registerMarkdownCodeBlockProcessor(INK_BLOCK_LANGUAGE, (source, el, ctx) => {
-		ctx.addChild(new InkBlockChild(el, () => new InkBlockView(plugin, ctx, el, source)));
+		ctx.addChild(new InkBlockChild(el, () => new InkBlockView(plugin, ctx, el, source, toolState)));
 	});
 
 	plugin.addCommand({

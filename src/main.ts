@@ -1,5 +1,6 @@
 import { FileView, ItemView, Plugin, WorkspaceLeaf, normalizePath } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
+import { ToolState } from './annotate';
 import { registerInkBlock } from './markdown/inkBlock';
 import { registerNoteCreation } from './noteCreation';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
@@ -30,14 +31,22 @@ export default class InklingPlugin extends Plugin {
 	// The action buttons added to core PDF views, kept so onunload can take
 	// them back off again.
 	private readonly actions: HTMLElement[] = [];
+	// The selected tool, its color and its width, held once for the whole
+	// plugin rather than per drawing surface. A Markdown ink block's
+	// controller is destroyed and rebuilt every time the block saves — which
+	// is a second after every burst of handwriting — so tool state kept
+	// inside one silently reverted to the defaults mid-page. Living here it
+	// outlives those rebuilds, and it means the pen carries between blocks
+	// and PDFs the way a real one does. See src/annotate/toolState.ts.
+	private readonly toolState = new ToolState();
 
 	async onload() {
 		this.configurePdfWorker();
 		this.configureAnnotationWriterWorker();
 
-		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf));
+		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf, this.toolState));
 		registerNoteCreation(this);
-		registerInkBlock(this);
+		registerInkBlock(this, this.toolState);
 
 		// Obsidian's own core PDF view stays the default for opening a .pdf —
 		// full native chrome (page number, zoom, outline) and no pdf-lib

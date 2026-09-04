@@ -14,13 +14,10 @@ import { attachPointerGestures, GestureHandlers } from './pointer';
 import { handleRects, renderBase, renderOverlay } from './render';
 import { AnnotationStore } from './store';
 import { HistoryStack } from './history';
+import { ToolState } from './toolState';
 import {
 	Annotation,
-	DEFAULT_COLOR,
-	DEFAULT_WIDTH,
 	DrawToolType,
-	MAX_WIDTH,
-	MIN_WIDTH,
 	Point,
 	Rect,
 	ShapeAnnotation,
@@ -59,6 +56,12 @@ interface PageMount {
 }
 
 export interface AnnotationControllerOptions {
+	// The plugin-wide tool/color/width selection. Passed in rather than
+	// owned here because a Markdown ink block's controller is destroyed and
+	// rebuilt every time the block saves (see markdown/inkBlock.ts), which
+	// would otherwise reset the user's pen mid-sentence. Omitted only by
+	// callers with no toolbar to keep in sync — each gets its own.
+	toolState?: ToolState;
 	onAddPage?: () => void;
 	getCurrentPage?: () => number | null;
 	// Fires once per committed gesture (draw, erase, move, resize, recolor,
@@ -94,16 +97,8 @@ export class AnnotationController {
 	private readonly pages = new Map<number, PageMount>();
 	private readonly listeners = new Set<() => void>();
 
-	private tool: ToolType = 'select';
-	private color: string = DEFAULT_COLOR;
-	private width: number = DEFAULT_WIDTH;
-	// Color/width are remembered per tool (pen, highlighter, eraser, each
-	// shape) rather than as one global pair — otherwise picking a color/size
-	// for the highlighter and then switching to the pen would carry the
-	// highlighter's values over, which reads as the pen "forgetting" its own
-	// last-used settings. 'select' has no style of its own; it just reflects
-	// whatever the most recently used styled tool left behind.
-	private readonly toolStyles = new Map<ToolType, { color: string; width: number }>();
+	private readonly toolState: ToolState;
+	private readonly unsubscribeToolState: () => void;
 
 	private selection: { pageNumber: number; ids: Set<string> } = { pageNumber: -1, ids: new Set() };
 	private drag: { pageNumber: number; mode: DragMode } | null = null;
@@ -116,11 +111,29 @@ export class AnnotationController {
 	private readonly zoomByPage = new Map<number, number>();
 
 	constructor(private readonly options: AnnotationControllerOptions = {}) {
+		this.toolState = options.toolState ?? new ToolState();
 		this.store = new AnnotationStore(
 			this.history,
 			(pageNumber) => this.redrawBase(pageNumber),
 			(pageNumber) => this.options.onAnnotationsChanged?.(pageNumber),
 		);
+		// Last, because the callback repaints through the store above.
+		// Another surface over the same shared selection can change the tool
+		// or its style at any time, so reconciling happens here rather than
+		// in setTool/setColor/setWidth — a change made through a second ink
+		// block's strip has to reach this one's toolbar and overlay too.
+		this.unsubscribeToolState = this.toolState.subscribe((change) => {
+			if (change === 'tool') {
+				this.drag = null;
+				const tool = this.toolState.getTool();
+				// A selection only survives in the one tool that can act on
+				// it, and the eraser outline only while the eraser is held.
+				if (tool !== 'select') this.selection = { pageNumber: -1, ids: new Set() };
+				if (tool !== 'eraser') this.eraserCursor = null;
+			}
+			this.notify();
+			this.redrawAllOverlay();
+		});
 	}
 
 	// ---- Page lifecycle ----
@@ -241,53 +254,58 @@ export class AnnotationController {
 		this.history.clear();
 	}
 
+	// End of life for the controller itself, as distinct from unmounting its
+	// pages. The shared ToolState outlives every controller over it, so a
+	// controller that stayed subscribed would be kept alive by it — and an
+	// ink block, rebuilt on every save, would leak one per stroke burst.
+	destroy(): void {
+		this.unmountAll();
+		this.unsubscribeToolState();
+		this.listeners.clear();
+	}
+
 	// ---- Tool / style state ----
 
+	// Pure delegation to the shared ToolState. Everything a *mounted
+	// surface* has to do about a change — dropping an in-flight drag,
+	// clearing a selection the new tool can't act on, repainting — lives in
+	// the subscription set up in the constructor instead, so it happens for
+	// a change made through any surface rather than only through this one.
+	// The exception is restyling a live selection below, which belongs to
+	// the surface the user is actually pointing at.
+
 	getTool(): ToolType {
-		return this.tool;
+		return this.toolState.getTool();
 	}
 
 	setTool(tool: ToolType): void {
-		this.tool = tool;
-		this.drag = null;
-		if (tool !== 'select') this.selection = { pageNumber: -1, ids: new Set() };
-		if (tool !== 'eraser') this.eraserCursor = null;
-		if (tool !== 'select') {
-			const style = this.styleFor(tool);
-			this.color = style.color;
-			this.width = style.width;
-		}
-		this.notify();
-		this.redrawAllOverlay();
+		this.toolState.setTool(tool);
+	}
+
+	// A starting tool for this surface, honoured only until the user picks
+	// one — see ToolState.suggestTool.
+	suggestTool(tool: ToolType): void {
+		this.toolState.suggestTool(tool);
 	}
 
 	getColor(): string {
-		return this.color;
+		return this.toolState.getColor();
 	}
 
 	setColor(color: string): void {
-		this.color = color;
-		if (this.tool !== 'select') this.toolStyles.set(this.tool, { ...this.styleFor(this.tool), color });
+		this.toolState.setColor(color);
 		if (this.selection.ids.size > 0) this.restyleSelection({ color });
-		this.notify();
 	}
 
 	getWidth(): number {
-		return this.width;
+		return this.toolState.getWidth();
 	}
 
 	setWidth(width: number): void {
-		this.width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, width));
-		if (this.tool !== 'select') this.toolStyles.set(this.tool, { ...this.styleFor(this.tool), width: this.width });
-		if (this.selection.ids.size > 0) this.restyleSelection({ width: this.width });
-		// Keep the eraser outline's displayed radius in sync while the user
-		// drags the width slider with it already showing.
-		if (this.eraserCursor) this.redrawOverlay(this.eraserCursor.pageNumber);
-		this.notify();
-	}
-
-	private styleFor(tool: ToolType): { color: string; width: number } {
-		return this.toolStyles.get(tool) ?? { color: DEFAULT_COLOR, width: DEFAULT_WIDTH };
+		this.toolState.setWidth(width);
+		// Clamped by the shared state, so read it back rather than restyling
+		// a selection with a value it refused.
+		if (this.selection.ids.size > 0) this.restyleSelection({ width: this.getWidth() });
 	}
 
 	hasSelection(): boolean {
@@ -400,7 +418,7 @@ export class AnnotationController {
 
 	private handleHover(pageNumber: number, point: Point | null): void {
 		const wasShowing = this.eraserCursor?.pageNumber === pageNumber;
-		if (this.tool !== 'eraser' || !point) {
+		if (this.getTool() !== 'eraser' || !point) {
 			this.eraserCursor = null;
 			if (wasShowing) this.redrawOverlay(pageNumber);
 			return;
@@ -410,16 +428,19 @@ export class AnnotationController {
 	}
 
 	private handleStart(pageNumber: number, point: Point): void {
-		switch (this.tool) {
+		// Bound once so the switch below narrows it — a getter call in each
+		// case would be opaque to the narrowing and force a cast.
+		const tool = this.getTool();
+		switch (tool) {
 			case 'pen':
 			case 'highlighter':
-				this.drag = { pageNumber, mode: { kind: 'draw', tool: this.tool, points: [point] } };
+				this.drag = { pageNumber, mode: { kind: 'draw', tool, points: [point] } };
 				break;
 			case 'line':
 			case 'rectangle':
 			case 'oval':
 			case 'arrow':
-				this.drag = { pageNumber, mode: { kind: 'shape', tool: this.tool, start: point, end: point } };
+				this.drag = { pageNumber, mode: { kind: 'shape', tool, start: point, end: point } };
 				break;
 			case 'eraser':
 				this.drag = { pageNumber, mode: { kind: 'erase', before: this.store.getPage(pageNumber) } };
@@ -593,7 +614,7 @@ export class AnnotationController {
 	// host support) commits as drawn, same as every other tool.
 	private commitDrawStroke(pageNumber: number, mode: { tool: DrawToolType; points: Point[] }): void {
 		if (mode.tool === 'highlighter') {
-			const snapped = this.options.onSnapHighlighterStroke?.(pageNumber, mode.points, this.color);
+			const snapped = this.options.onSnapHighlighterStroke?.(pageNumber, mode.points, this.getColor());
 			if (snapped && snapped.length > 0) {
 				this.commitNew(pageNumber, snapped);
 				return;
@@ -603,7 +624,7 @@ export class AnnotationController {
 	}
 
 	private strokeFromDraft(mode: { tool: DrawToolType; points: Point[] }): StrokeAnnotation {
-		return { id: createId(), kind: 'stroke', tool: mode.tool, color: this.color, width: this.width, points: mode.points };
+		return { id: createId(), kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.getWidth(), points: mode.points };
 	}
 
 	private shapeFromDraft(mode: { tool: ShapeToolType; start: Point; end: Point }): ShapeAnnotation {
@@ -611,8 +632,8 @@ export class AnnotationController {
 			id: createId(),
 			kind: 'shape',
 			tool: mode.tool,
-			color: this.color,
-			width: this.width,
+			color: this.getColor(),
+			width: this.getWidth(),
 			start: mode.start,
 			end: mode.end,
 		};
@@ -623,7 +644,7 @@ export class AnnotationController {
 	}
 
 	private eraserRadius(): number {
-		return Math.max(this.width * ERASER_RADIUS_FACTOR, MIN_ERASER_RADIUS);
+		return Math.max(this.getWidth() * ERASER_RADIUS_FACTOR, MIN_ERASER_RADIUS);
 	}
 
 	private restyleSelection(patch: Partial<Pick<Annotation, 'color' | 'width'>>): void {
@@ -668,14 +689,14 @@ export class AnnotationController {
 
 	private draftFor(mode: DragMode | null): Annotation | null {
 		if (!mode) return null;
-		if (mode.kind === 'draw') return { id: DRAFT_ID, kind: 'stroke', tool: mode.tool, color: this.color, width: this.width, points: mode.points };
+		if (mode.kind === 'draw') return { id: DRAFT_ID, kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.getWidth(), points: mode.points };
 		if (mode.kind === 'shape') {
 			return {
 				id: DRAFT_ID,
 				kind: 'shape',
 				tool: mode.tool,
-				color: this.color,
-				width: this.width,
+				color: this.getColor(),
+				width: this.getWidth(),
 				start: mode.start,
 				end: mode.end,
 			};

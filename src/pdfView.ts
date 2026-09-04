@@ -1,7 +1,7 @@
 import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { AnnotationController, buildToolbar, MAX_ZOOM, type Annotation, type Point } from './annotate';
+import { AnnotationController, buildToolbar, MAX_ZOOM, ToolState, type Annotation, type Point } from './annotate';
 import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
@@ -320,9 +320,12 @@ export class PdfAnnotateView extends FileView {
 	// either of the two places that end the wait (pages ready, or a failure).
 	private loadingEl: HTMLElement | null = null;
 
-	constructor(leaf: WorkspaceLeaf) {
+	constructor(leaf: WorkspaceLeaf, toolState: ToolState) {
 		super(leaf);
 		this.controller = new AnnotationController({
+			// Shared with every other annotating surface, so the pen you set
+			// up in a note is the pen you get in a PDF (see annotate/toolState).
+			toolState,
 			onAddPage: () => void this.addPage(),
 			getCurrentPage: () => this.currentPageNumber,
 			onAnnotationsChanged: (pageNumber) => this.markPageDirty(pageNumber),
@@ -552,6 +555,15 @@ export class PdfAnnotateView extends FileView {
 		await this.flushAnnotationsIfDirty(this.currentFile);
 		this.currentFile = null;
 		this.teardown();
+	}
+
+	// The leaf itself going away, as opposed to teardown()'s per-file reset:
+	// the controller is built once per leaf, and it holds a subscription to
+	// the plugin-wide ToolState, which outlives every view over it. Without
+	// this, each PDF leaf ever opened would stay reachable from that state
+	// for the rest of the session.
+	async onClose(): Promise<void> {
+		this.controller.destroy();
 	}
 
 	private teardown() {
