@@ -17,7 +17,6 @@ export const PAGE_SIZE = PageSizes.Letter;
 // file; the PDF's own Info dictionary is the source of truth.
 const TEMPLATE_KEYWORD_PREFIX = 'inkling:template=';
 
-const RULE_MARGIN = 54; // ~0.75in
 const RULE_SPACING = 24; // ~1/3in
 const RULE_COLOR = rgb(0.7, 0.78, 0.92);
 const RULE_THICKNESS = 0.75;
@@ -27,12 +26,21 @@ const DOT_SPACING = 18; // ~0.25in
 const DOT_RADIUS = 0.6;
 const DOT_COLOR = rgb(0.55, 0.55, 0.6);
 
+// Ruled edge to edge and top to bottom, rather than inside the 0.75in
+// margin this used to leave on all four sides. That margin made sense for
+// paper you print and hold; on screen it just fenced the writing into a box
+// with a dead border around it, and on a phone — where the page is scaled
+// down to a few hundred pixels wide — the unruled band cost a noticeable
+// share of the space actually available to write in.
 function drawLinedRuling(page: PDFPage): void {
 	const { width, height } = page.getSize();
-	for (let y = height - RULE_MARGIN; y > RULE_MARGIN; y -= RULE_SPACING) {
+	// Starts one full line-height below the top edge rather than at it: a
+	// rule drawn exactly on y = height sits half off the page, and reads as
+	// a cropped line instead of the first line to write on.
+	for (let y = height - RULE_SPACING; y > 0; y -= RULE_SPACING) {
 		page.drawLine({
-			start: { x: RULE_MARGIN, y },
-			end: { x: width - RULE_MARGIN, y },
+			start: { x: 0, y },
+			end: { x: width, y },
 			thickness: RULE_THICKNESS,
 			color: RULE_COLOR,
 		});
