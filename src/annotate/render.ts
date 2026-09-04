@@ -17,18 +17,24 @@ const CHROME_LINE = 'rgba(0, 0, 0, 0.75)';
 // Runs `path` twice, once as the halo underneath and once as the line
 // itself. The caller lays down the path and picks the top colour; widths
 // are handled here so every piece of chrome gets the same weight of halo.
+//
+// `dash` belongs to this function rather than to the caller's `path`, and
+// that is the whole point of it being a parameter: the halo must stay
+// solid while the line above it is dashed, since the gaps in a dashed line
+// are exactly where the contrast is needed. A caller that set the dash
+// inside its own path callback would set it for both passes — the halo
+// would come out dashed and in phase with the line covering it, doing
+// nothing at all.
 function withHalo(
 	ctx: CanvasRenderingContext2D,
 	lineWidth: number,
 	color: string,
 	path: () => void,
+	dash?: number[],
 ): void {
 	ctx.save();
 	ctx.lineWidth = lineWidth + 2;
 	ctx.strokeStyle = CHROME_HALO;
-	// The halo is solid even when the line on top is dashed: a dashed halo
-	// would leave the gaps unprotected, which is exactly where a dashed line
-	// needs the contrast most.
 	ctx.setLineDash([]);
 	path();
 	ctx.stroke();
@@ -37,10 +43,13 @@ function withHalo(
 	ctx.save();
 	ctx.lineWidth = lineWidth;
 	ctx.strokeStyle = color;
+	if (dash) ctx.setLineDash(dash);
 	path();
 	ctx.stroke();
 	ctx.restore();
 }
+
+const CHROME_DASH = [4, 3];
 
 function drawPolyline(ctx: CanvasRenderingContext2D, points: Point[]): void {
 	const [first, ...rest] = points;
@@ -105,11 +114,16 @@ function drawSelectionOutline(ctx: CanvasRenderingContext2D, box: Rect): void {
 	const y = box.minY - 6;
 	const w = box.maxX - box.minX + 12;
 	const h = box.maxY - box.minY + 12;
-	withHalo(ctx, 1, SELECTION_COLOR, () => {
-		ctx.setLineDash([4, 3]);
-		ctx.beginPath();
-		ctx.rect(x, y, w, h);
-	});
+	withHalo(
+		ctx,
+		1,
+		SELECTION_COLOR,
+		() => {
+			ctx.beginPath();
+			ctx.rect(x, y, w, h);
+		},
+		CHROME_DASH,
+	);
 }
 
 export function handleRects(box: Rect): Record<'nw' | 'ne' | 'sw' | 'se', Rect> {
@@ -210,10 +224,7 @@ export function renderOverlay(ctx: CanvasRenderingContext2D, options: OverlayOpt
 		ctx.fill();
 		ctx.restore();
 
-		withHalo(ctx, 1, SELECTION_COLOR, () => {
-			ctx.setLineDash([4, 3]);
-			path();
-		});
+		withHalo(ctx, 1, SELECTION_COLOR, path, CHROME_DASH);
 	}
 
 	if (options.eraserCursor) drawEraserCursor(ctx, options.eraserCursor.point, options.eraserCursor.radius);
