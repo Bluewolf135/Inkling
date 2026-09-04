@@ -1,4 +1,4 @@
-import { App, Modal, Plugin, Setting, TFile, TFolder, normalizePath } from 'obsidian';
+import { App, Modal, Notice, Plugin, Setting, TFile, TFolder, normalizePath } from 'obsidian';
 import { toArrayBuffer } from './binary';
 import { VIEW_TYPE_PDF } from './pdfView';
 import { createHandwrittenNoteBytes, TEMPLATE_STYLE_LABELS, TEMPLATE_STYLES, TemplateStyle } from './templates';
@@ -101,15 +101,21 @@ function getTargetFolder(app: App): TFolder {
 
 function openCreateNoteModal(app: App, folder: TFolder): void {
 	new CreateHandwrittenNoteModal(app, (name, style) => {
-		void createHandwrittenNote(app, folder, name, style)
-			// A brand-new handwritten note is created specifically to be
-			// written on right away — opened straight into Inkling's edit
-			// view rather than `openFile`'s default extension resolution,
-			// which (now that Inkling no longer claims .pdf outright, see
-			// main.ts) would otherwise land on Obsidian's read-only core
-			// PDF view first.
-			.then((file) => app.workspace.getLeaf(true).setViewState({ type: VIEW_TYPE_PDF, state: { file: file.path } }))
-			.catch((error) => console.error('Inkling: failed to create handwritten note.', error));
+		void (async () => {
+			try {
+				const file = await createHandwrittenNote(app, folder, name, style);
+				// A brand-new handwritten note is created specifically to be
+				// written on right away — opened straight into Inkling's edit
+				// view rather than `openFile`'s default extension resolution,
+				// which (now that Inkling no longer claims .pdf outright, see
+				// main.ts) would otherwise land on Obsidian's read-only core
+				// PDF view first.
+				await app.workspace.getLeaf(true).setViewState({ type: VIEW_TYPE_PDF, state: { file: file.path } });
+			} catch (error) {
+				console.error('Inkling: failed to create handwritten note.', error);
+				new Notice('Inkling: could not create the handwritten note.');
+			}
+		})();
 	}).open();
 }
 

@@ -34,6 +34,31 @@ export interface GestureHandlers {
 // rejects an implausibly large "pen" contact, never a normal one.
 const MAX_PLAUSIBLE_PEN_CONTACT_PX = 40;
 
+// Stylus pointer-capture behavior varies across Android vendors/WebViews in
+// practice (see the plan's Architecture notes) — a capture failure shouldn't
+// abort the whole gesture, just lose the "keeps tracking outside the
+// element" benefit.
+//
+// Reported once per session, not once per gesture. A device whose capture
+// fails will fail on every single stroke, and one console message per
+// stroke is exactly the noise Obsidian's plugin guidelines ask plugins not
+// to produce — enough to bury anything else in the console during a
+// handwriting session.
+let pointerCaptureFailureLogged = false;
+
+export function capturePointer(el: Element, pointerId: number): void {
+	try {
+		el.setPointerCapture(pointerId);
+	} catch (error) {
+		if (pointerCaptureFailureLogged) return;
+		pointerCaptureFailureLogged = true;
+		console.error(
+			'Inkling: setPointerCapture failed; continuing without it. Further failures this session will not be logged.',
+			error,
+		);
+	}
+}
+
 // Pinch-zoom lets writing be more precise than the page's base render scale
 // would otherwise allow: zooming in means the same physical pen movement
 // covers fewer canvas pixels, so strokes drawn while zoomed come out finer.
@@ -214,11 +239,7 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 			lastTime: event.timeStamp,
 			velocity: 0,
 		};
-		try {
-			el.setPointerCapture(event.pointerId);
-		} catch (error) {
-			console.error('Inkling: setPointerCapture failed; continuing without it.', error);
-		}
+		capturePointer(el, event.pointerId);
 		event.preventDefault();
 	};
 
@@ -270,11 +291,7 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 			touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
 			if (touches.size === 2) {
 				startPinch();
-				try {
-					el.setPointerCapture(event.pointerId);
-				} catch (error) {
-					console.error('Inkling: setPointerCapture failed; continuing without it.', error);
-				}
+				capturePointer(el, event.pointerId);
 				event.preventDefault();
 			} else if (touches.size === 1) {
 				startTouchPan(event);
@@ -290,15 +307,7 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 		if (!handlers) return;
 
 		activePointerId = event.pointerId;
-		try {
-			// Stylus pointer-capture behavior varies across Android
-			// vendors/WebViews in practice (see the plan's Architecture
-			// notes) — a capture failure shouldn't abort the whole gesture,
-			// just lose the "keeps tracking outside the element" benefit.
-			el.setPointerCapture(event.pointerId);
-		} catch (error) {
-			console.error('Inkling: setPointerCapture failed; continuing without it.', error);
-		}
+		capturePointer(el, event.pointerId);
 		event.preventDefault();
 		handlers.onStart(toPoint(event), event);
 	};

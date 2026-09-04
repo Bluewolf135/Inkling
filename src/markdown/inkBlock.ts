@@ -1,5 +1,5 @@
 import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, setIcon, setTooltip, TFile } from 'obsidian';
-import { AnnotationController, buildToolbar } from '../annotate';
+import { AnnotationController, buildToolbar, capturePointer } from '../annotate';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
@@ -188,11 +188,7 @@ class InkBlockView {
 
 		handle.addEventListener('pointerdown', (event: PointerEvent) => {
 			drag = { pointerId: event.pointerId, startY: event.clientY, startHeight: this.data.height };
-			try {
-				handle.setPointerCapture(event.pointerId);
-			} catch (error) {
-				console.error('Inkling: setPointerCapture failed on the resize handle; continuing without it.', error);
-			}
+			capturePointer(handle, event.pointerId);
 			// Stops the drag from also scrolling the note on touch, the same
 			// reason the drawing canvases set touch-action: none.
 			event.preventDefault();

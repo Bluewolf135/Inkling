@@ -6,7 +6,7 @@ import { MAX_WIDTH, MIN_WIDTH, PRESET_COLORS, ToolType } from './types';
 // the strip reads as part of the app instead of the emoji/box-drawing mix it
 // used to be — those rendered at a different weight and baseline from every
 // other control in Obsidian, and at wildly different sizes across platforms
-// (an emoji pencil is a full-colour glyph on Windows and a thin monochrome
+// (an emoji pencil is a full-color glyph on Windows and a thin monochrome
 // one on Linux). `fallback` is the old glyph, used only if setIcon draws
 // nothing: an icon renamed out from under an older Obsidian (the manifest
 // still admits releases back to 1.4.4) should leave a button that's merely
@@ -93,13 +93,13 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	}
 
 	const colorGroup = el('div', 'inkling-toolbar-group inkling-color-group');
-	colorGroup.setAttribute('aria-label', 'Colour');
+	colorGroup.setAttribute('aria-label', 'Color');
 	const colorButtons = new Map<string, HTMLButtonElement>();
 	for (const { value, label } of PRESET_COLORS) {
 		const swatch = el('button', 'clickable-icon inkling-color-swatch');
 		swatch.type = 'button';
 		// The one thing about a swatch that can't live in the stylesheet:
-		// its colour *is* the data.
+		// its color *is* the data.
 		swatch.setCssProps({ '--inkling-swatch-color': value });
 		setTooltip(swatch, label);
 		swatch.setAttribute('aria-label', label);
@@ -109,13 +109,13 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	}
 	const customColor = el('input', 'inkling-color-custom');
 	customColor.type = 'color';
-	setTooltip(customColor, 'Custom colour');
-	customColor.setAttribute('aria-label', 'Custom colour');
+	setTooltip(customColor, 'Custom color');
+	customColor.setAttribute('aria-label', 'Custom color');
 	customColor.addEventListener('input', () => controller.setColor(customColor.value));
 	colorGroup.appendChild(customColor);
 
 	const widthGroup = el('div', 'inkling-toolbar-group inkling-width-group');
-	// A dot drawn at the current stroke width in the current colour. The
+	// A dot drawn at the current stroke width in the current color. The
 	// slider and the number say what the width *is*; this shows what it will
 	// look like, which is the actual question being asked at the moment
 	// someone reaches for this control.

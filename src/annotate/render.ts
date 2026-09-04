@@ -6,7 +6,7 @@ const HANDLE_SIZE = 10;
 
 // Interactive chrome — the eraser ring, the selection outline, the lasso —
 // is drawn in two passes: a pale halo first, then the real line on top of
-// it, a little thinner. No single colour survives every background this
+// it, a little thinner. No single color survives every background this
 // chrome has to sit on. A flat dark ring vanished against a dark surface,
 // and (even on white paper) against the patch of dense black ink you are
 // most likely to be erasing in the first place. Two passes means whichever
@@ -15,7 +15,7 @@ const CHROME_HALO = 'rgba(255, 255, 255, 0.9)';
 const CHROME_LINE = 'rgba(0, 0, 0, 0.75)';
 
 // Runs `path` twice, once as the halo underneath and once as the line
-// itself. The caller lays down the path and picks the top colour; widths
+// itself. The caller lays down the path and picks the top color; widths
 // are handled here so every piece of chrome gets the same weight of halo.
 //
 // `dash` belongs to this function rather than to the caller's `path`, and

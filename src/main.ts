@@ -82,6 +82,15 @@ export default class InklingPlugin extends Plugin {
 		if (!leaf || !(view instanceof ItemView) || view.getViewType() !== CORE_PDF_VIEW_TYPE) return;
 		if (this.decoratedViews.has(view)) return;
 		this.decoratedViews.add(view);
+		// Buttons belonging to PDF views that have since been closed went out
+		// of the document with them, but stayed in this array — which only
+		// ever grew, for the whole session, one entry per PDF ever opened.
+		// Dropping them here keeps it to what actually still needs removing
+		// at unload.
+		for (let i = this.actions.length - 1; i >= 0; i--) {
+			const action = this.actions[i];
+			if (action && !action.isConnected) this.actions.splice(i, 1);
+		}
 		this.actions.push(view.addAction('pencil', 'Annotate with Inkling', () => void this.switchToInkling(leaf)));
 	}
 

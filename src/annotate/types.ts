@@ -38,7 +38,7 @@ export interface Rect {
 export const DEFAULT_COLOR = '#1e1e1e';
 
 // Named, not just hex: the swatches' tooltips read "Red" rather than
-// "#e03131", which is what a person picking a pen colour actually wants to
+// "#e03131", which is what a person picking a pen color actually wants to
 // see on hover.
 export interface PresetColor {
 	value: string;

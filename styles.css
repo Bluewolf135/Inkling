@@ -1,4 +1,4 @@
-/* Everything here is expressed in Obsidian's own theme variables (colours,
+/* Everything here is expressed in Obsidian's own theme variables (colors,
    radii, shadows, spacing, icon sizes) rather than hard-coded values, so the
    plugin inherits whatever theme the vault is running and looks like part of
    the app in both light and dark. The few exceptions are called out where
@@ -53,7 +53,7 @@
 	   a blank sheet rather than a hole showing the scroll container.
 
 	   Paper white, not `--background-primary`: pdf.js paints a white page,
-	   so a theme-coloured placeholder is wrong the moment the render lands.
+	   so a theme-colored placeholder is wrong the moment the render lands.
 	   On a dark theme it was worse than wrong — a page still scrolling into
 	   view was a black rectangle that then flashed to white, which is
 	   precisely what the old "goes black" report looked like. */
@@ -259,7 +259,7 @@
 	box-shadow: none;
 	color: var(--text-muted);
 	/* Obsidian's setIcon draws a Lucide <svg class="svg-icon">, which sizes
-	   itself from --icon-size and colours itself from --icon-color — so the
+	   itself from --icon-size and colors itself from --icon-color — so the
 	   button styles its icon by setting those rather than by reaching into
 	   the SVG. Also covers the text fallback in toolbar.ts, for an icon name
 	   an older Obsidian doesn't know. */
@@ -321,11 +321,11 @@
 	appearance: none;
 	-webkit-appearance: none;
 	box-sizing: border-box !important;
-	/* The swatch's own colour comes from src/annotate/toolbar.ts — it's the
+	/* The swatch's own color comes from src/annotate/toolbar.ts — it's the
 	   one thing about a swatch that is data rather than styling. */
 	background-color: var(--inkling-swatch-color) !important;
 	/* A hairline drawn *inside* the circle, so a swatch close to the page
-	   colour (near-white through the custom picker, or the near-black
+	   color (near-white through the custom picker, or the near-black
 	   default ink on a dark theme) still has a visible edge. */
 	box-shadow: inset 0 0 0 1px var(--background-modifier-border);
 	transition: transform 100ms ease, box-shadow 100ms ease;
@@ -336,10 +336,10 @@
 }
 
 /* A ring drawn outside the swatch rather than a border inside it: a border
-   would eat into the 18px circle and make the selected colour visibly
+   would eat into the 18px circle and make the selected color visibly
    smaller than its neighbours, whereas a shadow takes up no layout space at
    all (which is also what keeps it clear of the !important sizing above).
-   The first ring is a gap in the toolbar's own colour, so the accent ring
+   The first ring is a gap in the toolbar's own color, so the accent ring
    reads as separate from the swatch instead of a fat outline on it. */
 .inkling-toolbar .inkling-color-swatch.is-active {
 	box-shadow:
@@ -348,9 +348,9 @@
 		0 0 0 4px var(--interactive-accent);
 }
 
-/* The native colour picker, sitting after the presets. Given a border and a
+/* The native color picker, sitting after the presets. Given a border and a
    rounded-square shape on purpose, so it doesn't read as a seventh preset
-   that just happens to be whatever colour was last chosen. */
+   that just happens to be whatever color was last chosen. */
 .inkling-toolbar .inkling-color-custom {
 	flex: none;
 	width: 24px;
@@ -366,8 +366,8 @@
 /* Chromium draws an <input type="color"> as a padded wrapper around an
    inner swatch element, and both carry their own default padding/border.
    Left alone the swatch came out as a narrow vertical sliver inside the
-   box — it read as a rendering glitch rather than a colour well — so these
-   two pseudo-elements make the colour fill the control. */
+   box — it read as a rendering glitch rather than a color well — so these
+   two pseudo-elements make the color fill the control. */
 .inkling-toolbar .inkling-color-custom::-webkit-color-swatch-wrapper {
 	padding: 0;
 }
@@ -381,7 +381,7 @@
 	gap: var(--size-4-2);
 }
 
-/* Shows what the current width and colour will actually look like — the
+/* Shows what the current width and color will actually look like — the
    slider and number say what the width *is*, which is a less direct answer
    to the question being asked at the moment someone reaches for them. */
 .inkling-width-preview {
@@ -583,7 +583,7 @@
    near-black sheet — the strokes were there, and saved correctly, but
    invisible, and so was the eraser ring. Paper also keeps the plugin
    self-consistent: the PDF view renders white pages in dark mode too, and a
-   stroke is stored as one literal colour that has to look the same to
+   stroke is stored as one literal color that has to look the same to
    anyone opening the note under any theme. Override --inkling-paper in a
    CSS snippet to re-tint it. */
 .inkling-ink-block-surface {
