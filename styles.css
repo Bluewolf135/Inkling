@@ -4,7 +4,15 @@
    the app in both light and dark. The few exceptions are called out where
    they appear. */
 
-.inkling-pdf-view {
+/* Qualified with .view-content — the class Obsidian puts on every view's
+   content element, which this one is — purely to win a specificity fight.
+   Themes set `padding-top` on .view-content as a longhand, and a longhand
+   beats the top component of a shorthand written at equal specificity that
+   loads earlier. The result was a 12px band above a toolbar that is
+   supposed to be flush to the top of the scrollport: pages scrolled through
+   it, and their corner page numbers showed above (and, since the bar is
+   translucent, faintly through) it. */
+.view-content.inkling-pdf-view {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
