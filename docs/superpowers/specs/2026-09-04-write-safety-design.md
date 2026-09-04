@@ -83,8 +83,16 @@ On entering annotate mode, compare:
 
 - page count
 - per-page `/MediaBox` dimensions
-- per-page text-item count, sampled across at most 10 pages spread through the
-  document rather than all of them
+- per-page rotation
+- per-page annotation count
+
+Page count is free on both sides. The other three each cost a `pdf.js`
+`getPage` call, so they are sampled across at most 10 pages spread through
+the document rather than checked on every page.
+
+(An earlier draft called for comparing per-page text-item counts. `pdf-lib`
+has no text extraction and cannot produce that number, so the check was not
+implementable as written.)
 
 Disagreement means `pdf-lib` does not model this file faithfully. The view
 opens **read-only**: pages render, existing annotations display, all
@@ -263,6 +271,5 @@ confirmation because simulated tests cannot reach them:
   entirely. Does not change this design, but the user should check it: if
   big textbooks are not syncing, there is no history for exactly the files
   that matter most.
-- Whether §1's text-item sampling threshold needs tuning for very large
-  books. Start at 10 pages spread across the document; revisit if it proves
-  too weak or too slow.
+- Whether §1's 10-page sampling threshold is the right strength for very
+  large books. Revisit if it proves too weak or too slow.
