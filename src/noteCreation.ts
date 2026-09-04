@@ -16,25 +16,41 @@ class CreateHandwrittenNoteModal extends Modal {
 
 	onOpen(): void {
 		this.setTitle('Create handwritten note');
+		// Obsidian styles its own modals off these classes; without them this
+		// one sat with settings-sized rows in an unpadded box, which is why
+		// it read as noticeably plainer than the app's own dialogs.
+		this.modalEl.addClass('mod-confirmation');
+		this.contentEl.addClass('inkling-create-note-modal');
 
 		let textInputEl: HTMLInputElement | undefined;
 
-		new Setting(this.contentEl).setName('Name').addText((text) => {
-			textInputEl = text.inputEl;
-			text.setValue(this.name).onChange((value) => (this.name = value));
-			text.inputEl.addEventListener('keydown', (event) => {
-				if (event.key === 'Enter') this.submit();
+		new Setting(this.contentEl)
+			.setName('Name')
+			.setDesc('Saved as a PDF beside the note you have open.')
+			.addText((text) => {
+				textInputEl = text.inputEl;
+				text.setPlaceholder(DEFAULT_NAME);
+				text.setValue(this.name).onChange((value) => (this.name = value));
+				text.inputEl.addEventListener('keydown', (event) => {
+					if (event.key === 'Enter') this.submit();
+				});
 			});
-		});
 
-		new Setting(this.contentEl).setName('Template').addDropdown((dropdown) => {
-			for (const style of TEMPLATE_STYLES) dropdown.addOption(style, TEMPLATE_STYLE_LABELS[style]);
-			dropdown.setValue(this.style).onChange((value) => (this.style = value as TemplateStyle));
-		});
+		new Setting(this.contentEl)
+			.setName('Template')
+			.setDesc('The ruling printed on every page, including pages added later.')
+			.addDropdown((dropdown) => {
+				for (const style of TEMPLATE_STYLES) dropdown.addOption(style, TEMPLATE_STYLE_LABELS[style]);
+				dropdown.setValue(this.style).onChange((value) => (this.style = value as TemplateStyle));
+			});
 
-		new Setting(this.contentEl).addButton((button) =>
-			button.setButtonText('Create').setCta().onClick(() => this.submit()),
-		);
+		// The button row, not another labelled setting — `mod-button-row`
+		// right-aligns it and drops the divider a plain Setting draws, so
+		// Create doesn't look like the value half of a nameless row.
+		new Setting(this.contentEl)
+			.setClass('mod-button-row')
+			.addButton((button) => button.setButtonText('Cancel').onClick(() => this.close()))
+			.addButton((button) => button.setButtonText('Create').setCta().onClick(() => this.submit()));
 
 		textInputEl?.focus();
 		textInputEl?.select();

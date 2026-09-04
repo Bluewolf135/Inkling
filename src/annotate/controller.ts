@@ -192,6 +192,37 @@ export class AnnotationController {
 		this.notify();
 	}
 
+	// How many pages the surface being annotated has, purely so the toolbar
+	// can show a "12 / 195" readout. Not derived from `this.pages` — that map
+	// only holds pages currently *mounted*, which for a long PDF is the
+	// handful near the viewport (see src/pdfView.ts's page recycling), not
+	// the document's length. Defaults to a single page, which is what a
+	// Markdown ink block is and always stays.
+	private pageCount = 1;
+
+	getPageCount(): number {
+		return this.pageCount;
+	}
+
+	setPageCount(count: number): void {
+		if (count === this.pageCount) return;
+		this.pageCount = count;
+		this.notify();
+	}
+
+	// The page the reader is currently on, as the host view understands it.
+	getCurrentPageNumber(): number {
+		return this.options.getCurrentPage?.() ?? 1;
+	}
+
+	// Repaints the toolbar from state this controller doesn't own and can't
+	// observe — the current page number, which changes as the host view is
+	// scrolled rather than through any call made here. src/pdfView.ts calls
+	// this when its own tracking moves to a different page.
+	refreshUi(): void {
+		this.notify();
+	}
+
 	unmountPage(pageNumber: number): void {
 		const mount = this.pages.get(pageNumber);
 		if (!mount) return;

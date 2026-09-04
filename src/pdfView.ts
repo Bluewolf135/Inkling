@@ -1,4 +1,4 @@
-import { FileView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
+import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
 import { AnnotationController, buildToolbar, MAX_ZOOM, type Annotation, type Point } from './annotate';
@@ -316,6 +316,9 @@ export class PdfAnnotateView extends FileView {
 	// it can arrive before onLoadFile has finished creating them, in which
 	// case scrollToPage would have nothing to find yet.
 	private pendingScrollToPage: number | null = null;
+	// The "opening…" placeholder, held so it can be taken down again from
+	// either of the two places that end the wait (pages ready, or a failure).
+	private loadingEl: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf) {
 		super(leaf);
@@ -390,6 +393,15 @@ export class PdfAnnotateView extends FileView {
 		this.teardown();
 		this.contentEl.addClass('inkling-pdf-view');
 		this.disposeToolbar = buildToolbar(this.contentEl, this.controller);
+
+		// Everything below this point is asynchronous — reading the file,
+		// parsing it in the writer worker, then opening it in pdf.js — and a
+		// large document spends a noticeable stretch in it. Until now that
+		// stretch showed an empty content area under a live toolbar, which
+		// reads as "the plugin opened the file and it's blank" rather than
+		// "still working". Removed the moment there are placeholders to look
+		// at instead, and by showLoadError if we never get that far.
+		this.showLoading();
 
 		// The annotation-writer worker parses the file (off the main thread —
 		// see its own comment for why) to: read back our own previously-saved
@@ -508,12 +520,21 @@ export class PdfAnnotateView extends FileView {
 		);
 		this.observer = observer;
 
+		this.controller.setPageCount(pdf.numPages);
+		this.clearLoading();
+
 		for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
 			const placeholder = this.contentEl.createDiv({
 				cls: 'inkling-pdf-page-placeholder',
 			});
 			placeholder.dataset[PAGE_NUMBER_ATTR] = String(pageNumber);
 			sizePlaceholder(placeholder, estimatedViewport.width, estimatedViewport.height);
+			// A small page number in the corner of the sheet. A sibling of
+			// the zoomable `.inkling-page-content` rather than a child, so
+			// pinch-zooming a page doesn't blow the number up with it, and
+			// pointer-events: none in styles.css so it can never swallow a
+			// stroke that starts on top of it.
+			placeholder.createDiv({ cls: 'inkling-page-number', text: String(pageNumber) });
 			observer.observe(placeholder);
 		}
 
@@ -541,6 +562,9 @@ export class PdfAnnotateView extends FileView {
 		this.visiblePages.clear();
 		this.onScreenPages.clear();
 		this.currentPageNumber = 1;
+		// Back to a single page, so the toolbar's readout can't briefly show
+		// the *previous* file's length while the next one is still loading.
+		this.controller.setPageCount(1);
 		this.viewports.clear();
 		this.pageCanvases.clear();
 		this.renderedScales.clear();
@@ -564,6 +588,9 @@ export class PdfAnnotateView extends FileView {
 		this.disposeToolbar?.();
 		this.disposeToolbar = null;
 		this.contentEl.empty();
+		// Already gone with the emptied contentEl — this just stops us
+		// holding a detached node until the next load replaces it.
+		this.loadingEl = null;
 	}
 
 	private onIntersect(entries: IntersectionObserverEntry[], token: number) {
@@ -599,11 +626,17 @@ export class PdfAnnotateView extends FileView {
 			}
 		}
 
+		const previousPageNumber = this.currentPageNumber;
 		if (this.onScreenPages.size > 0) {
 			this.currentPageNumber = Math.min(...this.onScreenPages);
 		} else if (this.visiblePages.size > 0) {
 			this.currentPageNumber = Math.min(...this.visiblePages);
 		}
+		// The toolbar's page readout is the only thing watching this, and
+		// scrolling isn't something the controller can observe for itself —
+		// so tell it, but only on an actual change, since this handler runs
+		// on every intersection callback while scrolling.
+		if (this.currentPageNumber !== previousPageNumber) this.controller.refreshUi();
 
 		this.releaseDistantPages();
 	}
@@ -964,10 +997,28 @@ export class PdfAnnotateView extends FileView {
 	// this can fail) stays up, but with an explanation in place of pages
 	// that never rendered, rather than nothing at all.
 	private showLoadError(): void {
-		this.contentEl.createDiv({
-			cls: 'inkling-pdf-load-error',
+		this.clearLoading();
+		const box = this.contentEl.createDiv({ cls: 'inkling-pdf-message' });
+		setIcon(box.createDiv({ cls: 'inkling-pdf-message-icon' }), 'file-warning');
+		box.createDiv({
+			cls: 'inkling-pdf-message-text',
 			text: "Inkling couldn't open this PDF. Try reopening it, or view it in reading mode.",
 		});
+	}
+
+	// A spinner and a line of text while the file is being read and parsed —
+	// see the call in onLoadFile for why the wait needed something in it.
+	private showLoading(): void {
+		this.clearLoading();
+		const box = this.contentEl.createDiv({ cls: 'inkling-pdf-message inkling-pdf-loading' });
+		box.createDiv({ cls: 'inkling-pdf-spinner' });
+		box.createDiv({ cls: 'inkling-pdf-message-text', text: 'Opening for annotation…' });
+		this.loadingEl = box;
+	}
+
+	private clearLoading(): void {
+		this.loadingEl?.remove();
+		this.loadingEl = null;
 	}
 
 	private scrollToPage(pageNumber: number): void {

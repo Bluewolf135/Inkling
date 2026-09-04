@@ -4,6 +4,44 @@ import { Annotation, HIGHLIGHTER_OPACITY, Point, Rect } from './types';
 const SELECTION_COLOR = '#1971c2';
 const HANDLE_SIZE = 10;
 
+// Interactive chrome — the eraser ring, the selection outline, the lasso —
+// is drawn in two passes: a pale halo first, then the real line on top of
+// it, a little thinner. No single colour survives every background this
+// chrome has to sit on. A flat dark ring vanished against a dark surface,
+// and (even on white paper) against the patch of dense black ink you are
+// most likely to be erasing in the first place. Two passes means whichever
+// one the background swallows, the other still reads.
+const CHROME_HALO = 'rgba(255, 255, 255, 0.9)';
+const CHROME_LINE = 'rgba(0, 0, 0, 0.75)';
+
+// Runs `path` twice, once as the halo underneath and once as the line
+// itself. The caller lays down the path and picks the top colour; widths
+// are handled here so every piece of chrome gets the same weight of halo.
+function withHalo(
+	ctx: CanvasRenderingContext2D,
+	lineWidth: number,
+	color: string,
+	path: () => void,
+): void {
+	ctx.save();
+	ctx.lineWidth = lineWidth + 2;
+	ctx.strokeStyle = CHROME_HALO;
+	// The halo is solid even when the line on top is dashed: a dashed halo
+	// would leave the gaps unprotected, which is exactly where a dashed line
+	// needs the contrast most.
+	ctx.setLineDash([]);
+	path();
+	ctx.stroke();
+	ctx.restore();
+
+	ctx.save();
+	ctx.lineWidth = lineWidth;
+	ctx.strokeStyle = color;
+	path();
+	ctx.stroke();
+	ctx.restore();
+}
+
 function drawPolyline(ctx: CanvasRenderingContext2D, points: Point[]): void {
 	const [first, ...rest] = points;
 	if (!first || rest.length === 0) return;
@@ -63,12 +101,15 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation): 
 }
 
 function drawSelectionOutline(ctx: CanvasRenderingContext2D, box: Rect): void {
-	ctx.save();
-	ctx.strokeStyle = SELECTION_COLOR;
-	ctx.lineWidth = 1;
-	ctx.setLineDash([4, 3]);
-	ctx.strokeRect(box.minX - 6, box.minY - 6, box.maxX - box.minX + 12, box.maxY - box.minY + 12);
-	ctx.restore();
+	const x = box.minX - 6;
+	const y = box.minY - 6;
+	const w = box.maxX - box.minX + 12;
+	const h = box.maxY - box.minY + 12;
+	withHalo(ctx, 1, SELECTION_COLOR, () => {
+		ctx.setLineDash([4, 3]);
+		ctx.beginPath();
+		ctx.rect(x, y, w, h);
+	});
 }
 
 export function handleRects(box: Rect): Record<'nw' | 'ne' | 'sw' | 'se', Rect> {
@@ -99,12 +140,17 @@ function drawEraserCursor(ctx: CanvasRenderingContext2D, point: Point, radius: n
 	ctx.save();
 	ctx.beginPath();
 	ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
-	ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
+	// A neutral mid-grey wash rather than the black one this had: at 12% it
+	// lightens a dark background and darkens a light one, so the disc itself
+	// registers either way instead of only over pale paper.
+	ctx.fillStyle = 'rgba(127, 127, 127, 0.12)';
 	ctx.fill();
-	ctx.lineWidth = 1.5;
-	ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
-	ctx.stroke();
 	ctx.restore();
+
+	withHalo(ctx, 1.5, CHROME_LINE, () => {
+		ctx.beginPath();
+		ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+	});
 }
 
 export interface OverlayOptions {
@@ -147,21 +193,27 @@ export function renderOverlay(ctx: CanvasRenderingContext2D, options: OverlayOpt
 
 	const [first, ...rest] = options.lassoPath ?? [];
 	if (first && rest.length > 0) {
-		ctx.save();
-		ctx.strokeStyle = SELECTION_COLOR;
-		ctx.setLineDash([4, 3]);
-		ctx.fillStyle = 'rgba(25, 113, 194, 0.08)';
-		ctx.beginPath();
-		ctx.moveTo(first.x, first.y);
-		for (const p of rest) ctx.lineTo(p.x, p.y);
 		// closePath (not just stroke) is what draws the straight line back to
 		// the start point too, so the loop reads as a closed selection region
 		// while it's still being drawn, not just once released — and it's
 		// needed for fill() to treat this as an enclosed area at all.
-		ctx.closePath();
+		const path = () => {
+			ctx.beginPath();
+			ctx.moveTo(first.x, first.y);
+			for (const p of rest) ctx.lineTo(p.x, p.y);
+			ctx.closePath();
+		};
+
+		ctx.save();
+		ctx.fillStyle = 'rgba(25, 113, 194, 0.08)';
+		path();
 		ctx.fill();
-		ctx.stroke();
 		ctx.restore();
+
+		withHalo(ctx, 1, SELECTION_COLOR, () => {
+			ctx.setLineDash([4, 3]);
+			path();
+		});
 	}
 
 	if (options.eraserCursor) drawEraserCursor(ctx, options.eraserCursor.point, options.eraserCursor.radius);

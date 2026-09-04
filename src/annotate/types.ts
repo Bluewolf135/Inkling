@@ -37,13 +37,21 @@ export interface Rect {
 
 export const DEFAULT_COLOR = '#1e1e1e';
 
-export const PRESET_COLORS: readonly string[] = [
-	DEFAULT_COLOR,
-	'#e03131',
-	'#f08c00',
-	'#2f9e44',
-	'#1971c2',
-	'#9c36b5',
+// Named, not just hex: the swatches' tooltips read "Red" rather than
+// "#e03131", which is what a person picking a pen colour actually wants to
+// see on hover.
+export interface PresetColor {
+	value: string;
+	label: string;
+}
+
+export const PRESET_COLORS: readonly PresetColor[] = [
+	{ value: DEFAULT_COLOR, label: 'Ink' },
+	{ value: '#e03131', label: 'Red' },
+	{ value: '#f08c00', label: 'Orange' },
+	{ value: '#2f9e44', label: 'Green' },
+	{ value: '#1971c2', label: 'Blue' },
+	{ value: '#9c36b5', label: 'Purple' },
 ];
 
 export const DEFAULT_WIDTH = 3;

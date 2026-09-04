@@ -1,4 +1,4 @@
-import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
+import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, setIcon, setTooltip, TFile } from 'obsidian';
 import { AnnotationController, buildToolbar } from '../annotate';
 import {
 	INK_BLOCK_LANGUAGE,
@@ -106,8 +106,10 @@ class InkBlockView {
 			// plugin, or damaged in a way the original could still recover,
 			// than something worth replacing with what little parsed.
 			this.readOnly = true;
-			this.containerEl.createDiv({
-				cls: 'inkling-ink-block-banner',
+			const banner = this.containerEl.createDiv({ cls: 'inkling-ink-block-banner' });
+			setIcon(banner.createDiv({ cls: 'inkling-ink-block-banner-icon' }), 'alert-triangle');
+			banner.createDiv({
+				cls: 'inkling-ink-block-banner-text',
 				text: "Inkling couldn't read this ink block completely, so it won't be saved over. It may have been written by a newer version of the plugin.",
 			});
 		}
@@ -120,13 +122,22 @@ class InkBlockView {
 	}
 
 	private buildToolbarToggle(): void {
-		const toggle = this.toolbarHost.createEl('button', { cls: 'inkling-ink-block-toggle', text: 'Tools' });
+		// An icon button, matching the tool strip it opens — a lone "Tools"
+		// text button sitting above every ink block in a note read like a
+		// piece of the note's own content rather than plugin chrome.
+		const toggle = this.toolbarHost.createEl('button', { cls: 'inkling-ink-block-toggle' });
 		toggle.type = 'button';
+		setIcon(toggle, 'pencil-ruler');
+		if (toggle.childElementCount === 0) toggle.setText('Tools');
+		setTooltip(toggle, 'Show drawing tools');
+		toggle.setAttribute('aria-label', 'Show drawing tools');
+		toggle.setAttribute('aria-expanded', 'false');
 		toggle.addEventListener('click', () => {
 			if (this.disposeToolbar) {
 				this.disposeToolbar();
 				this.disposeToolbar = null;
 				toggle.removeClass('is-active');
+				toggle.setAttribute('aria-expanded', 'false');
 				return;
 			}
 			// Built on demand, not for every block on screen: a note can hold
@@ -135,6 +146,7 @@ class InkBlockView {
 			// it, using whatever tool this block was last set to.
 			this.disposeToolbar = buildToolbar(this.toolbarHost, this.controller);
 			toggle.addClass('is-active');
+			toggle.setAttribute('aria-expanded', 'true');
 		});
 	}
 
@@ -158,6 +170,7 @@ class InkBlockView {
 	private buildResizeHandle(): void {
 		const handle = this.containerEl.createDiv({ cls: 'inkling-ink-block-handle' });
 		handle.setAttribute('aria-label', 'Drag to resize this ink block');
+		setTooltip(handle, 'Drag to resize');
 
 		let drag: { pointerId: number; startY: number; startHeight: number } | null = null;
 		// Coalesces a burst of pointermoves into one resize per frame —

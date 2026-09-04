@@ -1,10 +1,17 @@
+/* Everything here is expressed in Obsidian's own theme variables (colours,
+   radii, shadows, spacing, icon sizes) rather than hard-coded values, so the
+   plugin inherits whatever theme the vault is running and looks like part of
+   the app in both light and dark. The few exceptions are called out where
+   they appear. */
+
 .inkling-pdf-view {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	gap: 8px;
-	padding: 8px;
+	gap: var(--size-4-3);
+	padding: 0 var(--size-4-3) var(--size-4-6);
 	overflow: auto;
+	background-color: var(--background-secondary);
 }
 
 .inkling-pdf-page-placeholder {
@@ -32,7 +39,19 @@
 	   content inside can grow past this box's bounds without it — or the
 	   scrolling list of pages around it — ever resizing to match. */
 	overflow: hidden;
-	box-shadow: 0 0 4px var(--background-modifier-border);
+	/* Reads as a sheet of paper resting on the view rather than a bare
+	   rectangle: a real elevation shadow instead of the flat 4px halo this
+	   had, and an explicit background so a page that hasn't rendered yet is
+	   a blank sheet rather than a hole showing the scroll container.
+
+	   Paper white, not `--background-primary`: pdf.js paints a white page,
+	   so a theme-coloured placeholder is wrong the moment the render lands.
+	   On a dark theme it was worse than wrong — a page still scrolling into
+	   view was a black rectangle that then flashed to white, which is
+	   precisely what the old "goes black" report looked like. */
+	border-radius: var(--radius-s);
+	background-color: #ffffff;
+	box-shadow: var(--shadow-s);
 }
 
 .inkling-page-content {
@@ -45,6 +64,28 @@
 .inkling-pdf-page {
 	width: 100%;
 	height: 100%;
+}
+
+/* The page number in the sheet's bottom corner. A sibling of the zoomable
+   content, so pinch-zoom doesn't scale it with the page, and inert to
+   pointers so it can never intercept a stroke drawn over it. z-index clears
+   the annotation overlay, which sits at 1 inside a wrapper that (being
+   position: relative with z-index: auto) creates no stacking context of its
+   own to contain it. */
+.inkling-page-number {
+	position: absolute;
+	right: var(--size-4-2);
+	bottom: var(--size-4-2);
+	z-index: 2;
+	padding: 1px var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	line-height: 1.4;
+	pointer-events: none;
+	opacity: 0.75;
 }
 
 .inkling-annotation-layer {
@@ -78,15 +119,32 @@
 	z-index: 1;
 }
 
-/* A full-width top toolbar (Xodo/Samsung-Notes style), sticky within the
-   scrollable page view rather than a small draggable floating palette. */
+/* ---------------------------------------------------------------------
+   Toolbar
+
+   A full-width top strip (Xodo/Samsung-Notes style), sticky within the
+   scrollable page view rather than a small draggable floating palette.
+   --------------------------------------------------------------------- */
+
 .inkling-toolbar {
 	position: sticky;
 	top: 0;
 	z-index: 20;
-	width: 100%;
 	align-self: stretch;
+	/* The view pads its sides so a page as wide as the pane still has a
+	   margin; the toolbar has to undo that padding to reach the pane's own
+	   edges. Without this it stopped 12px short on each side, and pages
+	   scrolling underneath stayed visible in the two gutters beside a bar
+	   that was supposed to be covering them. */
+	margin: 0 calc(-1 * var(--size-4-3));
+	width: calc(100% + 2 * var(--size-4-3));
+	/* Semi-transparent plus a blur, so pages scrolling underneath stay
+	   faintly visible instead of sliding under an opaque slab — the same
+	   treatment Obsidian gives its own floating surfaces. The opaque
+	   fallback goes first for renderers without backdrop-filter. */
 	background-color: var(--background-secondary);
+	background-color: color-mix(in srgb, var(--background-secondary) 88%, transparent);
+	backdrop-filter: blur(12px);
 	border-bottom: 1px solid var(--background-modifier-border);
 	box-shadow: var(--shadow-s);
 	font-size: var(--font-ui-small);
@@ -103,8 +161,8 @@
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
-	gap: 12px;
-	padding: 6px 8px;
+	gap: var(--size-4-1) var(--size-4-2);
+	padding: var(--size-4-1) var(--size-4-2);
 	/* Belt-and-suspenders: with every group below also wrapping internally,
 	   nothing should ever need this, but a stray overflow no longer means
 	   "silently invisible off-screen" — it's at least reachable by scroll. */
@@ -121,41 +179,118 @@
 	   new line — it just ran off the right edge of the viewport, reachable
 	   only by scrolling sideways, which is what read as "not viewable at
 	   all." Wrapping every group internally means every control finds room
-	   somewhere instead of ever being pushed off-screen. */
+	   somewhere instead of ever being pushed off-screen. (Those five are
+	   icons now too, which shortens that group a great deal — but the
+	   wrapping stays, since the strip still has to fit a narrow split pane.) */
 	flex-wrap: wrap;
 	align-items: center;
-	gap: 4px;
+	gap: 2px;
 }
 
 /* Flex items default to `min-width: auto`/`min-height: auto`, which for a
    <button>/<input> falls back to the browser's own intrinsic minimum size
    for that control — and wins over an explicit `width` if the explicit
-   value is smaller. That's what turned the round 18px color swatches into
-   pills (their explicit width lost to the intrinsic button minimum, while
-   height held), even though the same explicit-size approach looked fine on
-   the larger 28px tool buttons, which happened to already be close to
-   their own intrinsic minimum. */
+   value is smaller. That's what turned the round color swatches into pills
+   (their explicit width lost to the intrinsic button minimum, while height
+   held), even though the same explicit-size approach looked fine on the
+   larger tool buttons, which happened to already be close to their own
+   intrinsic minimum. */
 .inkling-toolbar-group > * {
 	min-width: 0;
 	min-height: 0;
 }
 
-.inkling-tool-button {
+/* A hairline between groups. Short of full height on purpose, so the strip
+   reads as one row with divisions rather than a set of boxed cells. */
+.inkling-toolbar-sep {
+	flex: none;
+	width: 1px;
+	height: 20px;
+	margin: 0 var(--size-4-1);
+	background-color: var(--background-modifier-border);
+}
+
+/* Readouts (page number, zoom), not controls — pushed to the opposite end
+   so the things you press stay grouped together on the left. */
+.inkling-toolbar-status {
+	margin-left: auto;
+	gap: var(--size-4-2);
+	padding-left: var(--size-4-2);
+}
+
+.inkling-status-label {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	/* Tabular figures, so a readout counting up from 9 to 10 to 100 doesn't
+	   shift the controls beside it around as its digits change width. */
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+/* Scoped under .inkling-toolbar (and the ink-block host) rather than
+   written as a bare class: plugin CSS and theme CSS both land after the
+   app's, so a theme's own single-class button rule beats a single-class rule
+   here on source order alone. Measured, not guessed — see the comment on
+   iconButton() in src/annotate/toolbar.ts for what that looked like. The
+   `clickable-icon` these also carry supplies the flat, theme-appropriate
+   base; everything below is Inkling's own sizing and selected state on top
+   of it. */
+.inkling-toolbar .inkling-tool-button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 30px;
+	height: 30px;
+	padding: 0;
 	cursor: pointer;
-	width: 28px;
-	height: 28px;
 	line-height: 1;
-	border: 1px solid transparent;
+	border: none;
 	border-radius: var(--radius-s);
 	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	/* Obsidian's setIcon draws a Lucide <svg class="svg-icon">, which sizes
+	   itself from --icon-size and colours itself from --icon-color — so the
+	   button styles its icon by setting those rather than by reaching into
+	   the SVG. Also covers the text fallback in toolbar.ts, for an icon name
+	   an older Obsidian doesn't know. */
+	--icon-size: var(--icon-s);
+	--icon-color: currentColor;
+	transition: background-color 100ms ease, color 100ms ease;
 }
 
-.inkling-tool-button.is-active {
+/* The UA's own `[hidden] { display: none }` is a single attribute selector,
+   so the `display: flex` above beats it and a button hidden from script
+   (`addPageButton.hidden = ...`) stayed on screen — which is how "Add page"
+   turned up on imported PDFs, where there is no such thing as adding a
+   template page. Restated here at a specificity that wins. */
+.inkling-toolbar .inkling-tool-button[hidden] {
+	display: none;
+}
+
+.inkling-toolbar .inkling-tool-button:hover:not(:disabled) {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.inkling-toolbar .inkling-tool-button.is-active {
 	background-color: var(--interactive-accent);
-	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
 }
 
-.inkling-color-swatch {
+.inkling-toolbar .inkling-tool-button.is-active:hover {
+	background-color: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
+}
+
+.inkling-toolbar .inkling-tool-button:disabled {
+	cursor: default;
+	background-color: transparent;
+	opacity: 0.35;
+}
+
+.inkling-toolbar .inkling-color-swatch {
 	cursor: pointer;
 	/* !important throughout: Obsidian's mobile theme applies its own button
 	   sizing (almost certainly a minimum touch-target height/width, a common
@@ -171,32 +306,92 @@
 	min-height: 18px !important;
 	max-width: 18px !important;
 	max-height: 18px !important;
+	margin: 3px !important;
 	padding: 0 !important;
-	border: 2px solid transparent;
+	border: none !important;
 	border-radius: 50% !important;
 	appearance: none;
 	-webkit-appearance: none;
 	box-sizing: border-box !important;
+	/* The swatch's own colour comes from src/annotate/toolbar.ts — it's the
+	   one thing about a swatch that is data rather than styling. */
+	background-color: var(--inkling-swatch-color) !important;
+	/* A hairline drawn *inside* the circle, so a swatch close to the page
+	   colour (near-white through the custom picker, or the near-black
+	   default ink on a dark theme) still has a visible edge. */
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border);
+	transition: transform 100ms ease, box-shadow 100ms ease;
 }
 
-.inkling-color-swatch.is-active {
-	border-color: var(--text-normal);
+.inkling-toolbar .inkling-color-swatch:hover {
+	transform: scale(1.15);
 }
 
-.inkling-color-custom {
-	width: 22px;
-	height: 22px;
-	padding: 0;
-	border: none;
-	background: none;
+/* A ring drawn outside the swatch rather than a border inside it: a border
+   would eat into the 18px circle and make the selected colour visibly
+   smaller than its neighbours, whereas a shadow takes up no layout space at
+   all (which is also what keeps it clear of the !important sizing above).
+   The first ring is a gap in the toolbar's own colour, so the accent ring
+   reads as separate from the swatch instead of a fat outline on it. */
+.inkling-toolbar .inkling-color-swatch.is-active {
+	box-shadow:
+		inset 0 0 0 1px var(--background-modifier-border),
+		0 0 0 2px var(--background-secondary),
+		0 0 0 4px var(--interactive-accent);
+}
+
+/* The native colour picker, sitting after the presets. Given a border and a
+   rounded-square shape on purpose, so it doesn't read as a seventh preset
+   that just happens to be whatever colour was last chosen. */
+.inkling-toolbar .inkling-color-custom {
+	flex: none;
+	width: 24px;
+	height: 24px;
+	padding: 2px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: var(--background-primary);
+	box-shadow: none;
 	cursor: pointer;
 }
 
-.inkling-zoom-label {
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	white-space: nowrap;
-	padding: 0 2px;
+/* Chromium draws an <input type="color"> as a padded wrapper around an
+   inner swatch element, and both carry their own default padding/border.
+   Left alone the swatch came out as a narrow vertical sliver inside the
+   box — it read as a rendering glitch rather than a colour well — so these
+   two pseudo-elements make the colour fill the control. */
+.inkling-toolbar .inkling-color-custom::-webkit-color-swatch-wrapper {
+	padding: 0;
+}
+
+.inkling-toolbar .inkling-color-custom::-webkit-color-swatch {
+	border: none;
+	border-radius: 2px;
+}
+
+.inkling-width-group {
+	gap: var(--size-4-2);
+}
+
+/* Shows what the current width and colour will actually look like — the
+   slider and number say what the width *is*, which is a less direct answer
+   to the question being asked at the moment someone reaches for them. */
+.inkling-width-preview {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 20px;
+	height: 20px;
+}
+
+.inkling-width-dot {
+	/* Both set from src/annotate/toolbar.ts, which caps the size so a very
+	   thick stroke can't grow a dot taller than the toolbar row. */
+	width: var(--inkling-dot-size, 3px);
+	height: var(--inkling-dot-size, 3px);
+	border-radius: 50%;
+	background-color: var(--inkling-dot-color, var(--text-normal));
 }
 
 .inkling-width-slider {
@@ -213,6 +408,7 @@
 	text-align: center;
 	padding: 2px 0;
 	font-size: inherit;
+	font-variant-numeric: tabular-nums;
 	/* All three needed across Firefox/Safari (`appearance`/`-moz-appearance`)
 	   and Chromium (`-webkit-appearance`, plus the pseudo-elements below) to
 	   drop the native up/down spinner — redundant anyway with the slider
@@ -228,57 +424,162 @@
 	margin: 0;
 }
 
-.inkling-toolbar-button {
-	cursor: pointer;
-	padding: 4px 8px;
+/* Phones and tablets — the primary target, since this is a stylus plugin.
+   Bigger hit areas for fingers, and no group separators: the strip is
+   guaranteed to wrap at this width, and a wrapped separator lands at the
+   start of a line where it reads as a stray mark rather than a division. */
+.is-mobile .inkling-toolbar .inkling-tool-button {
+	width: 34px;
+	height: 34px;
+	--icon-size: var(--icon-m);
 }
 
-.inkling-toolbar-button:disabled {
-	cursor: default;
-	opacity: 0.5;
+.is-mobile .inkling-toolbar-sep {
+	display: none;
 }
 
-/* --- Markdown ink blocks (see src/markdown/inkBlock.ts) --- */
+.is-mobile .inkling-width-slider {
+	width: 96px;
+}
+
+/* ---------------------------------------------------------------------
+   Full-view states: loading, and a failed open
+   --------------------------------------------------------------------- */
+
+.inkling-pdf-message {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--size-4-3);
+	margin: auto;
+	padding: var(--size-4-8) var(--size-4-4);
+	max-width: 32em;
+	color: var(--text-muted);
+	text-align: center;
+}
+
+.inkling-pdf-message-icon {
+	display: flex;
+	--icon-size: var(--icon-xl);
+	--icon-color: var(--text-faint);
+}
+
+.inkling-pdf-message-text {
+	line-height: var(--line-height-tight);
+}
+
+.inkling-pdf-spinner {
+	width: 28px;
+	height: 28px;
+	border: 2px solid var(--background-modifier-border);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	animation: inkling-spin 700ms linear infinite;
+}
+
+@keyframes inkling-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* A spinner is exactly the kind of continuous motion this setting exists to
+   stop. The ring stays — as a static one it still marks the spot as "busy"
+   rather than the area simply being empty. */
+@media (prefers-reduced-motion: reduce) {
+	.inkling-pdf-spinner {
+		animation: none;
+	}
+}
+
+/* ---------------------------------------------------------------------
+   Markdown ink blocks (see src/markdown/inkBlock.ts)
+   --------------------------------------------------------------------- */
 
 .inkling-ink-block {
 	display: flex;
 	flex-direction: column;
-	gap: 4px;
-	margin: 8px 0;
+	gap: var(--size-4-1);
+	margin: var(--size-4-3) 0;
 }
 
 .inkling-ink-block-toolbar-host {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
-	gap: 8px;
+	gap: var(--size-4-2);
 }
 
 /* The block's own toolbar is the same strip the PDF view uses, so undo the
    parts of it that only make sense stuck to the top of a full-page view. */
 .inkling-ink-block-toolbar-host .inkling-toolbar {
 	position: static;
+	margin: 0;
+	width: auto;
+	/* Sized to its contents inside the note's column, rather than stretching
+	   to fill it — the strip is chrome for the block below it, and a
+	   full-width bar with a large empty right-hand end looked like a piece
+	   of the note that had failed to render. */
+	flex: 1 1 auto;
 	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
+	border-radius: var(--radius-m);
 	box-shadow: none;
+	backdrop-filter: none;
 }
 
-.inkling-ink-block-toggle {
+/* The readouts have nothing to say for a single-page block (the toolbar
+   hides both), so don't reserve the space they would have taken. */
+.inkling-ink-block-toolbar-host .inkling-toolbar-status {
+	margin-left: 0;
+	padding-left: 0;
+}
+
+.inkling-ink-block .inkling-ink-block-toggle {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 30px;
+	height: 30px;
+	padding: 0;
 	cursor: pointer;
-	padding: 2px 8px;
-	font-size: var(--font-ui-smaller);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	box-shadow: none;
+	color: var(--text-muted);
+	--icon-size: var(--icon-s);
+	--icon-color: currentColor;
+	transition: background-color 100ms ease, color 100ms ease;
 }
 
-.inkling-ink-block-toggle.is-active {
+.inkling-ink-block .inkling-ink-block-toggle:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.inkling-ink-block .inkling-ink-block-toggle.is-active {
 	background-color: var(--interactive-accent);
+	border-color: var(--interactive-accent);
 	color: var(--text-on-accent);
 }
 
 /* Width comes from the note's column; aspect-ratio (set inline from the
    block's stored size) supplies the height, so a block keeps its
    proportions on any screen width — same approach as the PDF placeholders,
-   and for the same reason. */
+   and for the same reason.
+
+   The surface is *paper*, not a themed panel: it stays light whatever theme
+   the vault is on. It used to be `--background-primary`, which on a dark
+   theme put near-black default ink (#1e1e1e, see DEFAULT_COLOR) onto a
+   near-black sheet — the strokes were there, and saved correctly, but
+   invisible, and so was the eraser ring. Paper also keeps the plugin
+   self-consistent: the PDF view renders white pages in dark mode too, and a
+   stroke is stored as one literal colour that has to look the same to
+   anyone opening the note under any theme. Override --inkling-paper in a
+   CSS snippet to re-tint it. */
 .inkling-ink-block-surface {
+	--inkling-paper: #ffffff;
 	position: relative;
 	width: 100%;
 	/* Set from src/markdown/inkBlock.ts, from the block's stored size and
@@ -286,15 +587,22 @@
 	aspect-ratio: var(--inkling-block-aspect);
 	overflow: hidden;
 	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
-	background-color: var(--background-primary);
+	border-radius: var(--radius-m);
+	background-color: var(--inkling-paper);
+}
+
+/* Dimmed a little on a dark theme. Still unambiguously paper — black ink
+   sits at roughly 13:1 against it — but a sheet of pure white in an
+   otherwise dark note glares, especially at the size these blocks run to. */
+.theme-dark .inkling-ink-block-surface {
+	--inkling-paper: #edebe6;
 }
 
 /* Squares off the bottom corners where the resize handle joins on, so the
    two read as one panel instead of two stacked boxes. Purely cosmetic — a
    browser without :has() just keeps the rounded corners. */
 .inkling-ink-block-surface:has(+ .inkling-ink-block-handle) {
-	border-radius: var(--radius-s) var(--radius-s) 0 0;
+	border-radius: var(--radius-m) var(--radius-m) 0 0;
 }
 
 .inkling-ink-block-content {
@@ -318,8 +626,12 @@
 	touch-action: none;
 	border: 1px solid var(--background-modifier-border);
 	border-top: none;
-	border-radius: 0 0 var(--radius-s) var(--radius-s);
+	border-radius: 0 0 var(--radius-m) var(--radius-m);
 	background-color: var(--background-secondary);
+}
+
+.inkling-ink-block-handle:hover {
+	background-color: var(--background-modifier-hover);
 }
 
 /* The grip: a short bar, so the strip reads as draggable rather than as a
@@ -330,22 +642,49 @@
 	height: 3px;
 	border-radius: 2px;
 	background-color: var(--background-modifier-border);
+	transition: background-color 100ms ease;
 }
 
 .inkling-ink-block-handle:hover::after {
 	background-color: var(--interactive-accent);
 }
 
+/* Shaped like one of Obsidian's own warning callouts rather than a flat
+   red-tinted bar — this only ever appears for a block the plugin has
+   decided not to save over, which is worth reading properly. */
 .inkling-ink-block-banner {
-	padding: 4px 8px;
-	border-radius: var(--radius-s);
+	display: flex;
+	align-items: flex-start;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2) var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-left: 3px solid var(--text-warning);
+	border-radius: var(--radius-m);
 	background-color: var(--background-modifier-error);
 	color: var(--text-normal);
 	font-size: var(--font-ui-smaller);
+	line-height: var(--line-height-tight);
 }
 
-.inkling-pdf-load-error {
-	padding: 24px 16px;
-	color: var(--text-muted);
-	text-align: center;
+.inkling-ink-block-banner-icon {
+	display: flex;
+	flex: none;
+	/* Nudged down onto the first line's optical centre — flex-start alignment
+	   puts an icon's box at the very top of the text block, which sits high
+	   against the cap height beside it. */
+	margin-top: 1px;
+	--icon-size: var(--icon-s);
+	--icon-color: var(--text-warning);
+}
+
+/* ---------------------------------------------------------------------
+   Create-handwritten-note modal (see src/noteCreation.ts)
+   --------------------------------------------------------------------- */
+
+/* Obsidian's setting rows carry a top border to separate stacked settings.
+   In a two-row dialog that draws a line above the first row, right under the
+   title, which reads as a stray rule rather than a divider. */
+.inkling-create-note-modal .setting-item:first-child {
+	border-top: none;
+	padding-top: 0;
 }

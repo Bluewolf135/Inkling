@@ -59,7 +59,7 @@ manually, copy `main.js`, `manifest.json`, `styles.css`,
 `<vault>/.obsidian/plugins/inkling/`, then enable it in
 **Settings → Community plugins**.
 
-Requires Obsidian 1.2.0 or newer. Works on desktop and mobile.
+Requires Obsidian 1.4.4 or newer. Works on desktop and mobile.
 
 ## Building from source
 
