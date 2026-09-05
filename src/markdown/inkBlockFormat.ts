@@ -109,7 +109,14 @@ export function parseInkBlock(source: string): ParseResult {
 		return { data: emptyInkBlock(), malformed: true };
 	}
 
-	if (typeof parsed !== 'object' || parsed === null) return { data: emptyInkBlock(), malformed: true };
+	// Arrays are excluded explicitly, not incidentally: `typeof [] === 'object'`
+	// and it isn't null, so a bare array otherwise fell through this check and
+	// came back as a *valid* empty block — at which point the next edit
+	// overwrote whatever the block really held. Silently discarding someone's
+	// handwriting is the one failure here that isn't recoverable.
+	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+		return { data: emptyInkBlock(), malformed: true };
+	}
 	const raw = parsed as Record<string, unknown>;
 
 	const width = isFiniteNumber(raw.width) && raw.width > 0 ? raw.width : DEFAULT_BLOCK_WIDTH;
