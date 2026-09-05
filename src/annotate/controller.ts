@@ -338,6 +338,14 @@ export class AnnotationController {
 		return this.selection.ids.size > 0;
 	}
 
+	isToolbarCollapsed(): boolean {
+		return this.toolState.isToolbarCollapsed();
+	}
+
+	setToolbarCollapsed(collapsed: boolean): void {
+		this.toolState.setToolbarCollapsed(collapsed);
+	}
+
 	isReadOnly(): boolean {
 		return this.readOnly;
 	}

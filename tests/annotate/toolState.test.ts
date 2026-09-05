@@ -77,3 +77,47 @@ describe('ToolState', () => {
 		expect(listener).not.toHaveBeenCalled();
 	});
 });
+
+// Collapsed state lives on ToolState rather than on a toolbar for the same
+// reason the pen does: an ink block's toolbar is destroyed and rebuilt on
+// every save, so a strip collapsed to get it out of the way would spring
+// back open a second after every burst of handwriting.
+describe('ToolState toolbar chrome', () => {
+	it('starts expanded', () => {
+		expect(new ToolState().isToolbarCollapsed()).toBe(false);
+	});
+
+	it('reports what it was set to, and says so as a chrome change', () => {
+		const state = new ToolState();
+		const listener = vi.fn();
+		state.subscribe(listener);
+
+		state.setToolbarCollapsed(true);
+		expect(state.isToolbarCollapsed()).toBe(true);
+		// Not 'tool': a controller drops an in-flight drag on a tool change,
+		// and collapsing the strip must not throw away a stroke in progress.
+		expect(listener).toHaveBeenLastCalledWith('chrome');
+	});
+
+	it('says nothing when set to the state it already holds', () => {
+		const state = new ToolState();
+		const listener = vi.fn();
+		state.subscribe(listener);
+		state.setToolbarCollapsed(false);
+		expect(listener).not.toHaveBeenCalled();
+	});
+
+	it('survives being collapsed and expanded without disturbing the pen', () => {
+		const state = new ToolState();
+		state.setTool('pen');
+		state.setColor('#e03131');
+		state.setWidth(8);
+
+		state.setToolbarCollapsed(true);
+		state.setToolbarCollapsed(false);
+
+		expect(state.getTool()).toBe('pen');
+		expect(state.getColor()).toBe('#e03131');
+		expect(state.getWidth()).toBe(8);
+	});
+});

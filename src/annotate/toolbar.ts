@@ -231,12 +231,32 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	zoomLabel.addEventListener('click', () => controller.resetZoom());
 	statusGroup.append(pageBox, pageLabel, zoomOutButton, zoomLabel, zoomInButton);
 
-	bar.append(toolGroup, separator(), colorGroup, separator(), widthGroup, separator(), actionGroup, statusGroup);
+	// Collapses the strip to the active tool, undo, and this button. On a
+	// phone in portrait the full row is a real slice of the screen, and
+	// the page you are trying to write on is underneath it.
+	const collapseButton = iconButton(
+		'inkling-tool-button inkling-collapse-button',
+		{ icon: 'chevrons-up', fallback: '⌃', title: 'Collapse tools' },
+		() => controller.setToolbarCollapsed(!controller.isToolbarCollapsed()),
+	);
+
+	bar.append(toolGroup, separator(), colorGroup, separator(), widthGroup, separator(), actionGroup, statusGroup, collapseButton);
 	toolbar.append(bar);
 	host.appendChild(toolbar);
 
 	const refresh = () => {
 		const activeTool = controller.getTool();
+
+		// Hidden, not removed: the strip is rebuilt per file already, and
+		// churning its DOM on a toggle would drop focus and lose a
+		// half-typed page number out of the jump box.
+		const collapsed = controller.isToolbarCollapsed();
+		toolbar.toggleClass('is-collapsed', collapsed);
+		for (const [tool, button] of toolButtons) button.hidden = collapsed && tool !== activeTool;
+		for (const group of [colorGroup, widthGroup, statusGroup]) group.hidden = collapsed;
+		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, navButton]) button.hidden = collapsed;
+		setIcon(collapseButton, collapsed ? 'chevrons-down' : 'chevrons-up');
+		setTooltip(collapseButton, collapsed ? 'Show tools' : 'Collapse tools');
 		for (const [tool, button] of toolButtons) {
 			const active = tool === activeTool;
 			button.classList.toggle('is-active', active);
@@ -282,7 +302,6 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		// Not while it is being typed into, or every keystroke would be
 		// overwritten by the page the reader is still sitting on.
 		if (document.activeElement !== pageBox) pageBox.value = String(controller.getCurrentPageNumber());
-		navButton.hidden = !controller.canToggleNavigation();
 
 		// Disabled rather than hidden: the strip vanishing would read as a
 		// bug, where a row of greyed-out tools reads as "not here", which is
@@ -298,7 +317,14 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		undoButton.disabled = readOnly || !controller.canUndo;
 		redoButton.disabled = readOnly || !controller.canRedo;
 		deleteButton.disabled = readOnly || !controller.hasSelection();
-		addPageButton.hidden = !controller.getCanManagePages();
+		// Reasserted after the collapse sweep above, which hid these for a
+		// different reason. A control can be hidden because the strip is
+		// collapsed *or* because it does not apply to this document, and
+		// the second has to win whenever the strip is open.
+		if (!collapsed) {
+			addPageButton.hidden = !controller.getCanManagePages();
+			navButton.hidden = !controller.canToggleNavigation();
+		}
 		addPageButton.disabled = readOnly;
 	};
 	refresh();

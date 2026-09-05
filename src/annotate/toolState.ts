@@ -10,7 +10,10 @@ export interface ToolStyle {
 // can't act on when the *tool* changes, but must leave that selection alone
 // on a *style* change — recoloring a selection is exactly what the color
 // swatches do while something is selected.
-export type ToolStateChange = 'tool' | 'style';
+// 'chrome' is neither: it is how the strip looks, not what the pen
+// does. Listeners that only care about the pen (the controller drops
+// an in-flight drag on a tool change) must not react to it.
+export type ToolStateChange = 'tool' | 'style' | 'chrome';
 
 // The selected tool and its color/width, held *outside* any one controller.
 //
@@ -42,6 +45,12 @@ export class ToolState {
 	// last-used settings. 'select' has no style of its own; it just reflects
 	// whatever the most recently used styled tool left behind.
 	private readonly styles = new Map<ToolType, ToolStyle>();
+	// Whether the tool strip is collapsed to a single row. Lives here
+	// rather than in a toolbar, for the same reason the pen does: an ink
+	// block's toolbar is destroyed and rebuilt on every save, so a strip
+	// collapsed to get it out of the way would spring back open a second
+	// after every burst of handwriting.
+	private toolbarCollapsed = false;
 	private readonly listeners = new Set<(change: ToolStateChange) => void>();
 
 	getTool(): ToolType {
@@ -94,6 +103,16 @@ export class ToolState {
 		this.width = clamped;
 		if (this.tool !== 'select') this.styles.set(this.tool, { ...this.styleFor(this.tool), width: clamped });
 		this.notify('style');
+	}
+
+	isToolbarCollapsed(): boolean {
+		return this.toolbarCollapsed;
+	}
+
+	setToolbarCollapsed(collapsed: boolean): void {
+		if (collapsed === this.toolbarCollapsed) return;
+		this.toolbarCollapsed = collapsed;
+		this.notify('chrome');
 	}
 
 	private styleFor(tool: ToolType): ToolStyle {
