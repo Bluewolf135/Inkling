@@ -1,5 +1,5 @@
 import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, setIcon, setTooltip, TFile } from 'obsidian';
-import { AnnotationController, buildToolbar, capturePointer, ToolState } from '../annotate';
+import { AnnotationController, buildToolbar, capturePointer, findScrollParent, ToolState } from '../annotate';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
@@ -19,6 +19,14 @@ const WRITE_DEBOUNCE_MS = 800;
 // that under a pen still on the surface would yank the drawing surface out
 // from under the stroke in progress.
 const GESTURE_RETRY_MS = 250;
+
+// How long to keep restoring the note's scroll position after a save. See
+// keepScrollPosition — the scroll that has to be undone happens *after* the
+// edit that caused it, and in reading view after the re-render later still,
+// so one synchronous reset is not enough. Short enough that a deliberate
+// scroll begun in the same breath as a pen-lift is at worst briefly
+// interrupted.
+const SCROLL_RESTORE_MS = 120;
 
 // Only the block's own single drawing surface is ever mounted into a given
 // controller, so the page-keyed API the controller shares with the PDF view
@@ -274,6 +282,37 @@ class InkBlockView {
 		this.writeHandle = window.setTimeout(() => void this.write(), WRITE_DEBOUNCE_MS);
 	}
 
+	// Saving a block rewrites the note, and any document change makes the
+	// editor scroll its cursor back into view. Drawing with a stylus never
+	// moves that cursor — it stays wherever it was last placed, which for a
+	// note you opened and drew in is usually the very top — so every autosave
+	// yanked the note back up to it a couple of seconds after the user
+	// stopped writing, which is the whole time a debounced save takes to
+	// fire. Reading view has the same symptom by a different route: the
+	// re-render resets the preview scroller.
+	//
+	// So: remember where the note actually is, and put it back. Repeatedly,
+	// for a moment, because the scroll being undone happens after the edit
+	// returns rather than during it.
+	private keepScrollPosition(): () => void {
+		const scroller = findScrollParent(this.containerEl);
+		if (!scroller) return () => undefined;
+		const { scrollTop, scrollLeft } = scroller;
+
+		return () => {
+			const deadline = performance.now() + SCROLL_RESTORE_MS;
+			const restore = () => {
+				// Only ever corrects a jump away from where the note was. A
+				// scroller already sitting where it should be is left alone, so
+				// this can't fight the user for control of it.
+				if (scroller.scrollTop !== scrollTop) scroller.scrollTop = scrollTop;
+				if (scroller.scrollLeft !== scrollLeft) scroller.scrollLeft = scrollLeft;
+				if (performance.now() < deadline) window.requestAnimationFrame(restore);
+			};
+			restore();
+		};
+	}
+
 	private async write(): Promise<void> {
 		this.writeHandle = null;
 		if (this.detached || this.readOnly) return;
@@ -295,6 +334,8 @@ class InkBlockView {
 		this.data = { ...this.data, annotations: this.controller.getPageAnnotations(BLOCK_PAGE) };
 		const serialized = serializeInkBlock(this.data);
 
+		const restoreScroll = this.keepScrollPosition();
+
 		const editor = this.findOpenEditor();
 		if (editor) {
 			// Through the editor, not the file, whenever the note is open:
@@ -308,6 +349,7 @@ class InkBlockView {
 				{ line: section.lineStart + 1, ch: 0 },
 				{ line: section.lineEnd, ch: 0 },
 			);
+			restoreScroll();
 			return;
 		}
 
@@ -322,6 +364,7 @@ class InkBlockView {
 				lines.splice(section.lineStart + 1, section.lineEnd - section.lineStart - 1, serialized);
 				return lines.join('\n');
 			});
+			restoreScroll();
 		} catch (error) {
 			console.error('Inkling: failed to save an ink block.', error);
 			new Notice('Inkling: could not save this ink block.');

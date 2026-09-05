@@ -108,7 +108,12 @@ function clampTranslate(x: number, y: number, scale: number, width: number, heig
 	};
 }
 
-function findScrollParent(el: HTMLElement): HTMLElement | null {
+// The scrolling container an element actually sits in — the editor's
+// scroller in Live Preview, the preview scroller in reading view, the PDF
+// view's own content area. Exported because touch panning is not the only
+// thing that needs it: an ink block's autosave has to put the note back
+// where it was afterwards (see markdown/inkBlock.ts).
+export function findScrollParent(el: HTMLElement): HTMLElement | null {
 	let node = el.parentElement;
 	while (node) {
 		const style = getComputedStyle(node);
