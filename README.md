@@ -1,78 +1,139 @@
 # Inkling
 
-Handwritten and text-based annotation for PDFs and Markdown notes in
-[Obsidian](https://obsidian.md), built mobile-first for stylus input.
+Handwritten and text annotation for PDFs and Markdown notes in Obsidian,
+built mobile-first for stylus input.
 
-Inkling is for marking up textbooks and technical documents with a pen on a
-tablet, and for handwriting inside notes where typing gets in the way — a
-worked equation next to its prompt, a quick diagram, a margin note.
+Inkling exists for one reason: **the knowledge stays in the vault.** Xodo
+and GoodNotes are excellent PDF annotators, and if annotating the PDF were
+the point you should use one of them. The point is that a highlight in a
+textbook becomes a searchable, linkable Markdown note sitting beside
+everything else you know — without leaving the app you keep it all in.
 
-## Features
+> **Screenshots needed.** These need a real device and a stylus, so they
+> are not in the repo yet:
+>
+> - `docs/images/writing.gif` — writing on a textbook page with a stylus
+> - `docs/images/annotate-view.png` — the annotate view with the toolbar
+> - `docs/images/extracted-note.png` — an extracted annotations note
 
-**PDF annotation.** Pen, highlighter, eraser, and line/rectangle/oval/arrow
-shapes, plus lasso selection and undo/redo. Annotations are written into the
-PDF as **native annotation objects**, so they show up in any other PDF
-reader — not baked into a flattened image, and not stored in a sidecar file
-only this plugin can read. Annotations made in other PDF software stay
-visible and intact.
+## What it does
 
-**Handwritten notes.** Create a blank, lined, or dot-grid note backed by a
-real PDF, and add pages to it as you fill them up.
+**Annotate PDFs.** Pen, highlighter, eraser, shapes, and lasso selection,
+over any PDF in your vault. Ink is written into the file as real PDF
+annotations, so it shows up in Obsidian's own reader, in Xodo, in Acrobat —
+anywhere.
 
-**Ink blocks in Markdown.** Handwrite directly inside a note. Strokes are
-stored as structured data in a fenced ` ```inkling ` block, so they stay
-individually editable rather than being frozen into an image.
+**Feels like ink.** Every stylus sample is captured, not just the one per
+frame the browser volunteers; strokes are curve-fitted rather than joined
+with straight lines; and a pen that reports pressure draws a stroke that
+tapers with it.
 
-**Built for a stylus.** Palm rejection (touch pans and scrolls, pen draws),
-pinch-to-zoom with pan for precise work, flick scrolling with momentum, and
-a highlighter that snaps to lines of real PDF text so a freehand drag comes
-out straight.
+**Highlights become notes.** Drag the highlighter over text and it snaps to
+the lines it swept — and remembers the words it covered. "Extract
+annotations to a note" turns those into Markdown, grouped by page, each
+entry linking back to `[[book.pdf#page=42]]` and carrying a block reference
+so you can link to one specific highlight.
 
-## Usage
+That works retroactively, on highlights made before you installed this and
+on highlights made in other PDF software: the match is geometric, so
+anything with a rectangle over text can have its quote recomputed.
 
-### PDFs
+**Comments.** Tap with the note tool, type, and it commits as a standard
+PDF sticky note — which means other readers show it too.
 
-Open a PDF as usual — Obsidian's own PDF viewer stays the default, so
-nothing gets slower just because this plugin is installed. To start
-annotating, click the **pencil** button in the PDF's toolbar, or run
-**Annotate this PDF** from the command palette. The **book** button returns
-you to the normal reader, keeping your place in both directions.
+**Handwritten notes.** Create a blank, lined, or dot-grid PDF and write
+straight into it, adding pages as you fill them.
 
-### Handwritten notes
+**Ink blocks in Markdown.** A ```` ```inkling ```` block is a drawing
+surface inside an ordinary note, for a diagram in the middle of a page of
+typing.
 
-Run **Create handwritten note** from the command palette, or use the
-"New handwritten note" entry in a folder's context menu. Pick blank, lined,
-or dot-grid. **Add page** in the toolbar inserts a page after the one you're
-on, matching the note's template.
+**Getting around.** Outline, page jump, find-in-document, per-page zoom
+(pinch, Ctrl+wheel, or the toolbar), a collapsible toolbar, and dark-mode
+page inversion that darkens the page without touching the colour of your
+ink.
 
-### Ink blocks
+## Keyboard
 
-Run **Insert ink annotation block** from the command palette to drop a
-drawing surface at the cursor. Draw in it with a pen; **Tools** opens the
-toolbar for that block, and the strip along its bottom edge resizes it.
+Inside the annotate view:
+
+| Key | Action |
+|---|---|
+| `s` `p` `h` `e` | Select, pen, highlighter, eraser |
+| `l` `r` `o` `a` | Line, rectangle, oval, arrow |
+| `1`–`6` | Preset colours |
+| `[` `]` | Thinner, thicker |
+| `Delete` | Delete selection |
+| `Mod+Z` / `Mod+Shift+Z` | Undo / redo |
+| `PageUp` / `PageDown` | Previous / next page |
+| `Mod+=` / `Mod+-` / `Mod+0` | Zoom in / out / reset |
+
+Undo and redo are also palette commands, so you can bind them globally.
 
 ## Installing
 
-Inkling is not yet in the community plugin catalogue. To install it
-manually, copy `main.js`, `manifest.json`, `styles.css`,
-`annotation-writer.worker.js`, and `pdf.worker.js` into
-`<vault>/.obsidian/plugins/inkling/`, then enable it in
-**Settings → Community plugins**.
+Not in the community catalogue yet. Install with
+[BRAT](https://github.com/TfTHacker/obsidian42-brat):
 
-Requires Obsidian 1.4.4 or newer. Works on desktop and mobile.
+1. Install BRAT from Community Plugins.
+2. **Add Beta Plugin**, and give it this repository.
+3. Enable **Inkling** in Community Plugins.
 
-## Building from source
+Or manually: download `main.js`, `manifest.json`, `styles.css`,
+`pdf.worker.js` and `annotation-writer.worker.js` from a release into
+`<vault>/.obsidian/plugins/inkling/`.
 
-```sh
+## Mobile and stylus
+
+Built mobile-first, and tested on a Samsung tablet with an S Pen.
+
+- **Palm rejection.** Pen and mouse draw; touch scrolls and pinch-zooms.
+  Touch panning is hand-rolled rather than left to the browser, because
+  relying on `touch-action` let a downward pen stroke get taken over
+  mid-draw on real hardware.
+- **Pressure and tilt.** Pressure varies stroke width where the stylus
+  reports it.
+- **No desktop-only APIs.** Everything runs on mobile.
+
+## Limitations
+
+**Some PDFs open read-only, on purpose.** Inkling rewrites a PDF through
+`pdf-lib`, and before it will do that it checks the document two ways: it
+compares `pdf-lib`'s reading of the file against `pdf.js`'s, and it looks
+for interactive forms and digital signatures. If the two readers disagree,
+or the document has a form or a signature, the book renders and its
+existing annotations display but drawing is turned off, with a banner
+saying why. Filling in a form and saving it through here would lose the
+form; re-serializing a signed document invalidates the signature.
+
+**Every save rewrites the whole file.** `pdf-lib` has no incremental save.
+Inkling scales how often it saves to the file's size — ten seconds under
+5 MB, thirty up to 25 MB, a minute above — so a large textbook is not
+rewritten every few seconds. Every save is structurally verified against
+the document it came from before a byte is written.
+
+**Extraction is one-directional.** Editing an extracted note does not
+change the PDF.
+
+**Ink blocks are kept working, not grown.** They render only inside
+Obsidian, so a note holding one is less portable than one holding an image.
+The PDF side is where the work goes.
+
+## Development
+
+```bash
 npm install
-npm run dev    # watch build
-npm run build  # type-check and produce a production build
+npm run dev     # watch build
+npm test        # vitest
+npm run lint
+npm run build   # type-check and production bundle
 ```
 
-The build produces `main.js` plus two bundled workers (`pdf.worker.js` for
-rendering and `annotation-writer.worker.js` for writing annotations), which
-are loaded from the plugin folder — nothing is fetched from a CDN at
-runtime, and the plugin makes no network requests at all.
+`pdf-lib` and `pdfjs-dist` are pinned to exact versions for reasons
+recorded at the top of `src/pdfView.ts`. Don't bump them without reading
+that comment.
+
+Design documents and implementation plans live in `docs/superpowers/`.
 
 ## License
 

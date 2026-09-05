@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+# The workflow creates a release, and needs to be allowed to.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      # The same checks CI runs on every push. A tag is not a reason to
+      # skip them — it is the one build anyone will actually install.
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      # Draft, not published. A tag should not become an install target
+      # before someone has looked at it.
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            main.js manifest.json styles.css pdf.worker.js annotation-writer.worker.js
