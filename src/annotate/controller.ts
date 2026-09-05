@@ -11,6 +11,7 @@ import {
 } from './geometry';
 import { createId } from './id';
 import { attachPointerGestures, currentZoom, GestureHandlers, zoomAbout } from './pointer';
+import { recognizeShape } from './recognize';
 import { handleRects, renderBase, renderOverlay } from './render';
 import { AnnotationStore } from './store';
 import { HistoryStack } from './history';
@@ -35,10 +36,23 @@ const ERASER_RADIUS_FACTOR = 3;
 const MIN_ERASER_RADIUS = 10;
 const DRAFT_ID = '__draft__';
 
+// How long the pen has to dwell at the end of a stroke, before lifting,
+// for that stroke to be offered to shape recognition. The gesture every
+// other handwriting app uses, and the reason recognition needs no UI of
+// its own: it is opt-in per stroke, so ordinary handwriting is never
+// rewritten behind the user’s back.
+const SHAPE_HOLD_MS = 500;
+
+// How far a sample may sit from the last one and still count as the pen
+// having been held still. A stylus resting on glass reports a steady
+// jitter of a pixel or two, and treating that as motion would mean the
+// hold gesture could never be performed at all.
+const HOLD_STILLNESS_PX = 2.5;
+
 type HandleName = 'nw' | 'ne' | 'sw' | 'se';
 
 type DragMode =
-	| { kind: 'draw'; tool: DrawToolType; points: Point[] }
+	| { kind: 'draw'; tool: DrawToolType; points: Point[]; lastMovedAt: number }
 	| { kind: 'shape'; tool: ShapeToolType; start: Point; end: Point }
 	| { kind: 'erase'; before: Annotation[] }
 	| { kind: 'lasso'; points: Point[] }
@@ -106,6 +120,10 @@ export interface AnnotationControllerOptions {
 	// commit time rather than at capture: turning it off should change
 	// how the next stroke is drawn, not require reopening the file.
 	isPressureEnabled?: () => boolean;
+	// Whether holding the pen still at the end of a stroke snaps it to a
+	// clean shape. Off unless the host says otherwise, so a surface that
+	// never opted in cannot silently rewrite handwriting.
+	isShapeRecognitionEnabled?: () => boolean;
 	// Dark-mode page inversion, which belongs to the host: only it has a
 	// page canvas to invert. A surface without one omits both and the
 	// toolbar hides the control.
@@ -571,7 +589,7 @@ export class AnnotationController {
 		switch (tool) {
 			case 'pen':
 			case 'highlighter':
-				this.drag = { pageNumber, mode: { kind: 'draw', tool, points: [point] } };
+				this.drag = { pageNumber, mode: { kind: 'draw', tool, points: [point], lastMovedAt: performance.now() } };
 				break;
 			case 'line':
 			case 'rectangle':
@@ -647,10 +665,19 @@ export class AnnotationController {
 		const mode = this.drag.mode;
 
 		switch (mode.kind) {
-			case 'draw':
+			case 'draw': {
+				// Only movement that goes somewhere counts as movement: a pen
+				// resting on glass still reports a jittery stream of samples,
+				// and treating those as motion would mean the hold gesture
+				// could never be performed at all.
+				const previous = mode.points[mode.points.length - 1];
+				if (!previous || Math.hypot(point.x - previous.x, point.y - previous.y) > HOLD_STILLNESS_PX) {
+					mode.lastMovedAt = performance.now();
+				}
 				mode.points.push(point);
 				this.scheduleOverlayRedraw(pageNumber);
 				break;
+			}
 			case 'shape':
 				mode.end = point;
 				this.redrawOverlay(pageNumber);
@@ -768,7 +795,29 @@ export class AnnotationController {
 	// AnnotationControllerOptions.onSnapHighlighterStroke). Anything it
 	// declines to snap (not a highlighter, no text under the stroke, or no
 	// host support) commits as drawn, same as every other tool.
-	private commitDrawStroke(pageNumber: number, mode: { tool: DrawToolType; points: Point[] }): void {
+	private commitDrawStroke(pageNumber: number, mode: { tool: DrawToolType; points: Point[]; lastMovedAt: number }): void {
+		// Held still at the end of a pen stroke: offer it to recognition.
+		// Checked before the highlighter branch below only because a
+		// highlighter is never snapped — a straight yellow bar is already
+		// what the snapping it does have produces.
+		if (mode.tool === 'pen' && (this.options.isShapeRecognitionEnabled?.() ?? false)) {
+			if (performance.now() - mode.lastMovedAt >= SHAPE_HOLD_MS) {
+				const recognized = recognizeShape(mode.points);
+				if (recognized) {
+					this.commitNew(pageNumber, {
+						id: createId(),
+						kind: 'shape',
+						tool: recognized.tool,
+						color: this.getColor(),
+						width: this.getWidth(),
+						start: recognized.start,
+						end: recognized.end,
+					});
+					return;
+				}
+			}
+		}
+
 		if (mode.tool === 'highlighter') {
 			const snapped = this.options.onSnapHighlighterStroke?.(pageNumber, mode.points, this.getColor());
 			if (snapped && snapped.length > 0) {
