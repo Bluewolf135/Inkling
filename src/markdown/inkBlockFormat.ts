@@ -192,3 +192,52 @@ export function serializeInkBlock(data: InkBlockData): string {
 export function inkBlockMarkdown(data: InkBlockData = emptyInkBlock()): string {
 	return `\`\`\`${INK_BLOCK_LANGUAGE}\n${serializeInkBlock(data)}\n\`\`\``;
 }
+
+export interface InkBlockRange {
+	// The fence lines themselves: the opening ```inkling and the closing ```.
+	lineStart: number;
+	lineEnd: number;
+}
+
+function isOpeningFence(line: string | undefined): boolean {
+	const trimmed = line?.trimStart() ?? '';
+	return trimmed.startsWith('```') && trimmed.includes(INK_BLOCK_LANGUAGE);
+}
+
+function isClosingFence(line: string | undefined): boolean {
+	return (line?.trimStart() ?? '').startsWith('```');
+}
+
+// Finds a specific ink block in a note, by its own id.
+//
+// This exists because Obsidian's `getSectionInfo` cannot be trusted to say
+// where a block is when a note holds several of them — it hands one block
+// the line range of another, which is how a drawing ended up duplicated
+// into its neighbour, and how refusing that write then lost the drawing
+// instead. Searching the note for the block that actually carries our id
+// answers the question directly rather than trusting a report of it.
+//
+// Returns null when there is no such block: it may not have been written
+// yet, or the note may have been edited out from under us. The caller must
+// treat that as "do not write anywhere", never as "write wherever you were
+// told".
+export function findInkBlockById(lines: readonly string[], blockId: string): InkBlockRange | null {
+	if (!blockId) return null;
+
+	for (let index = 0; index < lines.length; index++) {
+		if (!isOpeningFence(lines[index])) continue;
+
+		let close = index + 1;
+		while (close < lines.length && !isClosingFence(lines[close])) close++;
+		if (close >= lines.length) return null;
+
+		const body = lines.slice(index + 1, close).join('\n');
+		if (readInkBlockId(body) === blockId) return { lineStart: index, lineEnd: close };
+
+		// Resume past this block's closing fence, so its contents can't be
+		// mistaken for the start of another one.
+		index = close;
+	}
+
+	return null;
+}

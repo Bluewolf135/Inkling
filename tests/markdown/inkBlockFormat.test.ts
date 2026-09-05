@@ -4,6 +4,7 @@ import {
 	DEFAULT_BLOCK_WIDTH,
 	INK_BLOCK_VERSION,
 	emptyInkBlock,
+	findInkBlockById,
 	parseInkBlock,
 	readInkBlockId,
 	serializeInkBlock,
@@ -139,5 +140,59 @@ describe('readInkBlockId', () => {
 
 	it('tolerates the surrounding whitespace a hand-edited fence can have', () => {
 		expect(readInkBlockId(`\n  ${serializeInkBlock({ ...emptyInkBlock(), id: 'ink-x' })}  \n`)).toBe('ink-x');
+	});
+});
+
+// Obsidian's getSectionInfo cannot be trusted to say where a block is when
+// a note holds several — it hands one block the line range of another.
+// Finding the block that actually carries our id answers the question
+// directly instead of trusting a report of it.
+describe('findInkBlockById', () => {
+	const block = (id: string) => serializeInkBlock({ ...emptyInkBlock(), id });
+
+	function note(...blocks: string[]): string[] {
+		const lines = ['# Physics', '', 'Some prose.', ''];
+		for (const body of blocks) lines.push('```inkling', body, '```', '');
+		lines.push('More prose.');
+		return lines;
+	}
+
+	it('finds the only block in a note', () => {
+		expect(findInkBlockById(note(block('ink-a')), 'ink-a')).toEqual({ lineStart: 4, lineEnd: 6 });
+	});
+
+	it('finds the right block among several', () => {
+		const lines = note(block('ink-a'), block('ink-b'), block('ink-c'));
+		const second = findInkBlockById(lines, 'ink-b');
+		expect(second).not.toBeNull();
+		expect(readInkBlockId(lines[(second?.lineStart ?? 0) + 1] ?? '')).toBe('ink-b');
+	});
+
+	it('returns null for a block that is not there', () => {
+		// "Do not write anywhere" — never "write wherever you were told".
+		expect(findInkBlockById(note(block('ink-a')), 'ink-b')).toBeNull();
+		expect(findInkBlockById([], 'ink-a')).toBeNull();
+		expect(findInkBlockById(note(block('ink-a')), '')).toBeNull();
+	});
+
+	it('ignores a block with no id, rather than guessing it is the one', () => {
+		const lines = note(JSON.stringify({ width: 800, height: 450, annotations: [] }), block('ink-b'));
+		const found = findInkBlockById(lines, 'ink-b');
+		expect(readInkBlockId(lines[(found?.lineStart ?? 0) + 1] ?? '')).toBe('ink-b');
+	});
+
+	it('is not confused by other kinds of code block around it', () => {
+		const lines = ['```js', 'const x = 1;', '```', '', '```inkling', block('ink-a'), '```'];
+		expect(findInkBlockById(lines, 'ink-a')).toEqual({ lineStart: 4, lineEnd: 6 });
+	});
+
+	it('gives up on an unterminated fence rather than running to the end of the note', () => {
+		const lines = ['```inkling', block('ink-a')];
+		expect(findInkBlockById(lines, 'ink-a')).toBeNull();
+	});
+
+	it('finds a block whose body was hand-wrapped across lines', () => {
+		const lines = ['```inkling', '{', '  "id": "ink-a",', '  "annotations": []', '}', '```'];
+		expect(findInkBlockById(lines, 'ink-a')).toEqual({ lineStart: 0, lineEnd: 5 });
 	});
 });
