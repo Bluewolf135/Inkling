@@ -226,10 +226,22 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		pageLabel.hidden = pageCount <= 1;
 		pageLabel.setText(`${controller.getCurrentPageNumber()} / ${pageCount}`);
 
-		undoButton.disabled = !controller.canUndo;
-		redoButton.disabled = !controller.canRedo;
-		deleteButton.disabled = !controller.hasSelection();
+		// Disabled rather than hidden: the strip vanishing would read as a
+		// bug, where a row of greyed-out tools reads as "not here", which is
+		// what the banner above the pages then explains.
+		const readOnly = controller.isReadOnly();
+		for (const button of toolButtons.values()) button.disabled = readOnly;
+		for (const button of colorButtons.values()) button.disabled = readOnly;
+		customColor.disabled = readOnly;
+		widthSlider.disabled = readOnly;
+		widthNumber.disabled = readOnly;
+		clearPageButton.disabled = readOnly;
+
+		undoButton.disabled = readOnly || !controller.canUndo;
+		redoButton.disabled = readOnly || !controller.canRedo;
+		deleteButton.disabled = readOnly || !controller.hasSelection();
 		addPageButton.hidden = !controller.getCanManagePages();
+		addPageButton.disabled = readOnly;
 	};
 	refresh();
 

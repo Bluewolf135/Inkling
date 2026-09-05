@@ -1,4 +1,5 @@
 import type { Annotation } from '../annotate/types';
+import type { StructureProfile } from './compatibility';
 
 // The message contract between the main thread (annotationWriterClient.ts)
 // and annotationWriter.worker.ts. Kept as a separate types-only module so
@@ -29,6 +30,12 @@ interface OpenedOk {
 	// annotation-baking render still shows annotations from other PDF
 	// software without doubling up with our own live overlay.
 	displayBytes: ArrayBuffer;
+	// pdf-lib's reading of the document's structure, and any feature it is
+	// known to round-trip badly — the view compares the first against
+	// pdf.js's own reading and opens read-only if they disagree. See
+	// src/pdf/compatibility.ts.
+	profile: StructureProfile;
+	risky: string[];
 }
 
 interface WrittenOk {

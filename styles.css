@@ -476,6 +476,27 @@
 	line-height: var(--line-height-tight);
 }
 
+/* The read-only notice sits above the pages, which render normally
+   underneath it — unlike .inkling-pdf-message on its own, which stands in
+   for pages that never arrived. Laid out as a strip rather than a centred
+   column for the same reason: it is an aside, not the whole story. */
+.inkling-pdf-readonly {
+	flex-direction: row;
+	align-items: flex-start;
+	gap: var(--size-4-2);
+	margin: var(--size-4-2) auto;
+	padding: var(--size-4-3);
+	max-width: 60ch;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-secondary);
+	text-align: left;
+}
+
+.inkling-pdf-readonly .inkling-pdf-message-icon {
+	--icon-size: var(--icon-m);
+}
+
 .inkling-pdf-spinner {
 	width: 28px;
 	height: 28px;

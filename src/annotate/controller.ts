@@ -103,6 +103,12 @@ export class AnnotationController {
 	private selection: { pageNumber: number; ids: Set<string> } = { pageNumber: -1, ids: new Set() };
 	private drag: { pageNumber: number; mode: DragMode } | null = null;
 	private canManagePages = false;
+	// Set when the document cannot be safely written to (see
+	// src/pdf/compatibility.ts). Every input path checks it, rather than the
+	// view simply not attaching gestures, because a book is rendered lazily,
+	// page by page, as it is scrolled — a view-level check would not cover
+	// the pages mounted later.
+	private readOnly = false;
 	private eraserCursor: { pageNumber: number; point: Point } | null = null;
 	// Each page remembers its own pinch-zoom level independently (see
 	// pointer.ts) — the toolbar's zoom readout shows whichever page the view
@@ -312,6 +318,25 @@ export class AnnotationController {
 		return this.selection.ids.size > 0;
 	}
 
+	isReadOnly(): boolean {
+		return this.readOnly;
+	}
+
+	setReadOnly(readOnly: boolean): void {
+		if (readOnly === this.readOnly) return;
+		this.readOnly = readOnly;
+		if (readOnly) {
+			// Nothing selected can be acted on any more, and a half-finished
+			// gesture would otherwise commit on pointerup into a file we have
+			// just decided not to write to.
+			this.drag = null;
+			this.selection = { pageNumber: -1, ids: new Set() };
+			this.eraserCursor = null;
+		}
+		this.notify();
+		this.redrawAllOverlay();
+	}
+
 	// Whether a draw/shape/erase/lasso/move/resize gesture is currently
 	// mid-flight on any page — src/pdfView.ts checks this before letting an
 	// autosave run, so a save landing exactly when the user has a pen down
@@ -417,6 +442,7 @@ export class AnnotationController {
 	}
 
 	private handleHover(pageNumber: number, point: Point | null): void {
+		if (this.readOnly) return;
 		const wasShowing = this.eraserCursor?.pageNumber === pageNumber;
 		if (this.getTool() !== 'eraser' || !point) {
 			this.eraserCursor = null;
@@ -428,6 +454,7 @@ export class AnnotationController {
 	}
 
 	private handleStart(pageNumber: number, point: Point): void {
+		if (this.readOnly) return;
 		// Bound once so the switch below narrows it — a getter call in each
 		// case would be opaque to the narrowing and force a cast.
 		const tool = this.getTool();
@@ -493,6 +520,7 @@ export class AnnotationController {
 	}
 
 	private handleMove(pageNumber: number, point: Point): void {
+		if (this.readOnly) return;
 		if (!this.drag || this.drag.pageNumber !== pageNumber) return;
 		const mode = this.drag.mode;
 
@@ -529,6 +557,7 @@ export class AnnotationController {
 	}
 
 	private handleEnd(pageNumber: number, point: Point): void {
+		if (this.readOnly) return;
 		if (!this.drag || this.drag.pageNumber !== pageNumber) return;
 		const mode = this.drag.mode;
 
@@ -572,6 +601,11 @@ export class AnnotationController {
 	// on cancel, since a mutation of *existing* annotations being cut short
 	// is safer to undo than to risk half-applying.
 	private handleCancel(pageNumber: number): void {
+		// Included deliberately: this is the path a palm rejection or a lost
+		// pointer takes, and for a draw gesture it *commits* what was drawn
+		// rather than discarding it. Leaving it ungated would let a stroke
+		// that began before read-only engaged still finish.
+		if (this.readOnly) return;
 		if (!this.drag || this.drag.pageNumber !== pageNumber) return;
 		const mode = this.drag.mode;
 

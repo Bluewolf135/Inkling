@@ -6,6 +6,7 @@ import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
 import { writeBinarySafely } from './vaultWrite';
+import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { applyTemplateStyle, PAGE_SIZE, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
 
@@ -211,6 +212,24 @@ async function computeTextLines(page: PDFPageProxy, viewport: PageViewport): Pro
 	return lines;
 }
 
+// pdf.js's half of the structure profile (see src/pdf/compatibility.ts).
+// `page.view` is the raw MediaBox array, unrotated — the same space
+// pdf-lib's getMediaBox reports in. A viewport would fold rotation into the
+// dimensions and disagree with pdf-lib on every rotated page, which is
+// exactly the false positive this check must not produce.
+async function profileFromPdfJs(pdf: PDFDocumentProxy): Promise<StructureProfile> {
+	const sampledPages: StructureProfile['sampledPages'] = [];
+	for (const index of samplePageIndices(pdf.numPages)) {
+		const page = await pdf.getPage(index + 1);
+		const [x1 = 0, y1 = 0, x2 = 0, y2 = 0] = page.view;
+		sampledPages.push({
+			index,
+			page: { mediaBox: formatMediaBox(x1, y1, x2 - x1, y2 - y1), rotation: normalizeRotation(page.rotate) },
+		});
+	}
+	return { pageCount: pdf.numPages, sampledPages };
+}
+
 // Sizes a page placeholder by width plus an aspect ratio, rather than by
 // explicit width and height. `.inkling-pdf-page-placeholder` caps width at
 // 100% of the view, and with a hard pixel height that cap squashed pages
@@ -308,6 +327,11 @@ export class PdfAnnotateView extends FileView {
 	// on load from the file's size; the default covers the window before a
 	// file is open.
 	private maxWriteInterval = maxWriteIntervalMs(0);
+	// Consecutive save failures on the current file. One is worth retrying:
+	// a transient adapter error, a file briefly locked by sync. Two in a row
+	// is a property of the document, and retrying forever just means a
+	// notice every interval for as long as the book stays open.
+	private consecutiveWriteFailures = 0;
 	// Tracked ourselves rather than trusting FileView's own `this.file` at
 	// transition time — see onLoadFile's flush-before-teardown for why.
 	private currentFile: TFile | null = null;
@@ -414,6 +438,7 @@ export class PdfAnnotateView extends FileView {
 		// baking render still shows annotations from other PDF software
 		// (Xodo, etc.) without doubling up with our own live overlay.
 		this.maxWriteInterval = maxWriteIntervalMs(file.stat.size);
+		this.consecutiveWriteFailures = 0;
 		const bytes = await this.app.vault.readBinary(file);
 
 		// `this.teardown()` above already terminated the previous file's
@@ -432,11 +457,18 @@ export class PdfAnnotateView extends FileView {
 		let writer: AnnotationWriterClient | null = null;
 		let savedAnnotations: Map<number, Annotation[]>;
 		let displayBytes: ArrayBuffer;
+		// Left null/empty when open() fails: that means `writer` is null, so
+		// nothing will be written to this file at all this session — there is
+		// nothing for the gate to protect and no profile to check against.
+		let profile: StructureProfile | null = null;
+		let risky: string[] = [];
 		try {
 			writer = new AnnotationWriterClient();
 			const opened = await writer.open(bytes);
 			savedAnnotations = opened.savedAnnotations;
 			displayBytes = opened.displayBytes;
+			profile = opened.profile;
+			risky = opened.risky;
 		} catch (error) {
 			console.error('Inkling: could not read existing annotations from this file.', error);
 			new Notice("Inkling: could not read this PDF's existing annotations — any already on it won't show up this time.");
@@ -469,6 +501,25 @@ export class PdfAnnotateView extends FileView {
 			return;
 		}
 		this.pdf = pdf;
+
+		// Whether pdf-lib can be trusted to rewrite this file at all. A
+		// disagreement between the two parsers means pdf-lib's model of the
+		// document is incomplete, and every save would serialize from that
+		// incomplete model. Better to render the book and refuse to draw on
+		// it than to quietly damage it.
+		let refusal: string | null = risky.length > 0 ? `it contains ${risky.join(' and ')}` : null;
+		if (!refusal && profile) {
+			try {
+				refusal = compareProfiles(profile, await profileFromPdfJs(pdf));
+			} catch (error) {
+				console.error('Inkling: could not check this PDF for editing safety.', error);
+				refusal = 'its structure could not be checked';
+			}
+		}
+		if (token !== this.renderToken) return;
+
+		this.controller.setReadOnly(refusal !== null);
+		if (refusal) this.showReadOnlyBanner(refusal);
 
 		let metadata: Awaited<ReturnType<PDFDocumentProxy['getMetadata']>>;
 		let firstPage: PDFPageProxy;
@@ -948,10 +999,24 @@ export class PdfAnnotateView extends FileView {
 			// `writer` field for why that matters for a densely annotated file.
 			const updatedBytes = await this.writer.write(pages);
 			await writeBinarySafely(this.app.vault, file, updatedBytes);
+			this.consecutiveWriteFailures = 0;
 		} catch (error) {
 			console.error('Inkling: failed to save annotations.', error);
 			new Notice('Inkling: could not save annotations to this file.');
+			// Re-marked dirty first, deliberately: the work stays pending, so
+			// if the file later saves — this session or the next — nothing has
+			// been thrown away.
 			for (const pageNumber of pageNumbers) this.dirtyPages.add(pageNumber);
+
+			this.consecutiveWriteFailures += 1;
+			if (this.consecutiveWriteFailures >= 2 && !this.controller.isReadOnly()) {
+				// A systematic problem — a document pdf-lib cannot round-trip
+				// that the open gate did not catch — would otherwise produce
+				// a notice every interval for as long as the book is open.
+				this.controller.setReadOnly(true);
+				this.showReadOnlyBanner('saving to it keeps failing');
+				new Notice("Inkling: this PDF isn't saving, so editing has been turned off. Your ink from this session is still on screen.");
+			}
 		}
 	}
 
@@ -1002,6 +1067,22 @@ export class PdfAnnotateView extends FileView {
 		box.createDiv({
 			cls: 'inkling-pdf-message-text',
 			text: "Inkling couldn't open this PDF. Try reopening it, or view it in reading mode.",
+		});
+	}
+
+	// Sits above the pages rather than replacing them: the document is
+	// perfectly readable, and its existing annotations still display. Only
+	// writing to it is off the table, and this says why.
+	private showReadOnlyBanner(reason: string): void {
+		// One banner, not one per reason. The open gate and the repeated-
+		// failure path can both reach this, and two stacked notices saying
+		// different things about the same file would read as a bug.
+		if (this.contentEl.querySelector('.inkling-pdf-readonly')) return;
+		const box = this.contentEl.createDiv({ cls: 'inkling-pdf-message inkling-pdf-readonly' });
+		setIcon(box.createDiv({ cls: 'inkling-pdf-message-icon' }), 'file-warning');
+		box.createDiv({
+			cls: 'inkling-pdf-message-text',
+			text: `Inkling can't safely annotate this PDF, because ${reason}. You can read it and see annotations already on it, but editing is turned off so the file isn't damaged.`,
 		});
 	}
 

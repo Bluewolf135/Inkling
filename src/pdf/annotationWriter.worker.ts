@@ -37,6 +37,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequestMessage>) => {
 					ok: true,
 					savedAnnotations: opened.savedAnnotations,
 					displayBytes: opened.displayBytes,
+					profile: opened.profile,
+					risky: opened.risky,
 				},
 				[opened.displayBytes],
 			);

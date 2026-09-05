@@ -1,6 +1,7 @@
 import { PDFDocument } from 'pdf-lib';
 import type { Annotation } from '../annotate/types';
 import { pruneOrphanedInklingAnnotations, readInklingAnnotations, stripInklingAnnotations, writeInklingAnnotations } from './annotationSync';
+import { profileFromPdfLib, riskyFeatures, type StructureProfile } from './compatibility';
 import { compareFingerprints, fingerprintDocument } from './fingerprint';
 
 // The actual pdf-lib work, with no worker plumbing around it, so the exact
@@ -19,6 +20,12 @@ export interface OpenedDocument {
 	// stripped out, so its annotation-baking render still shows annotations
 	// from other PDF software without doubling up with our live overlay.
 	displayBytes: ArrayBuffer;
+	// pdf-lib's own reading of the document's structure, for the view to
+	// check against pdf.js's — see src/pdf/compatibility.ts.
+	profile: StructureProfile;
+	// Document features pdf-lib is known to round-trip badly, named for a
+	// notice. Empty for almost every real book.
+	risky: string[];
 }
 
 export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -58,7 +65,7 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		displayBytes = bytes.slice(0);
 	}
 
-	return { doc, savedAnnotations, displayBytes };
+	return { doc, savedAnnotations, displayBytes, profile: profileFromPdfLib(doc), risky: riskyFeatures(doc) };
 }
 
 export async function writeDocument(

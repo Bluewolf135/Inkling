@@ -1,5 +1,6 @@
 import type { PDFDocument } from 'pdf-lib';
 import type { Annotation } from '../annotate/types';
+import type { StructureProfile } from './compatibility';
 import { openDocument, writeDocument } from './annotationWriterCore';
 import type { WorkerResponseMessage } from './annotationWriterProtocol';
 
@@ -29,6 +30,8 @@ export function setAnnotationWriterWorkerSourceProvider(provider: () => Promise<
 export interface OpenResult {
 	savedAnnotations: Map<number, Annotation[]>;
 	displayBytes: ArrayBuffer;
+	profile: StructureProfile;
+	risky: string[];
 }
 
 export interface WritePage {
@@ -83,7 +86,12 @@ export class AnnotationWriterClient {
 		if ((await this.ensureMode()) === 'main') {
 			const opened = await openDocument(bytes);
 			this.mainDoc = opened.doc;
-			return { savedAnnotations: opened.savedAnnotations, displayBytes: opened.displayBytes };
+			return {
+				savedAnnotations: opened.savedAnnotations,
+				displayBytes: opened.displayBytes,
+				profile: opened.profile,
+				risky: opened.risky,
+			};
 		}
 
 		const requestId = this.nextRequestId++;
@@ -222,6 +230,8 @@ export class AnnotationWriterClient {
 			entry.resolve({
 				savedAnnotations: message.savedAnnotations,
 				displayBytes: message.displayBytes,
+				profile: message.profile,
+				risky: message.risky,
 			} as never);
 		} else {
 			entry.resolve(message.bytes as never);
