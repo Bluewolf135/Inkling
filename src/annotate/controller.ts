@@ -18,6 +18,7 @@ import { ToolState } from './toolState';
 import {
 	Annotation,
 	DrawToolType,
+	NoteAnnotation,
 	Point,
 	Rect,
 	ShapeAnnotation,
@@ -92,6 +93,15 @@ export interface AnnotationControllerOptions {
 	// its pages are laid out — a Markdown ink block has exactly one and
 	// omits this, which is what hides the toolbar page controls there.
 	onGoToPage?: (pageNumber: number) => void;
+	// Asks the host surface to collect text for a note annotation, given
+	// where it sits (in this page’s canvas space) and whatever it already
+	// says. Resolving null cancels; resolving an empty string deletes.
+	//
+	// The controller owns no DOM of its own — it is mounted into a PDF
+	// view and into Markdown ink blocks alike — so the editor belongs to
+	// whoever mounted it. A host that does not supply this has no note
+	// tool at all, which is how ink blocks stay out of it.
+	onEditNote?: (pageNumber: number, point: Point, existing: string) => Promise<string | null>;
 	// Asks the host to show or hide its navigation panel. Same reasoning:
 	// the panel belongs to the PDF view, not to the shared controller.
 	onToggleNavigation?: () => void;
@@ -447,6 +457,10 @@ export class AnnotationController {
 		this.options.onAddPage?.();
 	}
 
+	canTakeNotes(): boolean {
+		return this.options.onEditNote !== undefined;
+	}
+
 	canNavigate(): boolean {
 		return this.options.onGoToPage !== undefined;
 	}
@@ -548,6 +562,11 @@ export class AnnotationController {
 				this.drag = { pageNumber, mode: { kind: 'erase', before: this.store.getPage(pageNumber) } };
 				this.applyErase(pageNumber, point);
 				break;
+			case 'note':
+				// No drag: a note is placed by tapping, and the gesture ends
+				// the moment the editor opens.
+				void this.editNoteAt(pageNumber, point, null, '');
+				break;
 			case 'select':
 				this.handleSelectStart(pageNumber, point);
 				break;
@@ -577,6 +596,13 @@ export class AnnotationController {
 		}
 
 		const hit = [...annotations].reverse().find((a) => hitTestAnnotation(a, point));
+		// Tapping an existing note with the select tool reopens it. Anything
+		// else selects and drags as before — a note that could only ever be
+		// read would be a note you could not correct.
+		if (hit?.kind === 'note') {
+			void this.editNoteAt(pageNumber, hit.at, hit, hit.note);
+			return;
+		}
 		if (hit) {
 			if (!this.selection.ids.has(hit.id)) {
 				this.selection = { pageNumber, ids: new Set([hit.id]) };
@@ -730,6 +756,56 @@ export class AnnotationController {
 			}
 		}
 		this.commitNew(pageNumber, this.strokeFromDraft(mode));
+	}
+
+	// Opens the host’s note editor and applies whatever comes back.
+	// `existing` being non-null means this is an edit rather than a new
+	// note, and an empty result then deletes it: clearing the text of a
+	// note is the only way anyone would expect to remove one.
+	private async editNoteAt(
+		pageNumber: number,
+		point: Point,
+		existing: NoteAnnotation | null,
+		current: string,
+	): Promise<void> {
+		if (this.readOnly) return;
+		const edit = this.options.onEditNote;
+		if (!edit) return;
+
+		const text = (await edit(pageNumber, point, current))?.trim() ?? null;
+		// Cancelled. Deliberately distinct from an empty string, which is a
+		// decision to delete.
+		if (text === null) return;
+		if (this.readOnly) return;
+
+		const before = this.store.getPage(pageNumber);
+		if (!existing) {
+			if (!text) return;
+			this.store.setPageLive(pageNumber, [
+				...before,
+				{
+					id: createId(),
+					kind: 'note',
+					color: this.getColor(),
+					width: this.getWidth(),
+					at: point,
+					note: text,
+				},
+			]);
+		} else if (!text) {
+			this.store.setPageLive(
+				pageNumber,
+				before.filter((annotation) => annotation.id !== existing.id),
+			);
+		} else {
+			this.store.setPageLive(
+				pageNumber,
+				before.map((annotation) => (annotation.id === existing.id ? { ...existing, note: text } : annotation)),
+			);
+		}
+		this.store.commitGesture(pageNumber, before);
+		this.redrawOverlay(pageNumber);
+		this.notify();
 	}
 
 	private strokeFromDraft(mode: { tool: DrawToolType; points: Point[] }): StrokeAnnotation {

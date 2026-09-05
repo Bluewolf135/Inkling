@@ -494,6 +494,47 @@
 }
 
 /* ---------------------------------------------------------------------
+   Note editor
+
+   Anchored inside the page placeholder rather than fixed to the viewport,
+   so it travels with the page as the document scrolls under it. Clamped
+   by max-width and translated back from the right edge when it would
+   otherwise run off a narrow screen.
+   --------------------------------------------------------------------- */
+
+.inkling-note-editor {
+	position: absolute;
+	left: var(--inkling-note-x, 0);
+	top: var(--inkling-note-y, 0);
+	z-index: 3;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	width: min(280px, 80vw);
+	/* Nudged clear of the marker itself, so the popover never covers the
+	   spot it is a note about. */
+	margin: var(--size-4-2) 0 0 var(--size-4-2);
+	padding: var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	box-shadow: var(--shadow-s);
+}
+
+.inkling-note-text {
+	width: 100%;
+	min-height: 5em;
+	resize: vertical;
+	font-family: inherit;
+}
+
+.inkling-note-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+}
+
+/* ---------------------------------------------------------------------
    Navigation panel — outline and find
 
    Sits between the toolbar and the pages rather than beside them: the

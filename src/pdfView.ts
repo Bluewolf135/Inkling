@@ -330,6 +330,10 @@ export class PdfAnnotateView extends FileView {
 	// a second search within the same file has to cancel the first, and
 	// bumping the render token would cancel the whole page pipeline.
 	private findToken = 0;
+	// The open note popover, if any. Held so a second note, a file switch,
+	// or a teardown can close it rather than leaving it floating over a
+	// page it no longer belongs to.
+	private noteEditor: HTMLElement | null = null;
 	// Tracked ourselves rather than trusting FileView's own `this.file` at
 	// transition time — see onLoadFile's flush-before-teardown for why.
 	private currentFile: TFile | null = null;
@@ -355,6 +359,7 @@ export class PdfAnnotateView extends FileView {
 			onSnapHighlighterStroke: (pageNumber, points, color) => this.snapHighlighterStroke(pageNumber, points, color),
 			onGoToPage: (pageNumber) => this.scrollToPage(pageNumber),
 			onToggleNavigation: () => this.toggleNavigationPanel(),
+			onEditNote: (pageNumber, point, existing) => this.editNote(pageNumber, point, existing),
 		});
 	}
 
@@ -740,6 +745,7 @@ export class PdfAnnotateView extends FileView {
 		// Bumped so an in-flight document search stops walking a file that
 		// is no longer open.
 		this.findToken++;
+		this.closeNoteEditor();
 		this.navPanel = null;
 		this.navOutline = null;
 		if (this.writeDebounceHandle !== null) {
@@ -1312,6 +1318,85 @@ export class PdfAnnotateView extends FileView {
 		}
 
 		status.setText(found === 0 ? `No matches for "${needle}"` : `${found} matches`);
+	}
+
+	// ---- Note editor ----
+
+	// A small popover anchored to the page, resolving with the text typed
+	// into it, an empty string to delete, or null if cancelled.
+	//
+	// Built here rather than in the controller because the controller is
+	// shared with Markdown ink blocks and deliberately owns no DOM. The
+	// text goes in and comes out through the textarea’s value, never through
+	// innerHTML: a note is user content, and it round-trips through a PDF
+	// that other software can write to.
+	private editNote(pageNumber: number, point: Point, existing: string): Promise<string | null> {
+		this.closeNoteEditor();
+
+		const placeholder = this.contentEl.querySelector<HTMLElement>(
+			`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
+		);
+		if (!placeholder) return Promise.resolve(null);
+
+		return new Promise<string | null>((resolve) => {
+			const popover = placeholder.createDiv({ cls: 'inkling-note-editor' });
+			// Positioned in the placeholder’s own coordinate space, which is
+			// the space the point arrives in, scaled to its CSS size — the
+			// canvas backing store is larger than the element on a narrow
+			// screen (see annotate/pointer.ts).
+			const canvas = this.pageCanvases.get(pageNumber);
+			const scale = canvas && canvas.width > 0 ? placeholder.clientWidth / canvas.width : 1;
+			popover.setCssProps({
+				'--inkling-note-x': `${point.x * scale}px`,
+				'--inkling-note-y': `${point.y * scale}px`,
+			});
+
+			const field = popover.createEl('textarea', { cls: 'inkling-note-text' });
+			field.value = existing;
+			field.placeholder = 'Note';
+			field.setAttribute('aria-label', 'Note text');
+
+			const buttons = popover.createDiv({ cls: 'inkling-note-buttons' });
+			let settled = false;
+			const finish = (result: string | null) => {
+				if (settled) return;
+				settled = true;
+				popover.remove();
+				if (this.noteEditor === popover) this.noteEditor = null;
+				resolve(result);
+			};
+
+			const cancel = buttons.createEl('button', { cls: 'inkling-note-button', text: 'Cancel' });
+			cancel.type = 'button';
+			cancel.addEventListener('click', () => finish(null));
+
+			const save = buttons.createEl('button', { cls: 'inkling-note-button mod-cta', text: 'Save' });
+			save.type = 'button';
+			save.addEventListener('click', () => finish(field.value));
+
+			field.addEventListener('keydown', (event: KeyboardEvent) => {
+				// Stopped here rather than left to bubble: the view-wide key
+				// handler treats bare letters as tool shortcuts, and typing a
+				// note would otherwise change the pen with every word.
+				event.stopPropagation();
+				if (event.key === 'Escape') {
+					event.preventDefault();
+					finish(null);
+				} else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+					event.preventDefault();
+					finish(field.value);
+				}
+			});
+
+			this.noteEditor = popover;
+			field.focus();
+			field.select();
+		});
+	}
+
+	private closeNoteEditor(): void {
+		this.noteEditor?.remove();
+		this.noteEditor = null;
 	}
 
 	// Leaves something visible instead of the blank/black screen a failed

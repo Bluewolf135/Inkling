@@ -28,6 +28,7 @@ const TOOL_BUTTONS: ReadonlyArray<ButtonSpec & { tool: ToolType }> = [
 	{ tool: 'pen', icon: 'pencil', fallback: '✏️', title: 'Pen' },
 	{ tool: 'highlighter', icon: 'highlighter', fallback: '🖊️', title: 'Highlighter' },
 	{ tool: 'eraser', icon: 'eraser', fallback: '⌫', title: 'Eraser' },
+	{ tool: 'note', icon: 'message-square', fallback: '🗨', title: 'Note' },
 	{ tool: 'line', icon: 'minus', fallback: '╱', title: 'Line' },
 	{ tool: 'rectangle', icon: 'square', fallback: '▭', title: 'Rectangle' },
 	{ tool: 'oval', icon: 'circle', fallback: '◯', title: 'Oval' },
@@ -253,6 +254,11 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		const collapsed = controller.isToolbarCollapsed();
 		toolbar.toggleClass('is-collapsed', collapsed);
 		for (const [tool, button] of toolButtons) button.hidden = collapsed && tool !== activeTool;
+		// A surface with no note editor has no note tool. Ink blocks are
+		// that surface: they supply no onEditNote, so the button would
+		// place notes nobody could ever type into.
+		const noteButton = toolButtons.get('note');
+		if (noteButton && !controller.canTakeNotes()) noteButton.hidden = true;
 		for (const group of [colorGroup, widthGroup, statusGroup]) group.hidden = collapsed;
 		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, navButton]) button.hidden = collapsed;
 		setIcon(collapseButton, collapsed ? 'chevrons-down' : 'chevrons-up');
