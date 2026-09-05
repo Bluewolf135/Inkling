@@ -235,6 +235,23 @@
 	white-space: nowrap;
 }
 
+/* The zoom readout is a real <button>, because it resets the zoom and
+   anything clickable should be tabbable. This strips the button chrome
+   so it still reads as the label beside it rather than as a control
+   competing with the tool strip. */
+.inkling-toolbar .inkling-status-button {
+	box-shadow: none;
+	border: none;
+	background: transparent;
+	padding: 0 var(--size-2-1);
+	cursor: var(--cursor);
+	font-family: inherit;
+}
+
+.inkling-toolbar .inkling-status-button:hover {
+	color: var(--text-normal);
+}
+
 /* Scoped under .inkling-toolbar (and the ink-block host) rather than
    written as a bare class: plugin CSS and theme CSS both land after the
    app's, so a theme's own single-class button rule beats a single-class rule

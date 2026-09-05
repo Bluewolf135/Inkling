@@ -10,7 +10,7 @@ import {
 	unionBoundingBox,
 } from './geometry';
 import { createId } from './id';
-import { attachPointerGestures, GestureHandlers } from './pointer';
+import { attachPointerGestures, currentZoom, GestureHandlers, zoomAbout } from './pointer';
 import { handleRects, renderBase, renderOverlay } from './render';
 import { AnnotationStore } from './store';
 import { HistoryStack } from './history';
@@ -52,6 +52,11 @@ interface PageMount {
 	// render.ts's renderBase/renderOverlay for why this split matters.
 	base: CanvasRenderingContext2D;
 	overlay: CanvasRenderingContext2D;
+	// The zoomable wrapper the canvases live in — the element the zoom
+	// transform is applied to. Held so a zoom asked for from the toolbar
+	// or the keyboard, which has no pointer to work back from, can reach
+	// the same machinery a pinch does.
+	content: HTMLElement;
 	detach: () => void;
 }
 
@@ -169,7 +174,7 @@ export class AnnotationController {
 		if (!base || !overlay) throw new Error('Inkling: could not acquire a 2D context for the annotation layer.');
 
 		const detach = attachPointerGestures(overlayCanvas, () => this.getHandlersFor(pageNumber));
-		this.pages.set(pageNumber, { base, overlay, detach });
+		this.pages.set(pageNumber, { base, overlay, content: host, detach });
 		this.redrawBase(pageNumber);
 		this.redrawOverlay(pageNumber);
 	}
@@ -360,6 +365,35 @@ export class AnnotationController {
 		const pageNumber = this.options.getCurrentPage?.();
 		if (pageNumber == null) return 1;
 		return this.getPageZoom(pageNumber);
+	}
+
+	// Zooms the current page by a factor, about its centre — a toolbar or
+	// keyboard zoom has no cursor to aim at, and the middle of the page is
+	// what the reader is looking at.
+	zoomBy(factor: number): void {
+		this.zoomCurrentPage((scale) => scale * factor);
+	}
+
+	resetZoom(): void {
+		this.zoomCurrentPage(() => 1);
+	}
+
+	private zoomCurrentPage(next: (scale: number) => number): void {
+		const pageNumber = this.options.getCurrentPage?.();
+		if (pageNumber == null) return;
+		const mount = this.pages.get(pageNumber);
+		const placeholder = mount?.content.parentElement;
+		if (!mount || !placeholder) return;
+
+		const rect = placeholder.getBoundingClientRect();
+		const centre = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+		const scale = zoomAbout(mount.content, placeholder, next(currentZoom(mount.content)), centre);
+		this.zoomByPage.set(pageNumber, scale);
+		this.notify();
+		// Same signal a settled pinch sends, so the page re-renders at a
+		// resolution matching the new zoom rather than staying a blown-up
+		// copy of the old raster.
+		this.options.onZoomSettled?.(pageNumber, scale);
 	}
 
 	// One specific page's zoom level, regardless of which page is current —

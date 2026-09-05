@@ -1,6 +1,12 @@
 import { setIcon, setTooltip } from 'obsidian';
 import { AnnotationController } from './controller';
+import { MAX_ZOOM } from './pointer';
 import { MAX_WIDTH, MIN_WIDTH, PRESET_COLORS, ToolType } from './types';
+
+// One press of the toolbar's zoom buttons. A ratio rather than a step, for
+// the same reason the wheel uses one: the same press should cover the same
+// proportion of the range wherever it starts from.
+const ZOOM_STEP = 1.25;
 
 // Lucide icon names (Obsidian ships the set, and setIcon resolves them), so
 // the strip reads as part of the app instead of the emoji/box-drawing mix it
@@ -181,9 +187,23 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	// Only meaningful once a page is actually pinch-zoomed (see pointer.ts) —
 	// hidden at 100% by the refresh() below rather than sitting there as
 	// permanent "100%" clutter.
-	const zoomLabel = el('span', 'inkling-status-label');
-	setTooltip(zoomLabel, 'Zoom');
-	statusGroup.append(pageLabel, zoomLabel);
+	// Zoom is a *reading* action, not an edit, so these stay enabled in
+	// read-only mode. Deliberate — do not "fix" it by adding them to the
+	// disabled sweep in refresh().
+	const zoomOutButton = iconButton('inkling-tool-button', { icon: 'zoom-out', fallback: '−', title: 'Zoom out' }, () =>
+		controller.zoomBy(1 / ZOOM_STEP),
+	);
+	const zoomInButton = iconButton('inkling-tool-button', { icon: 'zoom-in', fallback: '+', title: 'Zoom in' }, () =>
+		controller.zoomBy(ZOOM_STEP),
+	);
+	// A button, not a label: it reads out the zoom and resets it, and
+	// something you can click should be something you can tab to.
+	const zoomLabel = el('button', 'inkling-status-label inkling-status-button');
+	zoomLabel.type = 'button';
+	setTooltip(zoomLabel, 'Reset zoom');
+	zoomLabel.setAttribute('aria-label', 'Reset zoom');
+	zoomLabel.addEventListener('click', () => controller.resetZoom());
+	statusGroup.append(pageLabel, zoomOutButton, zoomLabel, zoomInButton);
 
 	bar.append(toolGroup, separator(), colorGroup, separator(), widthGroup, separator(), actionGroup, statusGroup);
 	toolbar.append(bar);
@@ -217,7 +237,12 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		});
 
 		const zoom = controller.getZoom();
+		// Only meaningful once a page is actually zoomed — a permanent
+		// "100%" is clutter. The buttons stay, since they are how a mouse
+		// gets to a zoom in the first place.
 		zoomLabel.hidden = zoom <= 1;
+		zoomOutButton.disabled = zoom <= 1;
+		zoomInButton.disabled = zoom >= MAX_ZOOM;
 		zoomLabel.setText(`${Math.round(zoom * 100)}%`);
 
 		// Hidden for a single-page surface (every Markdown ink block, and a

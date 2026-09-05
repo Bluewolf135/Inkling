@@ -178,6 +178,49 @@ function startMomentum(scrollParent: HTMLElement, velocity: number): void {
 	momentumFrame = window.requestAnimationFrame(step);
 }
 
+// Zooms a page to `targetScale` while holding whatever sits under `screen`
+// (a client-space point) in place. Shared by the pinch handler below, the
+// Ctrl/Cmd+wheel handler, and the toolbar buttons — one implementation, so
+// zooming behaves identically however it was asked for. Returns the scale
+// actually applied, which is the requested one clamped to the allowed
+// range.
+export function zoomAbout(content: HTMLElement, placeholder: HTMLElement, targetScale: number, screen: Point): number {
+	const rect = placeholder.getBoundingClientRect();
+	const zoom = getZoom(content);
+	// The content-space point currently under `screen`, solved from the
+	// transform already applied — then held fixed by solving the same
+	// transform for translate at the new scale.
+	const anchor: Point = {
+		x: (screen.x - rect.left - zoom.x) / zoom.scale,
+		y: (screen.y - rect.top - zoom.y) / zoom.scale,
+	};
+	const scale = clamp(targetScale, MIN_ZOOM, MAX_ZOOM);
+	const translate = clampTranslate(
+		screen.x - rect.left - anchor.x * scale,
+		screen.y - rect.top - anchor.y * scale,
+		scale,
+		rect.width,
+		rect.height,
+	);
+	applyZoom(content, { scale, x: translate.x, y: translate.y });
+	return scale;
+}
+
+export function currentZoom(content: HTMLElement): number {
+	return getZoom(content).scale;
+}
+
+// How hard a wheel notch zooms. Exponential rather than additive so the
+// same gesture covers the same proportion of the range wherever it starts
+// — additive steps crawl when zoomed in and lurch when zoomed out.
+const WHEEL_ZOOM_SENSITIVITY = 0.002;
+
+// A wheel produces a burst of events with no end signal of its own.
+// onZoomEnd triggers a full page re-render at a higher resolution, which
+// is real work, so it waits for the burst to stop rather than firing once
+// per notch.
+const WHEEL_SETTLE_MS = 200;
+
 // Palm rejection: touch pans/scrolls the page, pen and mouse draw — required
 // for both Apple Pencil and S Pen. Real-device testing (Samsung S Pen) found
 // that relying on native `touch-action`-driven panning for the touch side
@@ -425,18 +468,46 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 	const onPointerUp = (event: PointerEvent) => endGesture(event, false);
 	const onPointerCancel = (event: PointerEvent) => endGesture(event, true);
 
+	// Desktop zoom. A *plain* wheel is left entirely alone — losing
+	// document scroll would be a far worse trade than gaining zoom — so
+	// this only acts with Ctrl (or Cmd), which is the gesture every
+	// other document viewer uses for exactly this.
+	let wheelSettleHandle: number | null = null;
+	const onWheel = (event: WheelEvent) => {
+		if (!event.ctrlKey && !event.metaKey) return;
+		const content = el.parentElement;
+		const placeholder = content?.parentElement;
+		if (!content || !placeholder) return;
+		event.preventDefault();
+
+		const factor = Math.exp(-event.deltaY * WHEEL_ZOOM_SENSITIVITY);
+		const scale = zoomAbout(content, placeholder, currentZoom(content) * factor, { x: event.clientX, y: event.clientY });
+		getHandlers()?.onZoomChange?.(scale);
+
+		if (wheelSettleHandle !== null) window.clearTimeout(wheelSettleHandle);
+		wheelSettleHandle = window.setTimeout(() => {
+			wheelSettleHandle = null;
+			getHandlers()?.onZoomEnd?.(currentZoom(content));
+		}, WHEEL_SETTLE_MS);
+	};
+
 	el.addEventListener('pointerdown', onPointerDown);
 	el.addEventListener('pointermove', onPointerMove);
 	el.addEventListener('pointerup', onPointerUp);
 	el.addEventListener('pointercancel', onPointerCancel);
 	el.addEventListener('pointerleave', onPointerLeave);
+	// Not passive: this calls preventDefault to stop the page scrolling
+	// as well as zooming, and a passive listener may not.
+	el.addEventListener('wheel', onWheel, { passive: false });
 
 	return () => {
 		stopMomentum();
+		if (wheelSettleHandle !== null) window.clearTimeout(wheelSettleHandle);
 		el.removeEventListener('pointerdown', onPointerDown);
 		el.removeEventListener('pointermove', onPointerMove);
 		el.removeEventListener('pointerup', onPointerUp);
 		el.removeEventListener('pointercancel', onPointerCancel);
 		el.removeEventListener('pointerleave', onPointerLeave);
+		el.removeEventListener('wheel', onWheel);
 	};
 }
