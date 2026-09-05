@@ -115,6 +115,13 @@ export class AnnotationController {
 	// currently considers "current" (getCurrentPage), which in practice is
 	// whichever page the user is actually looking at/touching.
 	private readonly zoomByPage = new Map<number, number>();
+	// Coalesced pointer samples arrive several per animation frame (see
+	// annotate/pointer.ts) and each one used to repaint the overlay. The
+	// picture can only change once a frame, so the extra repaints were pure
+	// cost — more so now that a pressure-varying stroke rebuilds a filled
+	// outline from every sample it has.
+	private overlayRedrawFrame: number | null = null;
+	private overlayRedrawPage: number | null = null;
 
 	constructor(private readonly options: AnnotationControllerOptions = {}) {
 		this.toolState = options.toolState ?? new ToolState();
@@ -252,6 +259,7 @@ export class AnnotationController {
 	}
 
 	unmountAll(): void {
+		this.cancelScheduledOverlayRedraw();
 		for (const pageNumber of [...this.pages.keys()]) this.unmountPage(pageNumber);
 		this.selection = { pageNumber: -1, ids: new Set() };
 		this.drag = null;
@@ -527,7 +535,7 @@ export class AnnotationController {
 		switch (mode.kind) {
 			case 'draw':
 				mode.points.push(point);
-				this.redrawOverlay(pageNumber);
+				this.scheduleOverlayRedraw(pageNumber);
 				break;
 			case 'shape':
 				mode.end = point;
@@ -693,6 +701,24 @@ export class AnnotationController {
 	}
 
 	// ---- Rendering ----
+
+	private scheduleOverlayRedraw(pageNumber: number): void {
+		this.overlayRedrawPage = pageNumber;
+		if (this.overlayRedrawFrame !== null) return;
+		this.overlayRedrawFrame = window.requestAnimationFrame(() => {
+			this.overlayRedrawFrame = null;
+			const page = this.overlayRedrawPage;
+			this.overlayRedrawPage = null;
+			if (page !== null) this.redrawOverlay(page);
+		});
+	}
+
+	private cancelScheduledOverlayRedraw(): void {
+		if (this.overlayRedrawFrame === null) return;
+		window.cancelAnimationFrame(this.overlayRedrawFrame);
+		this.overlayRedrawFrame = null;
+		this.overlayRedrawPage = null;
+	}
 
 	private redrawAllOverlay(): void {
 		for (const pageNumber of this.pages.keys()) this.redrawOverlay(pageNumber);

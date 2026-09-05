@@ -222,7 +222,16 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 		const rect = el.getBoundingClientRect();
 		const scaleX = rect.width === 0 ? 1 : el.width / rect.width;
 		const scaleY = rect.height === 0 ? 1 : el.height / rect.height;
-		return { x: (event.clientX - rect.left) * scaleX, y: (event.clientY - rect.top) * scaleY };
+		const point: Point = { x: (event.clientX - rect.left) * scaleX, y: (event.clientY - rect.top) * scaleY };
+		// Pen only. A mouse reports a constant 0.5 for as long as a button is
+		// held, so honouring it would render every desktop stroke as a
+		// uniform ribbon at half weight — worse than having no pressure at
+		// all. A pressure of exactly 0 is a hover sample, not a feather-light
+		// touch, and would draw a stroke that pinches to nothing.
+		if (event.pointerType === 'pen' && Number.isFinite(event.pressure) && event.pressure > 0) {
+			point.p = Math.min(event.pressure, 1);
+		}
+		return point;
 	};
 
 	const isImplausiblePenContact = (event: PointerEvent): boolean =>
@@ -358,9 +367,26 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 			}
 			return;
 		}
+		// Hover stays on the single event: a cursor does not need sub-frame
+		// resolution, and asking for coalesced samples on every hover move
+		// would be work spent on a ring that is redrawn once a frame anyway.
 		if (event.pointerType !== 'touch') getHandlers()?.onHover?.(toPoint(event));
 		if (event.pointerId !== activePointerId) return;
-		getHandlers()?.onMove(toPoint(event), event);
+		const handlers = getHandlers();
+		if (!handlers) return;
+
+		// A 120Hz stylus delivers several samples per animation frame, and
+		// the browser hands over only the last one per pointermove unless
+		// asked for the rest. Everything else was being discarded before
+		// smoothing ever saw it, which is most of why fast strokes came out
+		// polygonal. Guarded because the method is absent on some WebViews,
+		// and returns an empty list on others.
+		const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
+		if (samples.length === 0) {
+			handlers.onMove(toPoint(event), event);
+			return;
+		}
+		for (const sample of samples) handlers.onMove(toPoint(sample), sample);
 	};
 
 	const onPointerLeave = (event: PointerEvent) => {
