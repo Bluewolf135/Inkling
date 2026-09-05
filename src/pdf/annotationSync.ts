@@ -23,6 +23,20 @@ type PdfLiteralArray = PdfLiteral[];
 // so they're never at risk of being corrupted or dropped.
 const ID_PREFIX = 'ink-';
 
+// Whether an annotation dict is one of ours, by the `/NM` tag every write
+// applies. Exported because verification needs the same answer (see
+// src/pdf/fingerprint.ts): a fingerprint has to exclude exactly the
+// annotations a save is allowed to change, and "exactly" means one
+// definition, not two that can drift apart.
+export function isInklingAnnotationDict(dict: PDFDict): boolean {
+	try {
+		return dict.lookupMaybe(PDFName.of('NM'), PDFString)?.decodeText()?.startsWith(ID_PREFIX) ?? false;
+	} catch {
+		// Malformed annotation dict — not ours, and not something to crash on.
+		return false;
+	}
+}
+
 function hexToRgb(color: string): [number, number, number] {
 	const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color);
 	const [, r, g, b] = match ?? [];
@@ -197,8 +211,7 @@ function removeInklingAnnotations(pdfDoc: PDFDocument, page: PDFPage): boolean {
 		if (!(entry instanceof PDFRef)) continue;
 		try {
 			const dict = pdfDoc.context.lookupMaybe(entry, PDFDict);
-			const nm = dict?.lookupMaybe(PDFName.of('NM'), PDFString)?.decodeText();
-			if (nm?.startsWith(ID_PREFIX)) toRemove.push(entry);
+			if (dict && isInklingAnnotationDict(dict)) toRemove.push(entry);
 		} catch {
 			// Malformed annotation dict — leave it alone rather than crash.
 		}
@@ -269,13 +282,7 @@ export function pruneOrphanedInklingAnnotations(pdfDoc: PDFDocument): boolean {
 	let prunedAny = false;
 	for (const [ref, object] of pdfDoc.context.enumerateIndirectObjects()) {
 		if (linked.has(ref) || !(object instanceof PDFDict)) continue;
-		let nm: string | undefined;
-		try {
-			nm = object.lookupMaybe(PDFName.of('NM'), PDFString)?.decodeText();
-		} catch {
-			continue; // Malformed dict — leave it alone rather than crash.
-		}
-		if (!nm?.startsWith(ID_PREFIX)) continue;
+		if (!isInklingAnnotationDict(object)) continue;
 		deleteAnnotationObjects(pdfDoc, ref);
 		prunedAny = true;
 	}
