@@ -5,6 +5,7 @@ import { AnnotationController, buildToolbar, MAX_ZOOM, ToolState, type Annotatio
 import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
+import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { applyTemplateStyle, PAGE_SIZE, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
 
 // pdfjs-dist is pinned to an exact version (see package.json) — 5.4.624+
@@ -40,16 +41,6 @@ const PAGE_RETAIN_MARGIN = 3;
 // successive strokes into one save matters more here than for most
 // autosave features (see the plan's Write granularity note).
 const WRITE_DEBOUNCE_MS = 1500;
-
-// A ceiling on top of the trailing debounce above: continuous handwriting
-// routinely has less than WRITE_DEBOUNCE_MS between one stroke ending and
-// the next starting, which kept resetting the trailing timer before it
-// ever fired — so nothing was actually saved to disk until the user
-// stopped for a real pause, switched back to reading, or closed the file.
-// A crash or force-quit mid-session (see the plan's real-device notes)
-// would then lose the entire session's ink. This forces a save at least
-// this often regardless of how continuously the user keeps writing.
-const MAX_WRITE_INTERVAL_MS = 5000;
 
 // pdf.js runs its own parsing off the main thread via a worker it manages
 // internally (see main.ts's configurePdfWorker) — a separate worker from
@@ -306,8 +297,16 @@ export class PdfAnnotateView extends FileView {
 	private dirtyPages = new Set<number>();
 	private writeDebounceHandle: number | null = null;
 	// Armed alongside writeDebounceHandle but, unlike it, never reset by a
-	// later edit — see MAX_WRITE_INTERVAL_MS for why this ceiling exists.
+	// later edit. Continuous handwriting routinely has less than
+	// WRITE_DEBOUNCE_MS between one stroke ending and the next starting,
+	// which kept resetting the trailing timer before it ever fired — so
+	// nothing reached disk until the user stopped for a real pause, and a
+	// force-quit lost the whole session's ink.
 	private maxWaitHandle: number | null = null;
+	// The ceiling for this file specifically — see pdf/saveCadence.ts. Set
+	// on load from the file's size; the default covers the window before a
+	// file is open.
+	private maxWriteInterval = maxWriteIntervalMs(0);
 	// Tracked ourselves rather than trusting FileView's own `this.file` at
 	// transition time — see onLoadFile's flush-before-teardown for why.
 	private currentFile: TFile | null = null;
@@ -413,6 +412,7 @@ export class PdfAnnotateView extends FileView {
 		// only *our* annotations stripped out so its default annotation-
 		// baking render still shows annotations from other PDF software
 		// (Xodo, etc.) without doubling up with our own live overlay.
+		this.maxWriteInterval = maxWriteIntervalMs(file.stat.size);
 		const bytes = await this.app.vault.readBinary(file);
 
 		// `this.teardown()` above already terminated the previous file's
@@ -876,13 +876,12 @@ export class PdfAnnotateView extends FileView {
 		if (this.writeDebounceHandle !== null) window.clearTimeout(this.writeDebounceHandle);
 		this.writeDebounceHandle = window.setTimeout(() => this.flushCurrentFileIfAny(), WRITE_DEBOUNCE_MS);
 
-		// Deliberately NOT reset here the way writeDebounceHandle above is —
-		// see MAX_WRITE_INTERVAL_MS. Only armed when nothing's already
-		// pending, so it fires a fixed time after the *first* unsaved edit
-		// in a batch, regardless of how many more edits reset the trailing
-		// debounce in the meantime.
+		// Deliberately NOT reset here the way writeDebounceHandle above is.
+		// Only armed when nothing's already pending, so it fires a fixed time
+		// after the *first* unsaved edit in a batch, regardless of how many
+		// more edits reset the trailing debounce in the meantime.
 		if (this.maxWaitHandle === null) {
-			this.maxWaitHandle = window.setTimeout(() => this.flushCurrentFileIfAny(), MAX_WRITE_INTERVAL_MS);
+			this.maxWaitHandle = window.setTimeout(() => this.flushCurrentFileIfAny(), this.maxWriteInterval);
 		}
 	}
 
