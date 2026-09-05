@@ -431,13 +431,11 @@ export class PdfAnnotateView extends FileView {
 		let writer: AnnotationWriterClient | null = null;
 		let savedAnnotations: Map<number, Annotation[]>;
 		let displayBytes: ArrayBuffer;
-		let prunedBytes: ArrayBuffer | undefined;
 		try {
 			writer = new AnnotationWriterClient();
 			const opened = await writer.open(bytes);
 			savedAnnotations = opened.savedAnnotations;
 			displayBytes = opened.displayBytes;
-			prunedBytes = opened.prunedBytes;
 		} catch (error) {
 			console.error('Inkling: could not read existing annotations from this file.', error);
 			new Notice("Inkling: could not read this PDF's existing annotations — any already on it won't show up this time.");
@@ -455,17 +453,6 @@ export class PdfAnnotateView extends FileView {
 		}
 		this.writer = writer;
 		this.savedAnnotations = savedAnnotations;
-
-		// Opening found and pruned Inkling objects orphaned by past sessions
-		// (see pruneOrphanedInklingAnnotations) — write the shrunk file back
-		// to disk right away rather than waiting for the user's next edit, so
-		// a file that's already too large for a sync tool's limit doesn't
-		// stay that way just because nothing changed this session.
-		if (prunedBytes) {
-			this.app.vault.modifyBinary(file, prunedBytes).catch((error: unknown) => {
-				console.error('Inkling: could not write back pruned annotation data.', error);
-			});
-		}
 
 		let pdf: PDFDocumentProxy;
 		try {

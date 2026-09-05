@@ -29,7 +29,6 @@ export function setAnnotationWriterWorkerSourceProvider(provider: () => Promise<
 export interface OpenResult {
 	savedAnnotations: Map<number, Annotation[]>;
 	displayBytes: ArrayBuffer;
-	prunedBytes?: ArrayBuffer;
 }
 
 export interface WritePage {
@@ -84,7 +83,7 @@ export class AnnotationWriterClient {
 		if ((await this.ensureMode()) === 'main') {
 			const opened = await openDocument(bytes);
 			this.mainDoc = opened.doc;
-			return { savedAnnotations: opened.savedAnnotations, displayBytes: opened.displayBytes, prunedBytes: opened.prunedBytes };
+			return { savedAnnotations: opened.savedAnnotations, displayBytes: opened.displayBytes };
 		}
 
 		const requestId = this.nextRequestId++;
@@ -223,7 +222,6 @@ export class AnnotationWriterClient {
 			entry.resolve({
 				savedAnnotations: message.savedAnnotations,
 				displayBytes: message.displayBytes,
-				prunedBytes: message.prunedBytes,
 			} as never);
 		} else {
 			entry.resolve(message.bytes as never);

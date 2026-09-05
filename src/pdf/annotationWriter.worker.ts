@@ -30,9 +30,6 @@ self.onmessage = async (event: MessageEvent<WorkerRequestMessage>) => {
 			const opened = await openDocument(message.bytes);
 			doc = opened.doc;
 
-			const transfer: Transferable[] = [opened.displayBytes];
-			if (opened.prunedBytes) transfer.push(opened.prunedBytes);
-
 			reply(
 				{
 					type: 'opened',
@@ -40,9 +37,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequestMessage>) => {
 					ok: true,
 					savedAnnotations: opened.savedAnnotations,
 					displayBytes: opened.displayBytes,
-					prunedBytes: opened.prunedBytes,
 				},
-				transfer,
+				[opened.displayBytes],
 			);
 		} catch (error) {
 			reply({ type: 'opened', requestId: message.requestId, ok: false, error: String(error) });

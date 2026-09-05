@@ -29,12 +29,6 @@ interface OpenedOk {
 	// annotation-baking render still shows annotations from other PDF
 	// software without doubling up with our own live overlay.
 	displayBytes: ArrayBuffer;
-	// Present only when opening found and pruned orphaned Inkling objects
-	// left behind by past sessions (see pruneOrphanedInklingAnnotations) —
-	// the resaved bytes, for the caller to write straight back to disk so a
-	// bloated file shrinks immediately, without waiting on the user to make
-	// a new edit first.
-	prunedBytes?: ArrayBuffer;
 }
 
 interface WrittenOk {

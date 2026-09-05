@@ -18,10 +18,6 @@ export interface OpenedDocument {
 	// stripped out, so its annotation-baking render still shows annotations
 	// from other PDF software without doubling up with our live overlay.
 	displayBytes: ArrayBuffer;
-	// Present only when opening found and pruned orphaned Inkling objects
-	// left behind by past sessions — the resaved bytes, to write straight
-	// back to disk so a bloated file shrinks immediately.
-	prunedBytes?: ArrayBuffer;
 }
 
 export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -37,10 +33,15 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		if (annotations.length > 0) savedAnnotations.set(index + 1, annotations);
 	}
 
-	let prunedBytes: ArrayBuffer | undefined;
-	if (pruneOrphanedInklingAnnotations(doc)) {
-		prunedBytes = toArrayBuffer(await doc.save());
-	}
+	// Orphans left by past sessions are pruned in memory and carried by
+	// whatever save happens next, rather than triggering a write of their
+	// own. Opening a file the user only means to read must not modify it —
+	// a standalone write here is a full pdf-lib round trip and, under a
+	// live-replicating sync, a full re-upload, neither of which the user
+	// asked for by opening a book. The return value is ignored: there is
+	// nothing to do differently either way now that the document in memory
+	// is already correct.
+	pruneOrphanedInklingAnnotations(doc);
 
 	// A second, independent parse of the same bytes — only worth it (and its
 	// own save()) when this file actually has Inkling annotations to strip
@@ -56,7 +57,7 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		displayBytes = bytes.slice(0);
 	}
 
-	return { doc, savedAnnotations, displayBytes, prunedBytes };
+	return { doc, savedAnnotations, displayBytes };
 }
 
 export async function writeDocument(
