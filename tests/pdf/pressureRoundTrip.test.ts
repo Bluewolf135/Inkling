@@ -1,4 +1,4 @@
-import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRef } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRef, PDFString } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { readInklingAnnotations, writeInklingAnnotations } from '../../src/pdf/annotationSync';
 import type { StrokeAnnotation } from '../../src/annotate/types';
@@ -125,5 +125,81 @@ describe('pressure round trip', () => {
 			},
 		]);
 		expect(inklingDict(doc)).toBeUndefined();
+	});
+});
+
+// The other half of what makes an annotation a note: the words it covers,
+// and what the user said about them.
+describe('quote and note round trip', () => {
+	it('recovers both through a save and reload', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [
+			{
+				id: 'ink-q',
+				kind: 'stroke',
+				tool: 'highlighter',
+				color: '#f08c00',
+				width: 12,
+				points: [{ x: 0, y: 100 }, { x: 200, y: 100 }],
+				quote: 'Entropy is not disorder',
+				note: 'check this against chapter 4',
+			},
+		]);
+
+		const [read] = readInklingAnnotations(await reload(doc), 0);
+		expect(read?.quote).toBe('Entropy is not disorder');
+		expect(read?.note).toBe('check this against chapter 4');
+	});
+
+	it('puts the note in /Contents, where other PDF readers look for it', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [
+			{ ...penStroke([{ x: 0, y: 0 }, { x: 10, y: 10 }]), note: 'a thought' },
+		]);
+		const annots = doc.getPage(0).node.Annots();
+		const first = annots?.asArray()[0];
+		const dict = first instanceof PDFRef ? doc.context.lookupMaybe(first, PDFDict) : undefined;
+		expect(dict?.lookupMaybe(PDFName.of('Contents'), PDFString)?.decodeText()).toBe('a thought');
+	});
+
+	it('keeps the quote out of /Contents, so the two can never be confused', async () => {
+		// On read there would be no way to tell which of the two a /Contents
+		// string was, and guessing wrong turns a highlight of the book into a
+		// comment the user never wrote.
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [{ ...penStroke([{ x: 0, y: 0 }, { x: 10, y: 10 }]), quote: 'from the book' }]);
+		const annots = doc.getPage(0).node.Annots();
+		const first = annots?.asArray()[0];
+		const dict = first instanceof PDFRef ? doc.context.lookupMaybe(first, PDFDict) : undefined;
+		expect(dict?.lookupMaybe(PDFName.of('Contents'), PDFString)).toBeUndefined();
+
+		const [read] = readInklingAnnotations(await reload(doc), 0);
+		expect(read?.quote).toBe('from the book');
+		expect(read?.note).toBeUndefined();
+	});
+
+	it('carries them on a shape as well as a stroke', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [
+			{
+				id: 'ink-box',
+				kind: 'shape',
+				tool: 'rectangle',
+				color: '#1971c2',
+				width: 3,
+				start: { x: 10, y: 10 },
+				end: { x: 100, y: 60 },
+				note: 'this diagram is wrong',
+			},
+		]);
+		expect(readInklingAnnotations(await reload(doc), 0)[0]?.note).toBe('this diagram is wrong');
+	});
+
+	it('writes neither field when there is nothing to say', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [{ ...penStroke([{ x: 0, y: 0 }, { x: 10, y: 10 }]), quote: '   ', note: '' }]);
+		const [read] = readInklingAnnotations(await reload(doc), 0);
+		expect(read?.quote).toBeUndefined();
+		expect(read?.note).toBeUndefined();
 	});
 });

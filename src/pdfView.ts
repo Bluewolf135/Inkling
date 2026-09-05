@@ -8,6 +8,7 @@ import { toArrayBuffer } from './binary';
 import { writeBinarySafely } from './vaultWrite';
 import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
 import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
+import { BASELINE_DESCENT_RATIO, groupIntoLines, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { applyTemplateStyle, PAGE_SIZE, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
 
@@ -143,24 +144,8 @@ function convert(viewport: PageViewport, point: Point, direction: 'toViewport' |
 
 // One line of real PDF text, in canvas space — used to snap a freehand
 // highlighter stroke to straight segments (see snapHighlighterStroke)
-// instead of committing it as drawn.
-interface TextLine {
-	minX: number;
-	maxX: number;
-	centerY: number;
-	height: number;
-}
-
-// How far below a line's baseline its descenders (g, p, y) reach, as a
-// fraction of the line height pdf.js reports. A text item's origin is its
-// baseline, not the bottom of its glyphs; treating it as the bottom put the
-// whole box — and so every snapped highlight — noticeably above the words.
-// Measured against the running app rather than assumed: comparing each
-// computed line centre to the actual centre of the rendered ink (row-wise
-// dark-pixel profile, clustered into text bands) over 83 lines across three
-// pages put the error at a consistent 0.17 of line height, always in the
-// same direction (median 0.176, 10th-90th percentile 0.08-0.24).
-const BASELINE_DESCENT_RATIO = 0.175;
+// instead of committing it as drawn, and to report the words that stroke
+// covered (see src/pdf/textLines.ts, which owns the grouping and clipping).
 
 // pdf.js's text items carry their own transform in the page's raw PDF
 // space (unscaled, unrotated — the same space annotation coordinates round
@@ -172,13 +157,7 @@ const BASELINE_DESCENT_RATIO = 0.175;
 async function computeTextLines(page: PDFPageProxy, viewport: PageViewport): Promise<TextLine[]> {
 	const content = await page.getTextContent();
 
-	interface Box {
-		minX: number;
-		maxX: number;
-		centerY: number;
-		height: number;
-	}
-	const boxes: Box[] = [];
+	const boxes: PositionedBox[] = [];
 	for (const item of content.items) {
 		if (!('str' in item) || !item.str.trim()) continue;
 		// pdf.js types `transform` loosely; it is always the six-element
@@ -201,33 +180,20 @@ async function computeTextLines(page: PDFPageProxy, viewport: PageViewport): Pro
 		const ys = corners.map((c) => c.y);
 		const minY = Math.min(...ys);
 		const maxY = Math.max(...ys);
-		boxes.push({ minX: Math.min(...xs), maxX: Math.max(...xs), centerY: (minY + maxY) / 2, height: Math.max(maxY - minY, 1) });
-	}
-	boxes.sort((a, b) => a.centerY - b.centerY);
-
-	const lines: TextLine[] = [];
-	let current: Box[] = [];
-	const flush = () => {
-		if (current.length === 0) return;
-		lines.push({
-			minX: Math.min(...current.map((b) => b.minX)),
-			maxX: Math.max(...current.map((b) => b.maxX)),
-			centerY: current.reduce((sum, b) => sum + b.centerY, 0) / current.length,
-			height: Math.max(...current.map((b) => b.height)),
+		// The string is kept, where it used to be read only to skip blanks and
+		// then thrown away. Carrying it through is the whole of "extract
+		// highlights to notes": the geometry that decides which lines a
+		// stroke swept already knows which words those are.
+		boxes.push({
+			text: item.str,
+			minX: Math.min(...xs),
+			maxX: Math.max(...xs),
+			centerY: (minY + maxY) / 2,
+			height: Math.max(maxY - minY, 1),
 		});
-		current = [];
-	};
-	for (const box of boxes) {
-		if (current.length > 0) {
-			const avgCenterY = current.reduce((sum, b) => sum + b.centerY, 0) / current.length;
-			const avgHeight = current.reduce((sum, b) => sum + b.height, 0) / current.length;
-			if (Math.abs(box.centerY - avgCenterY) > avgHeight * 0.6) flush();
-		}
-		current.push(box);
 	}
-	flush();
 
-	return lines;
+	return groupIntoLines(boxes);
 }
 
 // pdf.js's half of the structure profile (see src/pdf/compatibility.ts).
@@ -1056,19 +1022,30 @@ export class PdfAnnotateView extends FileView {
 		});
 		if (hits.length === 0) return null;
 
-		return hits.map(
-			(line): Annotation => ({
+		return hits.map((line): Annotation => {
+			const from = Math.max(line.minX, strokeMinX);
+			const to = Math.min(line.maxX, strokeMaxX);
+			// The words this segment covers, taken from the very geometry
+			// that decided which lines the stroke swept. No new interaction,
+			// no text layer, no second pass — the highlighter gesture is
+			// exactly what it was, and it now knows what it highlighted.
+			const quote = quoteBetween(line, from, to);
+			return {
 				id: createId(),
 				kind: 'stroke',
 				tool: 'highlighter',
 				color,
 				width: line.height,
 				points: [
-					{ x: Math.max(line.minX, strokeMinX), y: line.centerY },
-					{ x: Math.min(line.maxX, strokeMaxX), y: line.centerY },
+					{ x: from, y: line.centerY },
+					{ x: to, y: line.centerY },
 				],
-			}),
-		);
+				// Omitted rather than stored empty: an absent quote means
+				// "recompute me", and an empty one would mean "this covers no
+				// words", which is a different and wrong claim.
+				...(quote ? { quote } : {}),
+			};
+		});
 	}
 
 	private markPageDirty(pageNumber: number): void {

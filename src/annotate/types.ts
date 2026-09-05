@@ -19,6 +19,17 @@ interface BaseAnnotation {
 	id: string;
 	color: string;
 	width: number;
+	// The document text this annotation covers, captured when it was
+	// drawn. Optional and never relied on: extraction recomputes it
+	// geometrically when it is absent, which is what lets highlights made
+	// before this existed — and ones made in other PDF software — extract
+	// too. Stored only as a shortcut, so the common case needs no text
+	// layer at all.
+	quote?: string;
+	// What the user wrote about it. Serialized to the annotation’s own
+	// /Contents, which is the standard field, so other PDF readers show
+	// it as a tooltip rather than losing it.
+	note?: string;
 }
 
 export interface StrokeAnnotation extends BaseAnnotation {

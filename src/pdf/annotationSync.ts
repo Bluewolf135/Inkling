@@ -116,6 +116,50 @@ function fillHeader(color: string): string[] {
 const INKLING_EXTRAS = 'Inkling';
 const PRESSURE_KEY = 'P';
 
+// The text an annotation covers, under the same private key as pressure.
+//
+// /Contents is where the *user’s* note goes — that is the standard field,
+// and putting it there is why other PDF readers show it as a tooltip
+// instead of losing it. The quoted text cannot go there too: on read there
+// would be no way to tell which of the two a /Contents string was, and
+// guessing wrong turns a highlight of the book into a comment the user
+// never wrote.
+const QUOTE_KEY = 'Q';
+
+// Copies the fields every annotation kind shares into a dict being built.
+// The private extras dict is created lazily, so an annotation with neither
+// a quote nor pressure carries no extra bytes at all.
+function withSharedFields(fields: PdfLiteralObject, annotation: Annotation): PdfLiteralObject {
+	const note = annotation.note?.trim();
+	if (note) fields.Contents = PDFString.of(note);
+
+	const quote = annotation.quote?.trim();
+	if (quote) {
+		const extras = (fields[INKLING_EXTRAS] ?? {}) as PdfLiteralObject;
+		extras[QUOTE_KEY] = PDFString.of(quote);
+		fields[INKLING_EXTRAS] = extras;
+	}
+	return fields;
+}
+
+// The other half of withSharedFields: reads both back onto an annotation.
+// Empty strings are dropped rather than kept, because "" and absent are
+// the same thing here and only one of them should reach the rest of the
+// code.
+function readSharedFields(dict: PDFDict, annotation: Annotation): Annotation {
+	const note = dict.lookupMaybe(PDFName.of('Contents'), PDFString)?.decodeText().trim();
+	if (note) annotation.note = note;
+
+	const quote = dict
+		.lookupMaybe(PDFName.of(INKLING_EXTRAS), PDFDict)
+		?.lookupMaybe(PDFName.of(QUOTE_KEY), PDFString)
+		?.decodeText()
+		.trim();
+	if (quote) annotation.quote = quote;
+
+	return annotation;
+}
+
 function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotation): void {
 	const [r, g, b] = hexToRgb(stroke.color);
 	const box = boundingBox(stroke);
@@ -156,7 +200,7 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 		};
 	}
 
-	tagAndAdd(pdfDoc, page, stroke.id, fields);
+	tagAndAdd(pdfDoc, page, stroke.id, withSharedFields(fields, stroke));
 }
 
 function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation): void {
@@ -200,16 +244,24 @@ function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation):
 
 	const apRef = buildAppearanceStream(pdfDoc, bbox, content);
 
-	tagAndAdd(pdfDoc, page, shape.id, {
-		Type: 'Annot',
-		Subtype: subtype,
-		Rect: bbox,
-		C: [r, g, b],
-		BS: { W: shape.width },
-		F: 4,
-		AP: { N: apRef },
-		...extra,
-	});
+	tagAndAdd(
+		pdfDoc,
+		page,
+		shape.id,
+		withSharedFields(
+			{
+				Type: 'Annot',
+				Subtype: subtype,
+				Rect: bbox,
+				C: [r, g, b],
+				BS: { W: shape.width },
+				F: 4,
+				AP: { N: apRef },
+				...extra,
+			},
+			shape,
+		),
+	);
 }
 
 // Frees one annotation's own indirect objects from the document context —
@@ -437,7 +489,7 @@ export function readInklingAnnotations(pdfDoc: PDFDocument, pageIndex: number): 
 			if (!id || !id.startsWith(ID_PREFIX)) continue;
 
 			const annotation = readOne(id, dict);
-			if (annotation) result.push(annotation);
+			if (annotation) result.push(readSharedFields(dict, annotation));
 		} catch (error) {
 			console.error('Inkling: skipping an unreadable annotation while loading a page.', error);
 		}
