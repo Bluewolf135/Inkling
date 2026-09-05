@@ -5,6 +5,7 @@ import {
 	INK_BLOCK_VERSION,
 	emptyInkBlock,
 	parseInkBlock,
+	readInkBlockId,
 	serializeInkBlock,
 } from '../../src/markdown/inkBlockFormat';
 
@@ -87,6 +88,17 @@ describe('parseInkBlock', () => {
 		expect(malformed).toBe(true);
 	});
 
+	it('carries a block id through a round trip', () => {
+		const source = serializeInkBlock({ ...emptyInkBlock(), id: 'ink-block-7' });
+		expect(parseInkBlock(source).data.id).toBe('ink-block-7');
+	});
+
+	it('leaves the id undefined for a block written before ids existed', () => {
+		expect(parseInkBlock(JSON.stringify({ width: 400, height: 200, annotations: [] })).data.id).toBeUndefined();
+		expect(parseInkBlock(JSON.stringify({ id: 42, annotations: [] })).data.id).toBeUndefined();
+		expect(parseInkBlock(JSON.stringify({ id: '', annotations: [] })).data.id).toBeUndefined();
+	});
+
 	it('survives hostile input without throwing', () => {
 		for (const source of [
 			'{"annotations": {"0": {}}}',
@@ -96,5 +108,36 @@ describe('parseInkBlock', () => {
 		]) {
 			expect(() => parseInkBlock(source)).not.toThrow();
 		}
+	});
+});
+
+// The guard that stops one ink block being saved over another. A note full
+// of blocks is a note full of identical-looking ```inkling fences, so a
+// save that only checks the fence's *shape* will happily overwrite the
+// wrong one when Obsidian reports the wrong line range — which is how a
+// drawing from one block ended up duplicated in the block below it.
+describe('readInkBlockId', () => {
+	it('reads the id out of a serialized block', () => {
+		expect(readInkBlockId(serializeInkBlock({ ...emptyInkBlock(), id: 'ink-abc' }))).toBe('ink-abc');
+	});
+
+	it('tells two different blocks apart', () => {
+		const a = serializeInkBlock({ ...emptyInkBlock(), id: 'ink-a' });
+		const b = serializeInkBlock({ ...emptyInkBlock(), id: 'ink-b' });
+		expect(readInkBlockId(a)).not.toBe(readInkBlockId(b));
+	});
+
+	it('returns null rather than a guess for anything it cannot read', () => {
+		// Null is "can't confirm", which the caller must treat as "don't
+		// write" — never as a match.
+		expect(readInkBlockId('')).toBeNull();
+		expect(readInkBlockId('{not json')).toBeNull();
+		expect(readInkBlockId('[{"id":"ink-a"}]')).toBeNull();
+		expect(readInkBlockId(JSON.stringify({ annotations: [] }))).toBeNull();
+		expect(readInkBlockId(JSON.stringify({ id: 12 }))).toBeNull();
+	});
+
+	it('tolerates the surrounding whitespace a hand-edited fence can have', () => {
+		expect(readInkBlockId(`\n  ${serializeInkBlock({ ...emptyInkBlock(), id: 'ink-x' })}  \n`)).toBe('ink-x');
 	});
 });

@@ -1,11 +1,13 @@
 import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, setIcon, setTooltip, TFile } from 'obsidian';
 import { AnnotationController, buildToolbar, capturePointer, findScrollParent, ToolState } from '../annotate';
+import { createId } from '../annotate/id';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
 	emptyInkBlock,
 	inkBlockMarkdown,
 	parseInkBlock,
+	readInkBlockId,
 	serializeInkBlock,
 } from './inkBlockFormat';
 
@@ -87,6 +89,15 @@ class InkBlockView {
 	// case the tool strip simply isn't remembered.
 	private readonly stripKey: string | null;
 
+	// This block's own identity in the note, and the exact text it rendered
+	// from — the two things a save checks before overwriting a fence. See
+	// matchesThisBlock for why "it's an ink block" was not enough.
+	private readonly blockId: string;
+	private renderedSource: string;
+	// One report per view, not one per save: a mismatch repeats on every
+	// debounce tick for as long as the note is open.
+	private reportedMismatch = false;
+
 	constructor(
 		private readonly plugin: Plugin,
 		private readonly ctx: MarkdownPostProcessorContext,
@@ -95,7 +106,11 @@ class InkBlockView {
 		toolState: ToolState,
 	) {
 		const { data, malformed } = parseInkBlock(source);
-		this.data = data;
+		// A block written before ids existed picks one up the first time it
+		// saves; until then matchesThisBlock falls back to the source text.
+		this.blockId = data.id ?? createId();
+		this.data = { ...data, id: this.blockId };
+		this.renderedSource = source.trim();
 
 		const section = ctx.getSectionInfo(containerEl);
 		this.stripKey = section ? `${ctx.sourcePath}::${section.lineStart}` : null;
@@ -343,12 +358,16 @@ class InkBlockView {
 			// working in — one undo step, no external-modification reload,
 			// and no fight with unsaved changes the editor hasn't flushed to
 			// disk yet.
-			if (!this.isBlockAt(section.lineStart, section.lineEnd, (line) => editor.getLine(line))) return;
+			if (!this.matchesThisBlock(section.lineStart, section.lineEnd, (line) => editor.getLine(line))) {
+				this.reportMismatch();
+				return;
+			}
 			editor.replaceRange(
 				`${serialized}\n`,
 				{ line: section.lineStart + 1, ch: 0 },
 				{ line: section.lineEnd, ch: 0 },
 			);
+			this.renderedSource = serialized;
 			restoreScroll();
 			return;
 		}
@@ -357,13 +376,20 @@ class InkBlockView {
 		if (!(file instanceof TFile)) return;
 
 		try {
+			let wrote = false;
 			await this.plugin.app.vault.process(file, (contents) => {
 				const lines = contents.split('\n');
 				if (section.lineEnd >= lines.length) return contents;
-				if (!this.isBlockAt(section.lineStart, section.lineEnd, (line) => lines[line])) return contents;
+				if (!this.matchesThisBlock(section.lineStart, section.lineEnd, (line) => lines[line])) return contents;
 				lines.splice(section.lineStart + 1, section.lineEnd - section.lineStart - 1, serialized);
+				wrote = true;
 				return lines.join('\n');
 			});
+			if (!wrote) {
+				this.reportMismatch();
+				return;
+			}
+			this.renderedSource = serialized;
 			restoreScroll();
 		} catch (error) {
 			console.error('Inkling: failed to save an ink block.', error);
@@ -371,18 +397,51 @@ class InkBlockView {
 		}
 	}
 
-	// Confirms the lines about to be replaced really are this block's fence,
-	// so a stale position can never put stroke data over the user's prose.
-	private isBlockAt(lineStart: number, lineEnd: number, lineAt: (line: number) => string | undefined): boolean {
+	// Confirms the lines about to be replaced really are *this* block's
+	// fence, so a stale or mistaken position can never put one block's
+	// drawing over another's, or over the user's prose.
+	//
+	// Checking the shape — an opening ```inkling and a closing ``` — is not
+	// enough, and that was the bug: every ink block in a note has exactly
+	// that shape, so when Obsidian's getSectionInfo handed a block the line
+	// range of a *different* one (which it does in a note holding several),
+	// the write sailed through and the drawing from one block turned up
+	// duplicated in the one below it. Identity has to be checked, not just
+	// kind.
+	private matchesThisBlock(lineStart: number, lineEnd: number, lineAt: (line: number) => string | undefined): boolean {
 		if (lineEnd <= lineStart) return false;
 		const opening = lineAt(lineStart);
 		const closing = lineAt(lineEnd);
-		return (
-			opening !== undefined &&
-			closing !== undefined &&
-			opening.trimStart().startsWith('```') &&
-			opening.includes(INK_BLOCK_LANGUAGE) &&
-			closing.trimStart().startsWith('```')
+		if (opening === undefined || closing === undefined) return false;
+		if (!opening.trimStart().startsWith('```') || !opening.includes(INK_BLOCK_LANGUAGE)) return false;
+		if (!closing.trimStart().startsWith('```')) return false;
+
+		const body: string[] = [];
+		for (let line = lineStart + 1; line < lineEnd; line++) {
+			const text = lineAt(line);
+			if (text === undefined) return false;
+			body.push(text);
+		}
+		const source = body.join('\n');
+
+		const id = readInkBlockId(source);
+		if (id !== null) return id === this.blockId;
+		// No id in that fence: a block from before ids existed, or one this
+		// view has not yet stamped. Matching the exact text this view
+		// rendered from is as specific as the older format allows, and it
+		// still separates a block with ink in it from an empty neighbour.
+		return source.trim() === this.renderedSource;
+	}
+
+	// Refusing to save is the safe outcome, but a silent one would look like
+	// ink vanishing, so say so once. The block's own next render re-seeds
+	// from the file and picks the work back up.
+	private reportMismatch(): void {
+		if (this.reportedMismatch) return;
+		this.reportedMismatch = true;
+		console.error(
+			`Inkling: not saving ink block ${this.blockId} — the lines Obsidian reported for it belong to a different block. ` +
+				'The drawing is still on screen and will be saved once the note re-renders.',
 		);
 	}
 
@@ -451,9 +510,12 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState): void {
 		// Command palette only, per the plan — no ribbon icon, so it's
 		// reachable the same way on desktop and mobile.
 		editorCallback: (editor) => {
+			// Stamped with its id up front, so a note full of freshly inserted
+			// blocks — which are otherwise byte-identical — can still tell
+			// itself apart at save time. See InkBlockView.matchesThisBlock.
 			// Trailing newline so the cursor ends up on a fresh line after
 			// the block rather than inside the fence.
-			editor.replaceSelection(`${inkBlockMarkdown(emptyInkBlock())}\n`);
+			editor.replaceSelection(`${inkBlockMarkdown({ ...emptyInkBlock(), id: createId() })}\n`);
 		},
 	});
 }

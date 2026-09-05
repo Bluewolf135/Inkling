@@ -21,6 +21,19 @@ export const DEFAULT_BLOCK_HEIGHT = 450;
 
 export interface InkBlockData {
 	version: number;
+	// A stable identity for this block, so a save can tell "this is an ink
+	// block" apart from "this is *my* ink block".
+	//
+	// Every ink block in a note is an `inkling` fence, and Obsidian's
+	// getSectionInfo can hand a block the line range of a *different* one
+	// when several sit in the same note — which meant one block's drawing
+	// could be written over another's, and appeared as the drawing from the
+	// block above turning up duplicated in the block below.
+	//
+	// Optional because blocks written before this existed have none. Those
+	// fall back to comparing the fence's whole body, and pick up an id the
+	// first time they save.
+	id?: string;
 	width: number;
 	height: number;
 	annotations: Annotation[];
@@ -141,7 +154,24 @@ export function parseInkBlock(source: string): ParseResult {
 	// on that basis.
 	const fromFuture = version > INK_BLOCK_VERSION;
 
-	return { data: { version, width, height, annotations }, malformed: droppedAny || fromFuture };
+	const id = typeof raw.id === 'string' && raw.id ? raw.id : undefined;
+
+	return { data: { version, id, width, height, annotations }, malformed: droppedAny || fromFuture };
+}
+
+// The block's identity, read without parsing the rest of it — used when a
+// save has to confirm the fence it is about to overwrite is its own and not
+// a neighbour's. Returns null for anything unreadable, which the caller
+// treats as "can't confirm", never as "matches".
+export function readInkBlockId(source: string): string | null {
+	try {
+		const parsed: unknown = JSON.parse(source.trim());
+		if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+		const id = (parsed as { id?: unknown }).id;
+		return typeof id === 'string' && id ? id : null;
+	} catch {
+		return null;
+	}
 }
 
 export function serializeInkBlock(data: InkBlockData): string {
@@ -150,6 +180,9 @@ export function serializeInkBlock(data: InkBlockData): string {
 	// swamp the actual writing around it.
 	return JSON.stringify({
 		version: INK_BLOCK_VERSION,
+		// First, so a block's identity is readable without parsing past the
+		// stroke data — which for a densely drawn block is most of the line.
+		...(data.id ? { id: data.id } : {}),
 		width: data.width,
 		height: data.height,
 		annotations: data.annotations,
