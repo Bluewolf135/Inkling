@@ -88,6 +88,13 @@ export interface AnnotationControllerOptions {
 	// stroke, or the host view doesn't support this — e.g. Markdown ink
 	// blocks later) falls back to committing the raw stroke as drawn.
 	onSnapHighlighterStroke?: (pageNumber: number, points: Point[], color: string) => Annotation[] | null;
+	// Asks the host surface to scroll to a page. Only the host knows how
+	// its pages are laid out — a Markdown ink block has exactly one and
+	// omits this, which is what hides the toolbar page controls there.
+	onGoToPage?: (pageNumber: number) => void;
+	// Asks the host to show or hide its navigation panel. Same reasoning:
+	// the panel belongs to the PDF view, not to the shared controller.
+	onToggleNavigation?: () => void;
 }
 
 // The shared annotation tool module — owns tool/color/width state, an
@@ -430,6 +437,24 @@ export class AnnotationController {
 
 	addPage(): void {
 		this.options.onAddPage?.();
+	}
+
+	canNavigate(): boolean {
+		return this.options.onGoToPage !== undefined;
+	}
+
+	goToPage(pageNumber: number): void {
+		const clamped = Math.min(Math.max(Math.round(pageNumber), 1), this.pageCount);
+		if (!Number.isFinite(clamped)) return;
+		this.options.onGoToPage?.(clamped);
+	}
+
+	canToggleNavigation(): boolean {
+		return this.options.onToggleNavigation !== undefined;
+	}
+
+	toggleNavigation(): void {
+		this.options.onToggleNavigation?.();
 	}
 
 	clearCurrentPage(): void {

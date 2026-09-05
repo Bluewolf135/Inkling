@@ -175,15 +175,41 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		{ icon: 'file-plus', fallback: '＋', title: 'Add page' },
 		() => controller.addPage(),
 	);
-	actionGroup.append(undoButton, redoButton, separator(), deleteButton, clearPageButton, addPageButton);
+	// Opens the outline and find panel. Like zoom, a reading action, so it
+	// stays enabled when the document is read-only.
+	const navButton = iconButton(
+		'inkling-tool-button',
+		{ icon: 'panel-left', fallback: '☰', title: 'Outline and find' },
+		() => controller.toggleNavigation(),
+	);
+	actionGroup.append(undoButton, redoButton, separator(), deleteButton, clearPageButton, addPageButton, navButton);
 
 	// Readouts, not controls — pushed to the far end of the strip (see
 	// .inkling-toolbar-status) so the things you press stay together on the
 	// left instead of being pulled apart by text that changes width as you
 	// scroll or zoom.
 	const statusGroup = el('div', 'inkling-toolbar-group inkling-toolbar-status');
+	// A number input rather than a readout: on a 900-page book, "jump to
+	// page 412" is the single most-used navigation there is, and losing it
+	// on the way into annotate mode is most of why marking up a textbook
+	// used to mean losing your place.
+	const pageBox = el('input', 'inkling-page-box');
+	pageBox.type = 'number';
+	pageBox.min = '1';
+	setTooltip(pageBox, 'Go to page');
+	pageBox.setAttribute('aria-label', 'Go to page');
+	const goToTypedPage = () => {
+		const parsed = Number(pageBox.value);
+		if (Number.isFinite(parsed)) controller.goToPage(parsed);
+	};
+	pageBox.addEventListener('change', goToTypedPage);
+	pageBox.addEventListener('keydown', (event: KeyboardEvent) => {
+		if (event.key !== 'Enter') return;
+		event.preventDefault();
+		goToTypedPage();
+	});
 	const pageLabel = el('span', 'inkling-status-label');
-	setTooltip(pageLabel, 'Current page');
+	setTooltip(pageLabel, 'Page count');
 	// Only meaningful once a page is actually pinch-zoomed (see pointer.ts) —
 	// hidden at 100% by the refresh() below rather than sitting there as
 	// permanent "100%" clutter.
@@ -203,7 +229,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	setTooltip(zoomLabel, 'Reset zoom');
 	zoomLabel.setAttribute('aria-label', 'Reset zoom');
 	zoomLabel.addEventListener('click', () => controller.resetZoom());
-	statusGroup.append(pageLabel, zoomOutButton, zoomLabel, zoomInButton);
+	statusGroup.append(pageBox, pageLabel, zoomOutButton, zoomLabel, zoomInButton);
 
 	bar.append(toolGroup, separator(), colorGroup, separator(), widthGroup, separator(), actionGroup, statusGroup);
 	toolbar.append(bar);
@@ -248,8 +274,15 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		// Hidden for a single-page surface (every Markdown ink block, and a
 		// one-page note), where "1 / 1" says nothing anyone needed to know.
 		const pageCount = controller.getPageCount();
-		pageLabel.hidden = pageCount <= 1;
-		pageLabel.setText(`${controller.getCurrentPageNumber()} / ${pageCount}`);
+		const multiPage = pageCount > 1;
+		pageLabel.hidden = !multiPage;
+		pageBox.hidden = !multiPage || !controller.canNavigate();
+		pageBox.max = String(pageCount);
+		pageLabel.setText(`/ ${pageCount}`);
+		// Not while it is being typed into, or every keystroke would be
+		// overwritten by the page the reader is still sitting on.
+		if (document.activeElement !== pageBox) pageBox.value = String(controller.getCurrentPageNumber());
+		navButton.hidden = !controller.canToggleNavigation();
 
 		// Disabled rather than hidden: the strip vanishing would read as a
 		// bug, where a row of greyed-out tools reads as "not here", which is

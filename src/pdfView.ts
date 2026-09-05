@@ -7,6 +7,7 @@ import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
 import { writeBinarySafely } from './vaultWrite';
 import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
+import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { applyTemplateStyle, PAGE_SIZE, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
 
@@ -349,6 +350,15 @@ export class PdfAnnotateView extends FileView {
 	// is a property of the document, and retrying forever just means a
 	// notice every interval for as long as the book stays open.
 	private consecutiveWriteFailures = 0;
+	// The outline/find panel and its outline area, held so teardown can
+	// drop them and so a find can write into them from a walk that
+	// outlives the keystroke that started it.
+	private navPanel: HTMLElement | null = null;
+	private navOutline: HTMLElement | null = null;
+	// Supersedes an in-flight document search. Separate from renderToken:
+	// a second search within the same file has to cancel the first, and
+	// bumping the render token would cancel the whole page pipeline.
+	private findToken = 0;
 	// Tracked ourselves rather than trusting FileView's own `this.file` at
 	// transition time — see onLoadFile's flush-before-teardown for why.
 	private currentFile: TFile | null = null;
@@ -372,6 +382,8 @@ export class PdfAnnotateView extends FileView {
 			onAnnotationsChanged: (pageNumber) => this.markPageDirty(pageNumber),
 			onZoomSettled: (pageNumber, scale) => void this.upgradeResolution(pageNumber, scale),
 			onSnapHighlighterStroke: (pageNumber, points, color) => this.snapHighlighterStroke(pageNumber, points, color),
+			onGoToPage: (pageNumber) => this.scrollToPage(pageNumber),
+			onToggleNavigation: () => this.toggleNavigationPanel(),
 		});
 	}
 
@@ -547,6 +559,7 @@ export class PdfAnnotateView extends FileView {
 		this.teardown();
 		this.contentEl.addClass('inkling-pdf-view');
 		this.disposeToolbar = buildToolbar(this.contentEl, this.controller);
+		this.buildNavigationPanel();
 
 		// Everything below this point is asynchronous — reading the file,
 		// parsing it in the writer worker, then opening it in pdf.js — and a
@@ -691,6 +704,10 @@ export class PdfAnnotateView extends FileView {
 
 		this.controller.setPageCount(pdf.numPages);
 		this.clearLoading();
+		// Not awaited: an outline is a convenience, and resolving every
+		// destination on a deeply nested one is a per-entry pdf.js call no
+		// reader should wait behind to see page 1.
+		void this.loadOutline(pdf, token);
 
 		for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
 			const placeholder = this.contentEl.createDiv({
@@ -749,6 +766,11 @@ export class PdfAnnotateView extends FileView {
 		this.upgradingPages.clear();
 		this.textLines.clear();
 		this.pendingScrollToPage = null;
+		// Bumped so an in-flight document search stops walking a file that
+		// is no longer open.
+		this.findToken++;
+		this.navPanel = null;
+		this.navOutline = null;
 		if (this.writeDebounceHandle !== null) {
 			window.clearTimeout(this.writeDebounceHandle);
 			this.writeDebounceHandle = null;
@@ -1181,6 +1203,133 @@ export class PdfAnnotateView extends FileView {
 		} finally {
 			this.addingPage = false;
 		}
+	}
+
+	// ---- Navigation panel (outline + find) ----
+
+	// Built once per file load, alongside the toolbar, and hidden until
+	// asked for — so a reader who never opens it sees exactly the layout
+	// they saw before this existed.
+	private buildNavigationPanel(): void {
+		const panel = this.contentEl.createDiv({ cls: 'inkling-nav-panel' });
+		panel.hidden = true;
+		this.navPanel = panel;
+
+		const findRow = panel.createDiv({ cls: 'inkling-nav-find' });
+		const input = findRow.createEl('input', { cls: 'inkling-nav-find-input' });
+		input.type = 'search';
+		input.placeholder = 'Find in document';
+		input.setAttribute('aria-label', 'Find in document');
+		const status = panel.createDiv({ cls: 'inkling-nav-status' });
+		const results = panel.createDiv({ cls: 'inkling-nav-results' });
+
+		input.addEventListener('keydown', (event: KeyboardEvent) => {
+			if (event.key !== 'Enter') return;
+			event.preventDefault();
+			void this.runFind(input.value, status, results);
+		});
+
+		this.navOutline = panel.createDiv({ cls: 'inkling-nav-outline' });
+	}
+
+	private toggleNavigationPanel(): void {
+		const panel = this.navPanel;
+		if (!panel) return;
+		panel.hidden = !panel.hidden;
+		if (!panel.hidden) panel.querySelector<HTMLInputElement>('.inkling-nav-find-input')?.focus();
+	}
+
+	// pdf.js states a destination either as an explicit array or as a name
+	// that has to be looked up first, and either can dangle. Anything that
+	// fails resolves to null and is dropped from the list rather than shown
+	// as an entry that does nothing when clicked.
+	private async resolveDestination(pdf: PDFDocumentProxy, dest: unknown): Promise<number | null> {
+		try {
+			const explicit = typeof dest === 'string' ? await pdf.getDestination(dest) : dest;
+			const ref: unknown = Array.isArray(explicit) ? explicit[0] : null;
+			if (ref === null || typeof ref !== 'object') return null;
+			return (await pdf.getPageIndex(ref as Parameters<PDFDocumentProxy['getPageIndex']>[0])) + 1;
+		} catch {
+			return null;
+		}
+	}
+
+	private async loadOutline(pdf: PDFDocumentProxy, token: number): Promise<void> {
+		let entries: OutlineEntry[] = [];
+		try {
+			entries = await flattenOutline(await pdf.getOutline(), (dest) => this.resolveDestination(pdf, dest));
+		} catch (error) {
+			console.error('Inkling: could not read this PDF outline.', error);
+			return;
+		}
+		if (token !== this.renderToken) return;
+
+		const host = this.navOutline;
+		if (!host) return;
+		host.empty();
+		// A document with no outline hides the section entirely rather than
+		// showing an empty list under a heading, which reads as broken.
+		if (entries.length === 0) return;
+
+		host.createDiv({ cls: 'inkling-nav-heading', text: 'Outline' });
+		for (const entry of entries) {
+			const pageNumber = entry.pageNumber;
+			if (pageNumber === null) continue;
+			const row = host.createEl('button', { cls: 'inkling-nav-entry', text: entry.title });
+			row.type = 'button';
+			row.setCssProps({ '--inkling-nav-depth': String(entry.depth) });
+			row.addEventListener('click', () => this.scrollToPage(pageNumber));
+		}
+	}
+
+	// Walks pages in order from the one being read, so the first result is
+	// usually the nearest one. Incremental and interruptible: on a long
+	// scanned book this is genuinely slow and may find nothing at all, and a
+	// reader has to be able to keep reading — or change their mind — while
+	// it runs.
+	private async runFind(query: string, status: HTMLElement, results: HTMLElement): Promise<void> {
+		const pdf = this.pdf;
+		results.empty();
+		const needle = query.trim();
+		if (!pdf || !needle) {
+			status.setText('');
+			return;
+		}
+
+		// A second search supersedes the first, and so does switching files.
+		const findToken = ++this.findToken;
+		const renderToken = this.renderToken;
+		let found = 0;
+
+		for (let offset = 0; offset < pdf.numPages; offset++) {
+			if (findToken !== this.findToken || renderToken !== this.renderToken) return;
+			const pageNumber = ((this.currentPageNumber - 1 + offset) % pdf.numPages) + 1;
+
+			let text = '';
+			try {
+				const content = await (await pdf.getPage(pageNumber)).getTextContent();
+				text = content.items.map((item) => ('str' in item ? item.str : '')).join(' ');
+			} catch {
+				// A page whose text will not extract — a scan with no text layer,
+				// a damaged stream — is simply not searched.
+				continue;
+			}
+			if (findToken !== this.findToken || renderToken !== this.renderToken) return;
+
+			const matches = findMatches(text, needle);
+			if (matches > 0) {
+				found += matches;
+				const row = results.createEl('button', {
+					cls: 'inkling-nav-entry',
+					text: `Page ${pageNumber} — ${matches} ${matches === 1 ? 'match' : 'matches'}`,
+				});
+				row.type = 'button';
+				row.addEventListener('click', () => this.scrollToPage(pageNumber));
+			}
+			status.setText(`Searched ${offset + 1} of ${pdf.numPages} pages, ${found} found`);
+		}
+
+		status.setText(found === 0 ? `No matches for "${needle}"` : `${found} matches`);
 	}
 
 	// Leaves something visible instead of the blank/black screen a failed

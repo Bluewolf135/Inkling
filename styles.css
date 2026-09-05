@@ -493,6 +493,94 @@
 	line-height: var(--line-height-tight);
 }
 
+/* ---------------------------------------------------------------------
+   Navigation panel — outline and find
+
+   Sits between the toolbar and the pages rather than beside them: the
+   annotate view is one scrolling column, and a real sidebar would have
+   meant restructuring that layout for a panel most readers open rarely
+   and briefly. Hidden by default, so a reader who never opens it sees
+   exactly the layout they saw before it existed.
+   --------------------------------------------------------------------- */
+
+.inkling-nav-panel {
+	flex: 0 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	padding: var(--size-4-3);
+	max-height: 40vh;
+	overflow-y: auto;
+	border-bottom: 1px solid var(--background-modifier-border);
+	background-color: var(--background-secondary);
+}
+
+.inkling-nav-find-input {
+	width: 100%;
+}
+
+.inkling-nav-status {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	/* Reserves its own line whether or not it has anything to say, so the
+	   results below it do not jump as a search progresses. */
+	min-height: var(--font-ui-smaller);
+}
+
+.inkling-nav-heading {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.inkling-nav-results,
+.inkling-nav-outline {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: var(--size-2-1);
+}
+
+.inkling-nav-panel .inkling-nav-entry {
+	box-shadow: none;
+	border: none;
+	background: transparent;
+	/* Indented by how deep the entry sat in the outline tree, so a
+	   flattened list still reads as the hierarchy it came from. */
+	padding: var(--size-2-1) var(--size-4-2);
+	padding-left: calc(var(--size-4-2) + var(--inkling-nav-depth, 0) * var(--size-4-3));
+	color: var(--text-normal);
+	font-family: inherit;
+	font-size: var(--font-ui-small);
+	text-align: left;
+	/* An outline entry is a title, and titles run long. One line with an
+	   ellipsis keeps the list scannable; the tooltip is not needed because
+	   the row is the title. */
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	cursor: var(--cursor);
+}
+
+.inkling-nav-panel .inkling-nav-entry:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.inkling-page-box {
+	width: 4.5em;
+	/* Chrome renders number spinners that are useless at this size and
+	   steal half the field. */
+	appearance: textfield;
+}
+
+.inkling-page-box::-webkit-inner-spin-button,
+.inkling-page-box::-webkit-outer-spin-button {
+	appearance: none;
+	margin: 0;
+}
+
 /* The read-only notice sits above the pages, which render normally
    underneath it — unlike .inkling-pdf-message on its own, which stands in
    for pages that never arrived. Laid out as a strip rather than a centred
