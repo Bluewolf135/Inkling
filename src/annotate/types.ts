@@ -1,6 +1,14 @@
 export interface Point {
 	x: number;
 	y: number;
+	// Stylus pressure at this sample, 0 to 1.
+	//
+	// Optional, and that is the whole compatibility story: every annotation
+	// already in a vault, every ink block already in a note, and every
+	// /InkList read back out of a PDF parses unchanged and simply has none.
+	// A stroke with no pressure on any point draws exactly as it always did
+	// (see annotate/stroke.ts).
+	p?: number;
 }
 
 export type DrawToolType = 'pen' | 'highlighter';
