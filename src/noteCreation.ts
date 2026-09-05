@@ -1,17 +1,34 @@
 import { App, Modal, Notice, Plugin, Setting, TFile, TFolder, normalizePath } from 'obsidian';
 import { toArrayBuffer } from './binary';
 import { VIEW_TYPE_PDF } from './pdfView';
-import { createHandwrittenNoteBytes, TEMPLATE_STYLE_LABELS, TEMPLATE_STYLES, TemplateStyle } from './templates';
+import { createHandwrittenNoteBytes, TEMPLATE_STYLE_LABELS, TEMPLATE_STYLES, TemplateStyle, type PageSizeName } from './templates';
+
+// The two settings note creation cares about, passed in rather than
+// reached for: this module is handed a Plugin, not the Inkling plugin,
+// and widening that just to read two fields would tie it to the app
+// class for no benefit.
+export interface NoteCreationDefaults {
+	template: TemplateStyle;
+	pageSize: PageSizeName;
+}
 
 const DEFAULT_NAME = 'Untitled note';
 const INVALID_FILENAME_CHARS = /[\\/:*?"<>|]/g;
 
 class CreateHandwrittenNoteModal extends Modal {
 	private name = DEFAULT_NAME;
-	private style: TemplateStyle = 'blank';
+	private style: TemplateStyle;
 
-	constructor(app: App, private readonly onSubmit: (name: string, style: TemplateStyle) => void) {
+	constructor(
+		app: App,
+		defaultStyle: TemplateStyle,
+		private readonly onSubmit: (name: string, style: TemplateStyle) => void,
+	) {
 		super(app);
+		// The dropdown opens on the preferred template, but stays a
+		// dropdown: a default is a starting point, not a decision made on
+		// the user’s behalf every time.
+		this.style = defaultStyle;
 	}
 
 	onOpen(): void {
@@ -89,9 +106,10 @@ async function createHandwrittenNote(
 	folder: TFolder,
 	baseName: string,
 	style: TemplateStyle,
+	pageSize: PageSizeName,
 ): Promise<TFile> {
 	const path = getUniqueNotePath(app, folder, baseName);
-	const bytes = await createHandwrittenNoteBytes(style);
+	const bytes = await createHandwrittenNoteBytes(style, pageSize);
 	return app.vault.createBinary(path, toArrayBuffer(bytes));
 }
 
@@ -99,11 +117,11 @@ function getTargetFolder(app: App): TFolder {
 	return app.workspace.getActiveFile()?.parent ?? app.vault.getRoot();
 }
 
-function openCreateNoteModal(app: App, folder: TFolder): void {
-	new CreateHandwrittenNoteModal(app, (name, style) => {
+function openCreateNoteModal(app: App, folder: TFolder, defaults: NoteCreationDefaults): void {
+	new CreateHandwrittenNoteModal(app, defaults.template, (name, style) => {
 		void (async () => {
 			try {
-				const file = await createHandwrittenNote(app, folder, name, style);
+				const file = await createHandwrittenNote(app, folder, name, style, defaults.pageSize);
 				// A brand-new handwritten note is created specifically to be
 				// written on right away — opened straight into Inkling's edit
 				// view rather than `openFile`'s default extension resolution,
@@ -119,11 +137,11 @@ function openCreateNoteModal(app: App, folder: TFolder): void {
 	}).open();
 }
 
-export function registerNoteCreation(plugin: Plugin): void {
+export function registerNoteCreation(plugin: Plugin, getDefaults: () => NoteCreationDefaults): void {
 	plugin.addCommand({
 		id: 'create-handwritten-note',
 		name: 'Create handwritten note',
-		callback: () => openCreateNoteModal(plugin.app, getTargetFolder(plugin.app)),
+		callback: () => openCreateNoteModal(plugin.app, getTargetFolder(plugin.app), getDefaults()),
 	});
 
 	plugin.registerEvent(
@@ -133,7 +151,7 @@ export function registerNoteCreation(plugin: Plugin): void {
 				item
 					.setTitle('New handwritten note')
 					.setIcon('pen-line')
-					.onClick(() => openCreateNoteModal(plugin.app, file)),
+					.onClick(() => openCreateNoteModal(plugin.app, file, getDefaults())),
 			);
 		}),
 	);

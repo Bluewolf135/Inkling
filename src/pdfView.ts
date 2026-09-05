@@ -10,7 +10,8 @@ import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, 
 import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
 import { BASELINE_DESCENT_RATIO, groupIntoLines, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
-import { applyTemplateStyle, PAGE_SIZE, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
+import { defaultSettings, type InklingSettings } from './settings';
+import { applyTemplateStyle, pageSizeFor, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
 
 // pdfjs-dist is pinned to an exact version (see package.json) — 5.4.624+
 // calls Uint8Array.prototype.toHex() unconditionally when computing a PDF's
@@ -346,8 +347,13 @@ export class PdfAnnotateView extends FileView {
 	// either of the two places that end the wait (pages ready, or a failure).
 	private loadingEl: HTMLElement | null = null;
 
-	constructor(leaf: WorkspaceLeaf, toolState: ToolState) {
+	// A getter rather than a snapshot, so a setting changed while a file
+	// is open takes effect on the next stroke instead of the next reopen.
+	private readonly getSettings: () => InklingSettings;
+
+	constructor(leaf: WorkspaceLeaf, toolState: ToolState, getSettings: () => InklingSettings = defaultSettings) {
 		super(leaf);
+		this.getSettings = getSettings;
 		this.controller = new AnnotationController({
 			// Shared with every other annotating surface, so the pen you set
 			// up in a note is the pen you get in a PDF (see annotate/toolState).
@@ -360,6 +366,7 @@ export class PdfAnnotateView extends FileView {
 			onGoToPage: (pageNumber) => this.scrollToPage(pageNumber),
 			onToggleNavigation: () => this.toggleNavigationPanel(),
 			onEditNote: (pageNumber, point, existing) => this.editNote(pageNumber, point, existing),
+			isPressureEnabled: () => getSettings().pressure,
 		});
 	}
 
@@ -560,7 +567,10 @@ export class PdfAnnotateView extends FileView {
 		// only *our* annotations stripped out so its default annotation-
 		// baking render still shows annotations from other PDF software
 		// (Xodo, etc.) without doubling up with our own live overlay.
-		this.maxWriteInterval = maxWriteIntervalMs(file.stat.size);
+		// "Frequent" is stated as a zero size, which the size-scaled mapping
+		// already answers with its shortest interval — one place decides how
+		// often a file is written, rather than two that can disagree.
+		this.maxWriteInterval = maxWriteIntervalMs(this.getSettings().saveCadence === 'frequent' ? 0 : file.stat.size);
 		this.consecutiveWriteFailures = 0;
 		const bytes = await this.app.vault.readBinary(file);
 
@@ -1183,7 +1193,7 @@ export class PdfAnnotateView extends FileView {
 			// is exactly "right after the page the user is currently on".
 			const insertIndex = Math.min(this.currentPageNumber, pdfDoc.getPageCount());
 			const style = readTemplateStyle(pdfDoc);
-			const newPage = pdfDoc.insertPage(insertIndex, PAGE_SIZE);
+			const newPage = pdfDoc.insertPage(insertIndex, pageSizeFor(this.getSettings().pageSize));
 			applyTemplateStyle(newPage, style);
 
 			const updatedBytes = await pdfDoc.save();

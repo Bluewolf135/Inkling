@@ -12,6 +12,15 @@ export const TEMPLATE_STYLE_LABELS: Record<TemplateStyle, string> = {
 
 export const PAGE_SIZE = PageSizes.Letter;
 
+// The paper size for new notes and for pages added to them. A setting
+// rather than a constant since Track D — the original plan flagged Letter
+// as an unconfirmed guess, and it is wrong for most of the world.
+export type PageSizeName = 'letter' | 'a4';
+
+export function pageSizeFor(name: PageSizeName): [number, number] {
+	return name === 'a4' ? PageSizes.A4 : PageSizes.Letter;
+}
+
 // A single Keywords entry, e.g. "inkling:template=dot-grid" — read back by
 // "Add page" so a new page matches the note's existing style. No sidecar
 // file; the PDF's own Info dictionary is the source of truth.
@@ -86,9 +95,9 @@ function writeTemplateStyle(pdf: PDFDocument, style: TemplateStyle): void {
 	pdf.setKeywords([`${TEMPLATE_KEYWORD_PREFIX}${style}`]);
 }
 
-export async function createHandwrittenNoteBytes(style: TemplateStyle): Promise<Uint8Array> {
+export async function createHandwrittenNoteBytes(style: TemplateStyle, size: PageSizeName = 'letter'): Promise<Uint8Array> {
 	const pdf = await PDFDocument.create();
-	const page = pdf.addPage(PAGE_SIZE);
+	const page = pdf.addPage(pageSizeFor(size));
 	applyTemplateStyle(page, style);
 	writeTemplateStyle(pdf, style);
 	return pdf.save();

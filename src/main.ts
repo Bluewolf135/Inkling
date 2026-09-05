@@ -1,12 +1,14 @@
 import { FileView, ItemView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
 import { ToolState } from './annotate';
-import { collectAnnotations, defaultColorLabels, extractionNotePath } from './extract/extract';
-import { mergeIntoNote, renderExtraction } from './extract/extractFormat';
+import { collectAnnotations } from './extract/extract';
+import { extractionNotePath, mergeIntoNote, renderExtraction } from './extract/extractFormat';
 import { registerInkBlock } from './markdown/inkBlock';
 import { registerNoteCreation } from './noteCreation';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
 import { CORE_PDF_VIEW_TYPE, PdfAnnotateView, VIEW_TYPE_PDF } from './pdfView';
+import { defaultSettings, normalizeSettings, type InklingSettings } from './settings';
+import { InklingSettingTab } from './settingsTab';
 
 // The page Obsidian's own PDF view is currently showing. Its ephemeral
 // state is no help here — verified against the running app, the core PDF
@@ -25,10 +27,6 @@ function readCorePdfPage(view: unknown): number | null {
 	return typeof page === 'number' && Number.isFinite(page) && page >= 1 ? page : null;
 }
 
-// Where an extracted note goes. A constant until the settings tab
-// (Track D) makes it a preference — the same treatment every other
-// value introduced by these tracks gets.
-const EXTRACTION_NOTE_PATTERN = '{folder}/{name} — annotations.md';
 
 export default class InklingPlugin extends Plugin {
 	// Leaves we've already added the "Annotate with Inkling" action to —
@@ -46,13 +44,25 @@ export default class InklingPlugin extends Plugin {
 	// outlives those rebuilds, and it means the pen carries between blocks
 	// and PDFs the way a real one does. See src/annotate/toolState.ts.
 	private readonly toolState = new ToolState();
+	// Read once on load and handed around by reference, never by
+	// snapshot, so changing a setting takes effect without reopening a
+	// file. Initialised to the defaults so nothing has to cope with it
+	// being absent during the async load below.
+	settings: InklingSettings = defaultSettings();
 
 	async onload() {
+		this.settings = normalizeSettings(await this.loadData());
+		this.addSettingTab(new InklingSettingTab(this.app, this));
+		// Applied here rather than inside ToolState, which has no idea
+		// settings exist — it is shared with surfaces that have no
+		// settings tab behind them.
+		this.toolState.setToolbarCollapsed(this.settings.toolbarStartsCollapsed);
+
 		this.configurePdfWorker();
 		this.configureAnnotationWriterWorker();
 
-		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf, this.toolState));
-		registerNoteCreation(this);
+		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf, this.toolState, () => this.settings));
+		registerNoteCreation(this, () => ({ template: this.settings.defaultTemplate, pageSize: this.settings.pageSize }));
 		registerInkBlock(this, this.toolState);
 
 		// Obsidian's own core PDF view stays the default for opening a .pdf —
@@ -137,8 +147,8 @@ export default class InklingPlugin extends Plugin {
 				},
 			});
 
-			const path = extractionNotePath(EXTRACTION_NOTE_PATTERN, file.path);
-			const generated = renderExtraction(file.path, annotations, defaultColorLabels());
+			const path = extractionNotePath(this.settings.extractionNotePattern, file.path);
+			const generated = renderExtraction(file.path, annotations, this.settings.colorLabels);
 
 			const existing = this.app.vault.getAbstractFileByPath(path);
 			if (existing instanceof TFile) {
@@ -164,6 +174,10 @@ export default class InklingPlugin extends Plugin {
 			console.error('Inkling: failed to extract annotations.', error);
 			new Notice('Inkling: could not extract annotations from this PDF.');
 		}
+	}
+
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
 	}
 
 	// Runs `act` on the active annotate view, or reports that there is none.

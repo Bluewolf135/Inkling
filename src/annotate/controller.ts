@@ -102,6 +102,10 @@ export interface AnnotationControllerOptions {
 	// whoever mounted it. A host that does not supply this has no note
 	// tool at all, which is how ink blocks stay out of it.
 	onEditNote?: (pageNumber: number, point: Point, existing: string) => Promise<string | null>;
+	// Whether a stroke keeps the pressure its samples carried. Read at
+	// commit time rather than at capture: turning it off should change
+	// how the next stroke is drawn, not require reopening the file.
+	isPressureEnabled?: () => boolean;
 	// Asks the host to show or hide its navigation panel. Same reasoning:
 	// the panel belongs to the PDF view, not to the shared controller.
 	onToggleNavigation?: () => void;
@@ -809,7 +813,12 @@ export class AnnotationController {
 	}
 
 	private strokeFromDraft(mode: { tool: DrawToolType; points: Point[] }): StrokeAnnotation {
-		return { id: createId(), kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.getWidth(), points: mode.points };
+		// Pressure is stripped rather than never captured, so the setting
+		// governs one place — what gets committed — instead of being
+		// checked in the pointer layer, the renderer, and the serializer.
+		const keepPressure = this.options.isPressureEnabled?.() ?? true;
+		const points = keepPressure ? mode.points : mode.points.map(({ x, y }) => ({ x, y }));
+		return { id: createId(), kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.getWidth(), points };
 	}
 
 	private shapeFromDraft(mode: { tool: ShapeToolType; start: Point; end: Point }): ShapeAnnotation {

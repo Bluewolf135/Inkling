@@ -125,3 +125,18 @@ export function mergeIntoNote(existing: string, generated: string): string {
 
 	return `${existing.slice(0, begin)}${generated}${after}`;
 }
+
+// Where a PDF's annotations note lives. `{folder}` and `{name}` are the
+// PDF's own, so the note sits beside the book by default and moves with a
+// setting rather than with code (Track D).
+export function extractionNotePath(pattern: string, pdfPath: string): string {
+	const lastSlash = pdfPath.lastIndexOf('/');
+	const folder = lastSlash === -1 ? '' : pdfPath.slice(0, lastSlash);
+	const file = pdfPath.slice(lastSlash + 1);
+	const name = file.replace(/\.pdf$/i, '');
+
+	const filled = pattern.replace(/\{folder\}/g, folder).replace(/\{name\}/g, name);
+	// A PDF at the vault root leaves {folder} empty, which would otherwise
+	// produce a path starting with a slash.
+	return filled.replace(/^\/+/, '');
+}

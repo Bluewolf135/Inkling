@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractionNotePath } from '../../src/extract/extract';
+import { extractionNotePath } from '../../src/extract/extractFormat';
 
 const PATTERN = '{folder}/{name} — annotations.md';
 
