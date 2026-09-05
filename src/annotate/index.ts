@@ -2,4 +2,5 @@ export { AnnotationController, type AnnotationControllerOptions } from './contro
 export { capturePointer, currentZoom, findScrollParent, MAX_ZOOM, zoomAbout } from './pointer';
 export { buildToolbar } from './toolbar';
 export { ToolState, type ToolStyle } from './toolState';
-export type { Annotation, DrawToolType, Point, ShapeToolType, ToolType } from './types';
+export { PRESET_COLORS } from './types';
+export type { Annotation, DrawToolType, Point, PresetColor, ShapeToolType, ToolType } from './types';

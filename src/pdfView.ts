@@ -1,7 +1,7 @@
 import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { AnnotationController, buildToolbar, MAX_ZOOM, ToolState, type Annotation, type Point } from './annotate';
+import { AnnotationController, buildToolbar, MAX_ZOOM, PRESET_COLORS, ToolState, type Annotation, type Point, type ToolType } from './annotate';
 import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
@@ -43,6 +43,23 @@ const PAGE_RETAIN_MARGIN = 3;
 // successive strokes into one save matters more here than for most
 // autosave features (see the plan's Write granularity note).
 const WRITE_DEBOUNCE_MS = 1500;
+
+// One press of a zoom key. Matches the step the toolbar buttons use, so
+// the two agree about what "zoom in once" means.
+const KEYBOARD_ZOOM_STEP = 1.25;
+
+// Single-letter tool shortcuts. Every drawing app has them, and they cost
+// nothing here because this view contains no text to type into.
+const TOOL_KEYS: Record<string, ToolType | undefined> = {
+	s: 'select',
+	p: 'pen',
+	h: 'highlighter',
+	e: 'eraser',
+	l: 'line',
+	r: 'rectangle',
+	o: 'oval',
+	a: 'arrow',
+};
 
 // pdf.js runs its own parsing off the main thread via a worker it manages
 // internally (see main.ts's configurePdfWorker) — a separate worker from
@@ -362,10 +379,120 @@ export class PdfAnnotateView extends FileView {
 		return VIEW_TYPE_PDF;
 	}
 
+	// For the palette commands in main.ts. The controller is private, and
+	// should stay that way — a command reaching through the view into it
+	// would be a second, undocumented way to drive the same state.
+	undoAnnotation(): void {
+		if (this.controller.isReadOnly()) return;
+		this.controller.undo();
+	}
+
+	redoAnnotation(): void {
+		if (this.controller.isReadOnly()) return;
+		this.controller.redo();
+	}
+
 	async onOpen(): Promise<void> {
 		// One-time per leaf, unlike onLoadFile (which reruns per file) — the
 		// leaf's title-bar action row, not the toolbar built per-file below.
 		this.addAction('book-open', 'Stop annotating (view only)', () => void this.exitEditMode());
+		// On the document, not on contentEl: a keydown only reaches an
+		// element that contains the focus, and nothing inside this view
+		// takes focus — a canvas is not focusable and there is nothing to
+		// type into. So listen globally and check that this view is the one
+		// the user is actually looking at.
+		this.registerDomEvent(document, 'keydown', (event) => this.handleKey(event));
+	}
+
+	// Bare letters are safe here in a way they would not be in a note: this
+	// view holds no text to type into. The one place that will (the note
+	// popover) is excluded below.
+	private handleKey(event: KeyboardEvent): void {
+		if (this.app.workspace.getActiveViewOfType(PdfAnnotateView) !== this) return;
+		const target = event.target;
+		if (target instanceof HTMLElement && (target.isContentEditable || target.closest('input, textarea'))) return;
+
+		const modified = event.ctrlKey || event.metaKey;
+		const handled = modified ? this.handleModifiedKey(event) : this.handlePlainKey(event);
+		if (handled) {
+			event.preventDefault();
+			event.stopPropagation();
+		}
+	}
+
+	private handleModifiedKey(event: KeyboardEvent): boolean {
+		switch (event.key.toLowerCase()) {
+			case 'z':
+				// Read-only means there is nothing of ours to undo: the file was
+				// never written to this session.
+				if (this.controller.isReadOnly()) return false;
+				if (event.shiftKey) this.controller.redo();
+				else this.controller.undo();
+				return true;
+			case 'y':
+				if (this.controller.isReadOnly()) return false;
+				this.controller.redo();
+				return true;
+			case '=':
+			case '+':
+				this.controller.zoomBy(KEYBOARD_ZOOM_STEP);
+				return true;
+			case '-':
+				this.controller.zoomBy(1 / KEYBOARD_ZOOM_STEP);
+				return true;
+			case '0':
+				this.controller.resetZoom();
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private handlePlainKey(event: KeyboardEvent): boolean {
+		// Navigation works whatever state the document is in. Reading a book
+		// Inkling refuses to write to is still reading a book.
+		if (event.key === 'PageDown') {
+			this.scrollToPage(Math.min(this.currentPageNumber + 1, this.controller.getPageCount()));
+			return true;
+		}
+		if (event.key === 'PageUp') {
+			this.scrollToPage(Math.max(this.currentPageNumber - 1, 1));
+			return true;
+		}
+
+		if (this.controller.isReadOnly()) return false;
+
+		const tool = TOOL_KEYS[event.key.toLowerCase()];
+		if (tool) {
+			this.controller.setTool(tool);
+			return true;
+		}
+
+		// 1-6 pick the preset swatches, in the order they sit in the strip.
+		const swatch = Number(event.key);
+		if (Number.isInteger(swatch) && swatch >= 1 && swatch <= PRESET_COLORS.length) {
+			const color = PRESET_COLORS[swatch - 1];
+			if (color) {
+				this.controller.setColor(color.value);
+				return true;
+			}
+		}
+
+		if (event.key === '[') {
+			this.controller.setWidth(this.controller.getWidth() - 1);
+			return true;
+		}
+		if (event.key === ']') {
+			this.controller.setWidth(this.controller.getWidth() + 1);
+			return true;
+		}
+		if (event.key === 'Delete' || event.key === 'Backspace') {
+			if (!this.controller.hasSelection()) return false;
+			this.controller.deleteSelection();
+			return true;
+		}
+
+		return false;
 	}
 
 	// Hands this leaf back to Obsidian's native PDF view for the same file —

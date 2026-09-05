@@ -75,6 +75,33 @@ export default class InklingPlugin extends Plugin {
 				return true;
 			},
 		});
+
+		// Undo and redo as palette commands as well as view-scoped keys.
+		// Registered with no default hotkey, per Obsidian guidelines: the bare
+		// Mod+Z inside the annotate view already covers the ergonomics, and
+		// these exist so someone who wants a global binding can make one
+		// without us claiming a shortcut out from under another plugin.
+		this.addCommand({
+			id: 'undo-annotation',
+			name: 'Undo annotation',
+			checkCallback: (checking) => this.withAnnotateView(checking, (view) => view.undoAnnotation()),
+		});
+
+		this.addCommand({
+			id: 'redo-annotation',
+			name: 'Redo annotation',
+			checkCallback: (checking) => this.withAnnotateView(checking, (view) => view.redoAnnotation()),
+		});
+	}
+
+	// Runs `act` on the active annotate view, or reports that there is none.
+	// The checking pass must not act, which is the whole contract of
+	// checkCallback and easy to get subtly wrong when it is inlined.
+	private withAnnotateView(checking: boolean, act: (view: PdfAnnotateView) => void): boolean {
+		const view = this.app.workspace.getActiveViewOfType(PdfAnnotateView);
+		if (!view) return false;
+		if (!checking) act(view);
+		return true;
 	}
 
 	onunload(): void {
