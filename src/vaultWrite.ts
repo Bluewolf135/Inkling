@@ -1,4 +1,4 @@
-import type { DataAdapter, TFile } from 'obsidian';
+import type { DataAdapter } from 'obsidian';
 
 // The single chokepoint every binary write to the vault goes through.
 //
@@ -50,14 +50,20 @@ export function looksLikePdf(bytes: ArrayBuffer): boolean {
 	return PDF_MAGIC.every((byte, index) => head[index] === byte);
 }
 
-// The slice of Obsidian's API this needs, rather than the whole Vault —
-// so the tests can supply a fake without standing up an app.
-export interface BinaryWriteTarget {
-	modifyBinary(file: TFile, data: ArrayBuffer): Promise<void>;
+// The slice of Obsidian's API this needs, rather than the whole Vault, so
+// the tests can supply a fake without standing up an app. Generic in the
+// file type for the same reason: all this needs from a file is its path, and a
+// real Vault satisfies this structurally with TFile.
+export interface BinaryWriteTarget<F> {
+	modifyBinary(file: F, data: ArrayBuffer): Promise<void>;
 	adapter: Pick<DataAdapter, 'stat'>;
 }
 
-export async function writeBinarySafely(vault: BinaryWriteTarget, file: TFile, bytes: ArrayBuffer): Promise<void> {
+export async function writeBinarySafely<F extends { path: string }>(
+	vault: BinaryWriteTarget<F>,
+	file: F,
+	bytes: ArrayBuffer,
+): Promise<void> {
 	if (!looksLikePdf(bytes)) {
 		throw new Error(`Inkling: refusing to write ${bytes.byteLength} bytes to ${file.path} — that is not a PDF.`);
 	}

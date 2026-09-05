@@ -5,6 +5,7 @@ import { AnnotationController, buildToolbar, MAX_ZOOM, ToolState, type Annotatio
 import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
+import { writeBinarySafely } from './vaultWrite';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { applyTemplateStyle, PAGE_SIZE, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
 
@@ -946,7 +947,7 @@ export class PdfAnnotateView extends FileView {
 			// annotationWriter.worker.ts — see its comment and this view's
 			// `writer` field for why that matters for a densely annotated file.
 			const updatedBytes = await this.writer.write(pages);
-			await this.app.vault.modifyBinary(file, updatedBytes);
+			await writeBinarySafely(this.app.vault, file, updatedBytes);
 		} catch (error) {
 			console.error('Inkling: failed to save annotations.', error);
 			new Notice('Inkling: could not save annotations to this file.');
@@ -977,7 +978,7 @@ export class PdfAnnotateView extends FileView {
 			applyTemplateStyle(newPage, style);
 
 			const updatedBytes = await pdfDoc.save();
-			await this.app.vault.modifyBinary(file, toArrayBuffer(updatedBytes));
+			await writeBinarySafely(this.app.vault, file, toArrayBuffer(updatedBytes));
 
 			const newPageNumber = insertIndex + 1;
 			await this.onLoadFile(file);
