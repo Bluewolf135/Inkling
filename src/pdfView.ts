@@ -370,6 +370,13 @@ export class PdfAnnotateView extends FileView {
 	// For the palette commands in main.ts. The controller is private, and
 	// should stay that way — a command reaching through the view into it
 	// would be a second, undocumented way to drive the same state.
+	// Anything still sitting in a debounce, written now. Extraction reads
+	// the file from disk, so without this the last minute of highlighting
+	// is simply missing from the note it produces.
+	async flushPendingWrites(): Promise<void> {
+		await this.flushAnnotationsIfDirty(this.currentFile);
+	}
+
 	undoAnnotation(): void {
 		if (this.controller.isReadOnly()) return;
 		this.controller.undo();

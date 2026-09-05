@@ -1,6 +1,8 @@
-import { FileView, ItemView, Plugin, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { FileView, ItemView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
 import { ToolState } from './annotate';
+import { collectAnnotations, defaultColorLabels, extractionNotePath } from './extract/extract';
+import { mergeIntoNote, renderExtraction } from './extract/extractFormat';
 import { registerInkBlock } from './markdown/inkBlock';
 import { registerNoteCreation } from './noteCreation';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
@@ -22,6 +24,11 @@ function readCorePdfPage(view: unknown): number | null {
 	)?.viewer?.child?.pdfViewer?.pdfViewer?.currentPageNumber;
 	return typeof page === 'number' && Number.isFinite(page) && page >= 1 ? page : null;
 }
+
+// Where an extracted note goes. A constant until the settings tab
+// (Track D) makes it a preference — the same treatment every other
+// value introduced by these tracks gets.
+const EXTRACTION_NOTE_PATTERN = '{folder}/{name} — annotations.md';
 
 export default class InklingPlugin extends Plugin {
 	// Leaves we've already added the "Annotate with Inkling" action to —
@@ -92,6 +99,71 @@ export default class InklingPlugin extends Plugin {
 			name: 'Redo annotation',
 			checkCallback: (checking) => this.withAnnotateView(checking, (view) => view.redoAnnotation()),
 		});
+
+		this.addCommand({
+			id: 'extract-annotations',
+			name: 'Extract annotations to a note',
+			checkCallback: (checking) => {
+				const file = this.activePdfFile();
+				if (!file) return false;
+				if (!checking) void this.extractAnnotations(file);
+				return true;
+			},
+		});
+	}
+
+	// The PDF the user is looking at, whichever view is showing it —
+	// Inkling’s own or Obsidian’s. Extraction is read-only, so it has no
+	// reason to care which.
+	private activePdfFile(): TFile | null {
+		const view = this.app.workspace.getActiveViewOfType(FileView);
+		const file = view?.file ?? null;
+		return file && file.extension.toLowerCase() === 'pdf' ? file : null;
+	}
+
+	private async extractAnnotations(file: TFile): Promise<void> {
+		const notice = new Notice(`Inkling: reading ${file.basename}…`, 0);
+		try {
+			// Anything still sitting in a debounce belongs in the file before it
+			// is read, or the last minute of highlighting is simply missing
+			// from the note — and the user has no way to tell that from "the
+			// extraction dropped it".
+			const view = this.app.workspace.getActiveViewOfType(PdfAnnotateView);
+			if (view?.file?.path === file.path) await view.flushPendingWrites();
+
+			const annotations = await collectAnnotations(await this.app.vault.readBinary(file), {
+				onProgress: (pageNumber, pageCount) => {
+					notice.setMessage(`Inkling: reading ${file.basename} — page ${pageNumber} of ${pageCount}`);
+				},
+			});
+
+			const path = extractionNotePath(EXTRACTION_NOTE_PATTERN, file.path);
+			const generated = renderExtraction(file.path, annotations, defaultColorLabels());
+
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			if (existing instanceof TFile) {
+				// process, not modify: it reads and writes under one lock, so a
+				// note being edited in another pane cannot be clobbered by a
+				// stale copy read a moment ago.
+				await this.app.vault.process(existing, (contents) => mergeIntoNote(contents, generated));
+			} else {
+				await this.app.vault.create(path, mergeIntoNote('', generated));
+			}
+
+			notice.hide();
+			new Notice(
+				annotations.length === 0
+					? `Inkling: no annotations found in ${file.basename}.`
+					: `Inkling: extracted ${annotations.length} annotations from ${file.basename}.`,
+			);
+
+			const note = this.app.vault.getAbstractFileByPath(path);
+			if (note instanceof TFile) await this.app.workspace.getLeaf('tab').openFile(note);
+		} catch (error) {
+			notice.hide();
+			console.error('Inkling: failed to extract annotations.', error);
+			new Notice('Inkling: could not extract annotations from this PDF.');
+		}
 	}
 
 	// Runs `act` on the active annotate view, or reports that there is none.
