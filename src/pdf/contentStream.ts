@@ -45,6 +45,36 @@ export function polygonOps(points: Point[]): string {
 	return parts.join('\n');
 }
 
+// The marker a note annotation draws, matching drawNoteMarker in
+// src/annotate/render.ts: a rounded tab with its bottom-right corner
+// folded. Written out rather than shared through annotate/stroke.ts
+// because there is no shared path abstraction for arcs — the two are kept
+// in step by being the same eight segments in the same order, and by this
+// comment.
+//
+// PDF y grows upward where canvas y grows down, so the fold is on the
+// bottom-right in both only because this mirrors the vertical.
+export function noteMarkerOps(at: Point, size: number): string {
+	const half = size / 2;
+	const x = at.x - half;
+	const y = at.y - half;
+	const fold = size * 0.32;
+	const r = size * 0.18;
+	const k = r * CIRCLE_KAPPA;
+	return [
+		`${n(x + r)} ${n(y + size)} m`,
+		`${n(x + size - r)} ${n(y + size)} l`,
+		`${n(x + size - r + k)} ${n(y + size)} ${n(x + size)} ${n(y + size - r + k)} ${n(x + size)} ${n(y + size - r)} c`,
+		`${n(x + size)} ${n(y + fold)} l`,
+		`${n(x + size - fold)} ${n(y)} l`,
+		`${n(x + r)} ${n(y)} l`,
+		`${n(x + r - k)} ${n(y)} ${n(x)} ${n(y + r - k)} ${n(x)} ${n(y + r)} c`,
+		`${n(x)} ${n(y + size - r)} l`,
+		`${n(x)} ${n(y + size - r + k)} ${n(x + r - k)} ${n(y + size)} ${n(x + r)} ${n(y + size)} c`,
+		'h',
+	].join('\n');
+}
+
 export function rectangleOps(x: number, y: number, width: number, height: number): string {
 	return `${n(x)} ${n(y)} ${n(width)} ${n(height)} re`;
 }

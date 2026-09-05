@@ -133,3 +133,60 @@ describe('transforms', () => {
 		expect(boundingBox(stroke([{ x: 5, y: 9 }, { x: 1, y: 2 }]))).toEqual({ minX: 1, minY: 2, maxX: 5, maxY: 9 });
 	});
 });
+
+// A note is a marker pinned to a spot, not a shape with extent — so it hits
+// like a target, moves like a point, and deliberately does not grow.
+describe('note annotations', () => {
+	const note: Annotation = {
+		id: 'ink-n',
+		kind: 'note',
+		color: '#f08c00',
+		width: 3,
+		at: { x: 100, y: 100 },
+		note: 'check this',
+	};
+
+	it('is hit anywhere within its marker', () => {
+		expect(hitTestAnnotation(note, { x: 100, y: 100 })).toBe(true);
+		expect(hitTestAnnotation(note, { x: 106, y: 104 })).toBe(true);
+	});
+
+	it('is missed from well outside it', () => {
+		expect(hitTestAnnotation(note, { x: 140, y: 100 })).toBe(false);
+	});
+
+	it('bounds itself around its point', () => {
+		const box = boundingBox(note);
+		expect((box.minX + box.maxX) / 2).toBe(100);
+		expect((box.minY + box.maxY) / 2).toBe(100);
+		expect(box.maxX - box.minX).toBeGreaterThan(0);
+	});
+
+	it('moves with a translate', () => {
+		expect(translateAnnotation(note, 10, -20)).toMatchObject({ at: { x: 110, y: 80 } });
+	});
+
+	it('moves with a resize but does not grow with it', () => {
+		// The marker is chrome at a fixed size, not geometry. Scaling it would
+		// make a pin the size of a paragraph.
+		const scaled = scaleAnnotation(
+			note,
+			{ minX: 0, minY: 0, maxX: 200, maxY: 200 },
+			{ minX: 0, minY: 0, maxX: 400, maxY: 400 },
+		);
+		expect(scaled).toMatchObject({ at: { x: 200, y: 200 } });
+		const before = boundingBox(note);
+		const after = boundingBox(scaled);
+		expect(after.maxX - after.minX).toBe(before.maxX - before.minX);
+	});
+
+	it('is selected by a lasso that surrounds its point', () => {
+		const square = [
+			{ x: 0, y: 0 },
+			{ x: 200, y: 0 },
+			{ x: 200, y: 200 },
+			{ x: 0, y: 200 },
+		];
+		expect(polygonEnclosesAnnotation(note, square)).toBe(true);
+	});
+});

@@ -1,6 +1,6 @@
 import { boundingBox, unionBoundingBox } from './geometry';
 import { hasPressure, outlinePath, smoothedPath, type PathSegment } from './stroke';
-import { Annotation, HIGHLIGHTER_OPACITY, Point, Rect } from './types';
+import { Annotation, HIGHLIGHTER_OPACITY, NOTE_MARKER_SIZE, Point, Rect } from './types';
 
 const SELECTION_COLOR = '#1971c2';
 const HANDLE_SIZE = 10;
@@ -97,6 +97,46 @@ function drawArrowhead(ctx: CanvasRenderingContext2D, from: Point, to: Point, si
 	ctx.stroke();
 }
 
+// A small page-marker: a rounded tab with one corner folded, in the
+// annotation’s colour, centred on its point. Drawn at a fixed size
+// rather than scaled by anything, so it stays a tappable target however
+// fine the pen currently is.
+function drawNoteMarker(ctx: CanvasRenderingContext2D, at: Point, color: string): void {
+	const size = NOTE_MARKER_SIZE;
+	const half = size / 2;
+	const x = at.x - half;
+	const y = at.y - half;
+	const fold = size * 0.32;
+	const radius = size * 0.18;
+
+	ctx.save();
+	ctx.fillStyle = color;
+	ctx.beginPath();
+	ctx.moveTo(x + radius, y);
+	ctx.lineTo(x + size - radius, y);
+	ctx.quadraticCurveTo(x + size, y, x + size, y + radius);
+	ctx.lineTo(x + size, y + size - fold);
+	// The fold: a clipped bottom-right corner, which is what makes this
+	// read as a note rather than as a coloured square.
+	ctx.lineTo(x + size - fold, y + size);
+	ctx.lineTo(x + radius, y + size);
+	ctx.quadraticCurveTo(x, y + size, x, y + size - radius);
+	ctx.lineTo(x, y + radius);
+	ctx.quadraticCurveTo(x, y, x + radius, y);
+	ctx.closePath();
+	ctx.fill();
+	ctx.restore();
+
+	// A pale outline, so a marker placed over dark ink or a dark scan is
+	// still separable from it — the same two-pass reasoning as the eraser
+	// ring and the selection outline above.
+	ctx.save();
+	ctx.strokeStyle = CHROME_HALO;
+	ctx.lineWidth = 1;
+	ctx.strokeRect(x - 0.5, y - 0.5, size + 1, size + 1);
+	ctx.restore();
+}
+
 function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation): void {
 	ctx.save();
 	ctx.strokeStyle = annotation.color;
@@ -105,6 +145,12 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation): 
 	ctx.lineJoin = 'round';
 	if (annotation.kind === 'stroke' && annotation.tool === 'highlighter') {
 		ctx.globalAlpha = HIGHLIGHTER_OPACITY;
+	}
+
+	if (annotation.kind === 'note') {
+		drawNoteMarker(ctx, annotation.at, annotation.color);
+		ctx.restore();
+		return;
 	}
 
 	if (annotation.kind === 'stroke') {

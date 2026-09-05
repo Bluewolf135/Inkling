@@ -1,8 +1,18 @@
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import { boundingBox } from '../annotate/geometry';
 import { hasPressure, outlinePath, smoothedPath } from '../annotate/stroke';
-import { arrowHeadOps, ellipseOps, moveLineOps, pathOps, polygonOps, rectangleOps } from './contentStream';
-import { Annotation, DEFAULT_COLOR, DEFAULT_WIDTH, HIGHLIGHTER_OPACITY, Point, ShapeAnnotation, StrokeAnnotation } from '../annotate/types';
+import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, polygonOps, rectangleOps } from './contentStream';
+import {
+	Annotation,
+	DEFAULT_COLOR,
+	DEFAULT_WIDTH,
+	HIGHLIGHTER_OPACITY,
+	NOTE_MARKER_SIZE,
+	NoteAnnotation,
+	Point,
+	ShapeAnnotation,
+	StrokeAnnotation,
+} from '../annotate/types';
 
 // Mirrors pdf-lib's own (unexported) PDFContext.obj()/stream() literal
 // type, so a plain object literal built up across a few local variables
@@ -264,7 +274,43 @@ function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation):
 	);
 }
 
-// Frees one annotation's own indirect objects from the document context —
+// A note annotation: a PDF /Text annotation, which is the standard sticky
+// note. Written with an /AP of our own drawing the same marker the canvas
+// draws, because a viewer left to its own devices renders /Text as its own
+// house icon — a yellow speech bubble in one reader, a pushpin in another —
+// and the colour that says which category this note belongs to would be
+// lost with it.
+function writeNote(pdfDoc: PDFDocument, page: PDFPage, note: NoteAnnotation): void {
+	const [r, g, b] = hexToRgb(note.color);
+	const half = NOTE_MARKER_SIZE / 2;
+	const bbox = [note.at.x - half, note.at.y - half, note.at.x + half, note.at.y + half];
+
+	const content = [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`, noteMarkerOps(note.at, NOTE_MARKER_SIZE), 'f'].join('\n');
+	const apRef = buildAppearanceStream(pdfDoc, bbox, content);
+
+	tagAndAdd(
+		pdfDoc,
+		page,
+		note.id,
+		withSharedFields(
+			{
+				Type: 'Annot',
+				Subtype: 'Text',
+				Rect: bbox,
+				Name: 'Comment',
+				C: [r, g, b],
+				F: 4,
+				AP: { N: apRef },
+				// Closed, so a reader that renders /Text popups does not open
+				// every note in the document at once on load.
+				Open: false,
+			},
+			note,
+		),
+	);
+}
+
+// Frees one annotation’s own indirect objects from the document context —
 // its dict, its /AP appearance stream, and (highlighter strokes only) the
 // ExtGState the appearance stream references for opacity. Unlinking a ref
 // from a page's /Annots array (page.node.removeAnnot, below) does *not* do
@@ -322,6 +368,7 @@ export function writeInklingAnnotations(pdfDoc: PDFDocument, pageIndex: number, 
 	removeInklingAnnotations(pdfDoc, page);
 	for (const annotation of annotations) {
 		if (annotation.kind === 'stroke') writeStroke(pdfDoc, page, annotation);
+		else if (annotation.kind === 'note') writeNote(pdfDoc, page, annotation);
 		else writeShape(pdfDoc, page, annotation);
 	}
 }
@@ -447,6 +494,16 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 			start: { x: x1, y: y1 },
 			end: { x: x2, y: y2 },
 		};
+	}
+
+	if (subtype === 'Text') {
+		const rect = dict.lookupMaybe(PDFName.of('Rect'), PDFArray);
+		const [rx0, ry0, rx1, ry1] = rect ? numbersFromArray(rect) : [];
+		if (rx0 === undefined || ry0 === undefined || rx1 === undefined || ry1 === undefined) return null;
+		// The text itself comes from /Contents via readSharedFields, which
+		// runs for every annotation kind — so an empty string here is
+		// filled in a moment later, not lost.
+		return { id, kind: 'note', color, width, at: { x: (rx0 + rx1) / 2, y: (ry0 + ry1) / 2 }, note: '' };
 	}
 
 	if (subtype === 'Square' || subtype === 'Circle') {

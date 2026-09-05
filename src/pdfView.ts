@@ -106,6 +106,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 // upgradeResolution).
 function toCanvasSpace(annotation: Annotation, viewport: PageViewport): Annotation {
 	const width = annotation.width * viewport.scale;
+	// A note keeps its width untouched because it has none that means
+	// anything — the marker is a fixed size in whatever space it is drawn
+	// in, so only its position converts.
+	if (annotation.kind === 'note') return { ...annotation, at: convert(viewport, annotation.at, 'toViewport') };
 	if (annotation.kind === 'stroke') {
 		return { ...annotation, width, points: annotation.points.map((p) => convert(viewport, p, 'toViewport')) };
 	}
@@ -119,6 +123,7 @@ function toCanvasSpace(annotation: Annotation, viewport: PageViewport): Annotati
 
 function toPdfSpace(annotation: Annotation, viewport: PageViewport): Annotation {
 	const width = annotation.width / viewport.scale;
+	if (annotation.kind === 'note') return { ...annotation, at: convert(viewport, annotation.at, 'toPdf') };
 	if (annotation.kind === 'stroke') {
 		return { ...annotation, width, points: annotation.points.map((p) => convert(viewport, p, 'toPdf')) };
 	}

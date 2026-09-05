@@ -13,7 +13,7 @@ export interface Point {
 
 export type DrawToolType = 'pen' | 'highlighter';
 export type ShapeToolType = 'line' | 'rectangle' | 'oval' | 'arrow';
-export type ToolType = 'select' | DrawToolType | 'eraser' | ShapeToolType;
+export type ToolType = 'select' | DrawToolType | 'eraser' | 'note' | ShapeToolType;
 
 interface BaseAnnotation {
 	id: string;
@@ -38,6 +38,16 @@ export interface StrokeAnnotation extends BaseAnnotation {
 	points: Point[];
 }
 
+// A comment pinned to a spot on the page. Unlike a stroke or a shape it
+// has no extent of its own: it is a marker of fixed size, and the text
+// is the content. `note` is required here where it is optional on the
+// base, because a note annotation with nothing in it is not a note.
+export interface NoteAnnotation extends BaseAnnotation {
+	kind: 'note';
+	at: Point;
+	note: string;
+}
+
 export interface ShapeAnnotation extends BaseAnnotation {
 	kind: 'shape';
 	tool: ShapeToolType;
@@ -45,7 +55,13 @@ export interface ShapeAnnotation extends BaseAnnotation {
 	end: Point;
 }
 
-export type Annotation = StrokeAnnotation | ShapeAnnotation;
+export type Annotation = StrokeAnnotation | ShapeAnnotation | NoteAnnotation;
+
+// The marker a note annotation draws, in the surface’s own coordinate
+// space. Fixed rather than derived from stroke width: a note has no
+// width, and a marker that shrank with the pen would become untappable
+// exactly when someone had chosen a fine pen to annotate densely.
+export const NOTE_MARKER_SIZE = 18;
 
 export interface Rect {
 	minX: number;

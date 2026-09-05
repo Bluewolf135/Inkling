@@ -10,7 +10,9 @@ export function eraseAt(annotations: Annotation[], point: Point, radius: number)
 	const result: Annotation[] = [];
 
 	for (const annotation of annotations) {
-		if (annotation.kind === 'shape') {
+		// A note has no interior points to trim, the same as a shape — an
+		// eraser touch removes the whole thing.
+		if (annotation.kind !== 'stroke') {
 			if (!hitTestAnnotation(annotation, point)) result.push(annotation);
 			continue;
 		}

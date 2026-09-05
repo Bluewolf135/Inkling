@@ -1,4 +1,4 @@
-import { Annotation, Point, Rect } from './types';
+import { Annotation, NOTE_MARKER_SIZE, Point, Rect } from './types';
 
 export function distance(a: Point, b: Point): number {
 	return Math.hypot(a.x - b.x, a.y - b.y);
@@ -30,10 +30,18 @@ function distanceToPolyline(p: Point, points: Point[]): number {
 }
 
 export function boundingBox(annotation: Annotation): Rect {
+	if (annotation.kind === 'note') return noteBox(annotation.at);
 	const points = annotation.kind === 'stroke' ? annotation.points : [annotation.start, annotation.end];
 	const xs = points.map((p) => p.x);
 	const ys = points.map((p) => p.y);
 	return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
+}
+
+// The marker is centred on the note’s point, so its box is the same
+// half-size in every direction.
+function noteBox(at: Point): Rect {
+	const half = NOTE_MARKER_SIZE / 2;
+	return { minX: at.x - half, minY: at.y - half, maxX: at.x + half, maxY: at.y + half };
 }
 
 export function unionBoundingBox(boxes: Rect[]): Rect {
@@ -52,6 +60,12 @@ const MIN_HIT_TOLERANCE = 10;
 
 export function hitTestAnnotation(annotation: Annotation, point: Point): boolean {
 	const tolerance = Math.max(MIN_HIT_TOLERANCE, annotation.width / 2 + 4);
+
+	if (annotation.kind === 'note') {
+		// A disc, not the marker’s square: a note is tapped at, and a
+		// round target is what a fingertip actually aims for.
+		return distance(annotation.at, point) <= Math.max(NOTE_MARKER_SIZE / 2, MIN_HIT_TOLERANCE);
+	}
 
 	if (annotation.kind === 'stroke') {
 		return distanceToPolyline(point, annotation.points) <= tolerance;
@@ -96,6 +110,7 @@ export function pointInPolygon(point: Point, polygon: Point[]): boolean {
 // since a concave lasso could enclose a shape's start/end diagonal while
 // still cutting through one of its other two corners.
 function extentPoints(annotation: Annotation): Point[] {
+	if (annotation.kind === 'note') return [annotation.at];
 	if (annotation.kind === 'stroke') return annotation.points;
 	if (annotation.tool === 'line' || annotation.tool === 'arrow') return [annotation.start, annotation.end];
 	const box = boundingBox(annotation);
@@ -115,6 +130,9 @@ export function polygonEnclosesAnnotation(annotation: Annotation, polygon: Point
 }
 
 export function translateAnnotation(annotation: Annotation, dx: number, dy: number): Annotation {
+	if (annotation.kind === 'note') {
+		return { ...annotation, at: { x: annotation.at.x + dx, y: annotation.at.y + dy } };
+	}
 	if (annotation.kind === 'stroke') {
 		return { ...annotation, points: annotation.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
 	}
@@ -137,6 +155,10 @@ export function scaleAnnotation(annotation: Annotation, from: Rect, to: Rect): A
 		y: to.minY + (p.y - from.minY) * scaleY,
 	});
 
+	// A note moves with a resize but does not grow with it: the marker is
+	// chrome at a fixed size, not geometry, so scaling it would make a
+	// pin the size of a paragraph.
+	if (annotation.kind === 'note') return { ...annotation, at: project(annotation.at) };
 	if (annotation.kind === 'stroke') {
 		return { ...annotation, points: annotation.points.map(project) };
 	}

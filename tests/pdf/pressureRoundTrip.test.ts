@@ -203,3 +203,36 @@ describe('quote and note round trip', () => {
 		expect(read?.note).toBeUndefined();
 	});
 });
+
+describe('note annotations in a PDF', () => {
+	it('round-trips its text, colour and position', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [
+			{ id: 'ink-n', kind: 'note', color: '#9c36b5', width: 3, at: { x: 120, y: 400 }, note: 'ask about this in class' },
+		]);
+
+		const [read] = readInklingAnnotations(await reload(doc), 0);
+		expect(read?.kind).toBe('note');
+		expect(read?.note).toBe('ask about this in class');
+		expect(read?.color).toBe('#9c36b5');
+		if (read?.kind === 'note') {
+			expect(read.at.x).toBeCloseTo(120, 1);
+			expect(read.at.y).toBeCloseTo(400, 1);
+		}
+	});
+
+	it('is a standard /Text annotation, so other readers show it', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [
+			{ id: 'ink-n', kind: 'note', color: '#000000', width: 3, at: { x: 10, y: 10 }, note: 'hello' },
+		]);
+		const annots = doc.getPage(0).node.Annots();
+		const first = annots?.asArray()[0];
+		const dict = first instanceof PDFRef ? doc.context.lookupMaybe(first, PDFDict) : undefined;
+		expect(dict?.lookupMaybe(PDFName.of('Subtype'), PDFName)?.decodeText()).toBe('Text');
+		// Its own appearance stream, so the colour that says which category
+		// this note belongs to survives into readers that would otherwise
+		// draw their own house icon.
+		expect(dict?.lookupMaybe(PDFName.of('AP'), PDFDict)).toBeDefined();
+	});
+});
