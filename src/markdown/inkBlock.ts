@@ -75,18 +75,18 @@ const retainedHistories = new Map<string, RetainedHistory>();
 // hundred blocks is not a loss anyone notices.
 const MAX_RETAINED_HISTORIES = 32;
 
-function retainedHistoryFor(key: string, scale: number): HistoryStack {
+function retainedHistoryFor(key: string): RetainedHistory {
 	const existing = retainedHistories.get(key);
-	if (existing && Math.abs(existing.scale - scale) < 0.001) return existing.history;
+	if (existing) return existing;
 
-	const history = new HistoryStack();
-	retainedHistories.set(key, { history, scale });
+	const retained: RetainedHistory = { history: new HistoryStack(), scale: 1 };
+	retainedHistories.set(key, retained);
 	while (retainedHistories.size > MAX_RETAINED_HISTORIES) {
 		const oldest = retainedHistories.keys().next().value;
 		if (oldest === undefined) break;
 		retainedHistories.delete(oldest);
 	}
-	return history;
+	return retained;
 }
 
 // How much sharper than the note’s column a block’s canvas may be backed.
@@ -100,6 +100,11 @@ function retainedHistoryFor(key: string, scale: number): HistoryStack {
 // Capped because the cost is real: a canvas is width x height x 4 bytes,
 // twice over (see PageMount), for every block in the note.
 const MAX_SURFACE_SCALE = 3;
+
+// How far outside the viewport a block still keeps its canvases. Wide
+// enough that scrolling at a normal speed always meets a block that is
+// already drawn, rather than a blank sheet filling in late.
+const SURFACE_RETAIN_MARGIN = '400px 0px';
 
 // Ink that was drawn but could not be written to the note, kept alive
 // across the re-render that would otherwise throw it away.
@@ -209,7 +214,22 @@ class InkBlockView {
 	// ink is drawn at the resolution it is looked at. Everything the
 	// controller holds is in surface units, everything in the file is in
 	// stored units, and this is the only thing between them.
-	private readonly scale: number;
+	// How many surface units there are per stored unit — measured when the
+	// surface is actually mounted, because at construction the block is
+	// not in the layout yet and reports a width of zero. Everything the
+	// controller holds is in surface units, everything in the file is in
+	// stored units, and this is the only thing between them.
+	private scale = 1;
+	private readonly retained: RetainedHistory;
+	// The element the canvases are mounted into, and whether they
+	// currently are. See watchVisibility.
+	private readonly contentEl: HTMLElement;
+	private observer: IntersectionObserver | null = null;
+	private mounted = false;
+	// Whether the file’s annotations have been handed to the store yet.
+	// Once they have, the store is the live truth and a remount must not
+	// overwrite it.
+	private seeded = false;
 
 	constructor(
 		private readonly plugin: Plugin,
@@ -235,17 +255,13 @@ class InkBlockView {
 		const section = ctx.getSectionInfo(containerEl);
 		this.stripKey = section ? `${ctx.sourcePath}::${section.lineStart}` : null;
 
-		// Measured before anything is mounted, from the element the surface
-		// will fill. A container with no width yet — a block rendered while
-		// its pane is hidden — falls back to the stored size, which is what
-		// this always used.
-		this.scale = surfaceScale(containerEl, this.data.width);
+		this.retained = retainedHistoryFor(recoveryKey(ctx.sourcePath, this.blockId));
 
 		this.controller = new AnnotationController({
 			toolState,
 			// Kept outside the controller so undo survives this block being
 			// rebuilt by its own save. See retainedHistories.
-			history: retainedHistoryFor(recoveryKey(ctx.sourcePath, this.blockId), this.scale),
+			history: this.retained.history,
 			getCurrentPage: () => BLOCK_PAGE,
 			onAnnotationsChanged: () => this.scheduleWrite(),
 		});
@@ -278,8 +294,11 @@ class InkBlockView {
 		// scale (see annotate/pointer.ts), so a block drawn on a phone and
 		// reopened on a desktop still puts every stroke where it was drawn.
 		surface.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${this.data.height}` });
-		this.controller.mountPage(BLOCK_PAGE, content, this.data.width * this.scale, this.data.height * this.scale);
-		this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
+		this.contentEl = content;
+		// Deferred until the block is near the screen — see watchVisibility.
+		// The surface keeps its size regardless, from the aspect ratio above,
+		// so nothing reflows when the canvases come and go.
+		this.watchVisibility();
 
 		if (malformed) {
 			// Deliberately never saves over it: a block this build can't fully
@@ -428,6 +447,88 @@ class InkBlockView {
 		handle.addEventListener('pointercancel', end);
 	}
 
+	// ---- Surface mounting ----
+
+	// A block only holds canvases while it is somewhere near the screen.
+	//
+	// Measured on the note that prompted this: fourteen blocks, and every
+	// one of them mounted a base and an overlay canvas whether or not
+	// anyone was looking at it — 38 MB of backing store at the stored size,
+	// and 118 MB once those canvases were backed at display resolution.
+	// Parsing all fourteen blocks, by contrast, takes 9 ms. The JSON was
+	// never the problem; the canvases were.
+	//
+	// This is the same trade the PDF view makes for pages, for the same
+	// reason and with the same margin: render ahead of the reader so a
+	// block is ready before it is seen, and let go of the ones they have
+	// scrolled well past.
+	private watchVisibility(): void {
+		const observer = new IntersectionObserver(
+			(entries) => {
+				for (const entry of entries) {
+					if (entry.isIntersecting) this.mountSurface();
+					else this.releaseSurface();
+				}
+			},
+			{ rootMargin: SURFACE_RETAIN_MARGIN },
+		);
+		observer.observe(this.surfaceEl);
+		this.observer = observer;
+	}
+
+	private mountSurface(): void {
+		if (this.mounted || this.detached) return;
+		this.mounted = true;
+
+		// Measured here rather than in the constructor: a block is not in
+		// the layout when its post-processor runs, so it reports a width of
+		// zero and every canvas came out backed at the stored size — which
+		// is exactly the softness this was meant to fix.
+		const previous = this.scale;
+		this.scale = surfaceScale(this.surfaceEl, this.data.width);
+		const width = this.data.width * this.scale;
+		const height = this.data.height * this.scale;
+
+		this.controller.mountPage(BLOCK_PAGE, this.contentEl, width, height);
+
+		if (!this.seeded) {
+			// Only ever on the first mount. mountPage repaints from the store,
+			// which is the live truth once anything has been drawn, so
+			// reseeding on a remount would put the file’s version back and
+			// throw away every stroke made since.
+			this.seeded = true;
+			this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
+		} else if (Math.abs(previous - this.scale) > 0.001) {
+			// The column changed width, or the note moved to another screen.
+			// Everything in the store is in the old surface units and has to
+			// come with it.
+			const factor = this.scale / previous;
+			this.controller.resizePage(
+				BLOCK_PAGE,
+				width,
+				height,
+				this.controller.getPageAnnotations(BLOCK_PAGE).map((a) => scaleAnnotationUniform(a, factor)),
+			);
+			// History entries hold coordinates in the scale they were
+			// recorded at, so replaying one now would put ink back in the
+			// wrong place. Losing undo is the lesser of the two.
+			this.retained.history.clear();
+		}
+		this.retained.scale = this.scale;
+	}
+
+	private releaseSurface(): void {
+		if (!this.mounted) return;
+		// Never mid-stroke: unmounting would take the surface out from under
+		// a pen that is still down. A gesture cannot outlast a scroll by
+		// much, so the next callback picks it up.
+		if (this.controller.isGestureActive()) return;
+		this.mounted = false;
+		// The store keeps this page’s annotations, so remounting redraws them
+		// without touching the file.
+		this.controller.unmountPage(BLOCK_PAGE);
+	}
+
 	private scheduleWrite(): void {
 		if (this.detached || this.readOnly) return;
 		if (this.writeHandle !== null) window.clearTimeout(this.writeHandle);
@@ -477,7 +578,13 @@ class InkBlockView {
 			return;
 		}
 
-		this.data = { ...this.data, annotations: this.toStored(this.controller.getPageAnnotations(BLOCK_PAGE)) };
+		// The store is only the truth once it has been seeded. A block that
+		// has never been mounted — one recovering unsaved ink while still
+		// scrolled off screen, most importantly — has an *empty* store, and
+		// writing that would erase the drawing this save exists to protect.
+		if (this.seeded) {
+			this.data = { ...this.data, annotations: this.toStored(this.controller.getPageAnnotations(BLOCK_PAGE)) };
+		}
 		const serialized = serializeInkBlock(this.data);
 
 		// Held from here on, not only on failure. Every path below can end
@@ -659,6 +766,8 @@ class InkBlockView {
 	}
 
 	detach(): void {
+		this.observer?.disconnect();
+		this.observer = null;
 		if (this.writeHandle !== null) {
 			window.clearTimeout(this.writeHandle);
 			this.writeHandle = null;
