@@ -1,5 +1,14 @@
 import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, setIcon, setTooltip, TFile } from 'obsidian';
-import { AnnotationController, buildToolbar, capturePointer, findScrollParent, ToolState } from '../annotate';
+import {
+	AnnotationController,
+	buildToolbar,
+	capturePointer,
+	findScrollParent,
+	HistoryStack,
+	scaleAnnotationUniform,
+	ToolState,
+	type Annotation,
+} from '../annotate';
 import { createId } from '../annotate/id';
 import {
 	INK_BLOCK_LANGUAGE,
@@ -40,6 +49,58 @@ const LOCATE_RETRIES = 4;
 // interrupted.
 const SCROLL_RESTORE_MS = 120;
 
+// Undo histories kept across the re-render a block’s own save causes.
+//
+// A block’s controller is destroyed and rebuilt roughly a second after
+// the pen comes up, and the history used to go with it — so undo could
+// never reach past your last pause, on the one surface people draw on
+// most. Keeping it out here, and handing it back to the rebuilt
+// controller, is the same move ToolState made for the pen itself.
+//
+// Keyed by note path, block id, and the scale the entries were recorded
+// at: an entry holds coordinates, so replaying one recorded at a
+// different surface resolution would put the ink back in the wrong place.
+// A window resized mid-session starts a fresh history rather than a
+// subtly wrong one.
+interface RetainedHistory {
+	history: HistoryStack;
+	scale: number;
+}
+
+const retainedHistories = new Map<string, RetainedHistory>();
+
+// Bounded so a long session over a big vault cannot accumulate one per
+// block ever rendered. Map preserves insertion order, so the oldest goes
+// first — and losing an undo history for a block nobody has touched in a
+// hundred blocks is not a loss anyone notices.
+const MAX_RETAINED_HISTORIES = 32;
+
+function retainedHistoryFor(key: string, scale: number): HistoryStack {
+	const existing = retainedHistories.get(key);
+	if (existing && Math.abs(existing.scale - scale) < 0.001) return existing.history;
+
+	const history = new HistoryStack();
+	retainedHistories.set(key, { history, scale });
+	while (retainedHistories.size > MAX_RETAINED_HISTORIES) {
+		const oldest = retainedHistories.keys().next().value;
+		if (oldest === undefined) break;
+		retainedHistories.delete(oldest);
+	}
+	return history;
+}
+
+// How much sharper than the note’s column a block’s canvas may be backed.
+//
+// The surface is stored 800 units wide and shown at whatever width the
+// note’s column happens to be, so backing the canvas at the stored size —
+// which is what it used to do — stretched it, by about 2.25x on a
+// high-DPI desktop. Ink came out visibly soft on exactly the screens
+// people read on.
+//
+// Capped because the cost is real: a canvas is width x height x 4 bytes,
+// twice over (see PageMount), for every block in the note.
+const MAX_SURFACE_SCALE = 3;
+
 // Ink that was drawn but could not be written to the note, kept alive
 // across the re-render that would otherwise throw it away.
 //
@@ -57,6 +118,18 @@ const unsavedInk = new Map<string, InkBlockData>();
 
 function recoveryKey(sourcePath: string, blockId: string): string {
 	return `${sourcePath}::${blockId}`;
+}
+
+// How much sharper than its stored size a block canvas should be backed,
+// given the element it has to fill and the screen it is on.
+function surfaceScale(containerEl: HTMLElement, storedWidth: number): number {
+	const cssWidth = containerEl.clientWidth;
+	if (!cssWidth || storedWidth <= 0) return 1;
+	const density = window.devicePixelRatio || 1;
+	// Never *below* the stored size: shrinking the backing store to fit a
+	// narrow phone column would throw away detail the file already holds,
+	// and the ink would come back coarser than it was drawn.
+	return Math.min(Math.max((cssWidth * density) / storedWidth, 1), MAX_SURFACE_SCALE);
 }
 
 // Only the block’s own single drawing surface is ever mounted into a given
@@ -130,6 +203,14 @@ class InkBlockView {
 	// every successful save.
 	private locateFailures = 0;
 
+	// How many surface units there are per stored unit. The block is
+	// stored 800 wide whatever screen drew it; the canvas is backed at
+	// the width it is actually shown at, times the display density, so
+	// ink is drawn at the resolution it is looked at. Everything the
+	// controller holds is in surface units, everything in the file is in
+	// stored units, and this is the only thing between them.
+	private readonly scale: number;
+
 	constructor(
 		private readonly plugin: Plugin,
 		private readonly ctx: MarkdownPostProcessorContext,
@@ -154,8 +235,17 @@ class InkBlockView {
 		const section = ctx.getSectionInfo(containerEl);
 		this.stripKey = section ? `${ctx.sourcePath}::${section.lineStart}` : null;
 
+		// Measured before anything is mounted, from the element the surface
+		// will fill. A container with no width yet — a block rendered while
+		// its pane is hidden — falls back to the stored size, which is what
+		// this always used.
+		this.scale = surfaceScale(containerEl, this.data.width);
+
 		this.controller = new AnnotationController({
 			toolState,
+			// Kept outside the controller so undo survives this block being
+			// rebuilt by its own save. See retainedHistories.
+			history: retainedHistoryFor(recoveryKey(ctx.sourcePath, this.blockId), this.scale),
 			getCurrentPage: () => BLOCK_PAGE,
 			onAnnotationsChanged: () => this.scheduleWrite(),
 		});
@@ -183,14 +273,13 @@ class InkBlockView {
 		this.surfaceEl = surface;
 		const content = surface.createDiv({ cls: 'inkling-ink-block-content' });
 
-		// Width comes from the note's own column width; the stored size sets
-		// the proportions and the canvas's backing resolution. Pointer input
-		// is mapped through that backing scale (see annotate/pointer.ts), so
-		// a block drawn on a phone and reopened on a desktop still puts every
-		// stroke where it was drawn.
+		// Width comes from the note's own column; the stored size sets the
+		// proportions. Pointer input is mapped through the canvas backing
+		// scale (see annotate/pointer.ts), so a block drawn on a phone and
+		// reopened on a desktop still puts every stroke where it was drawn.
 		surface.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${this.data.height}` });
-		this.controller.mountPage(BLOCK_PAGE, content, this.data.width, this.data.height);
-		this.controller.seedPage(BLOCK_PAGE, this.data.annotations);
+		this.controller.mountPage(BLOCK_PAGE, content, this.data.width * this.scale, this.data.height * this.scale);
+		this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
 
 		if (malformed) {
 			// Deliberately never saves over it: a block this build can't fully
@@ -276,7 +365,12 @@ class InkBlockView {
 		// Goes through the store's live-update path, so a resize counts as
 		// exactly that rather than an edit: no history entry of its own, and
 		// no change notification recursing back into the save path.
-		this.controller.resizePage(BLOCK_PAGE, this.data.width, clamped, this.controller.getPageAnnotations(BLOCK_PAGE));
+		this.controller.resizePage(
+			BLOCK_PAGE,
+			this.data.width * this.scale,
+			clamped * this.scale,
+			this.controller.getPageAnnotations(BLOCK_PAGE),
+		);
 	}
 
 	private buildResizeHandle(): void {
@@ -314,8 +408,8 @@ class InkBlockView {
 			// drag moves the edge by a different amount than the pointer on
 			// every screen width but one.
 			const cssWidth = this.surfaceEl.getBoundingClientRect().width;
-			const scale = cssWidth > 0 ? this.data.width / cssWidth : 1;
-			pendingHeight = drag.startHeight + (event.clientY - drag.startY) * scale;
+			const perCssPixel = cssWidth > 0 ? this.data.width / cssWidth : 1;
+			pendingHeight = drag.startHeight + (event.clientY - drag.startY) * perCssPixel;
 			frame ??= window.requestAnimationFrame(flush);
 		});
 
@@ -383,7 +477,7 @@ class InkBlockView {
 			return;
 		}
 
-		this.data = { ...this.data, annotations: this.controller.getPageAnnotations(BLOCK_PAGE) };
+		this.data = { ...this.data, annotations: this.toStored(this.controller.getPageAnnotations(BLOCK_PAGE)) };
 		const serialized = serializeInkBlock(this.data);
 
 		// Held from here on, not only on failure. Every path below can end
@@ -451,6 +545,19 @@ class InkBlockView {
 			console.error('Inkling: failed to save an ink block.', error);
 			new Notice('Inkling: could not save this ink block. Your drawing is still on screen and will be saved again shortly.');
 		}
+	}
+
+	// Stored units to surface units and back. The only two places the two
+	// spaces meet: everything the controller sees is surface, everything
+	// in the file is stored.
+	private toSurface(annotations: Annotation[]): Annotation[] {
+		if (this.scale === 1) return annotations;
+		return annotations.map((annotation) => scaleAnnotationUniform(annotation, this.scale));
+	}
+
+	private toStored(annotations: Annotation[]): Annotation[] {
+		if (this.scale === 1) return annotations;
+		return annotations.map((annotation) => scaleAnnotationUniform(annotation, 1 / this.scale));
 	}
 
 	// Where this block’s fence actually is in `lines`.

@@ -82,6 +82,13 @@ export interface AnnotationControllerOptions {
 	// would otherwise reset the user's pen mid-sentence. Omitted only by
 	// callers with no toolbar to keep in sync — each gets its own.
 	toolState?: ToolState;
+	// An undo history that outlives this controller. Ink blocks pass one
+	// because a block is destroyed and rebuilt by its own save, roughly a
+	// second after the pen comes up — a history owned by the controller
+	// was therefore wiped that often, which made undo useless on the one
+	// surface people draw on most. Omitted by callers whose controller
+	// outlives the work, which get their own.
+	history?: HistoryStack;
 	onAddPage?: () => void;
 	getCurrentPage?: () => number | null;
 	// Fires once per committed gesture (draw, erase, move, resize, recolor,
@@ -141,7 +148,12 @@ export interface AnnotationControllerOptions {
 // Markdown ink blocks (a later step) can mount pages into this exact same
 // controller instead of duplicating the tool logic.
 export class AnnotationController {
-	private readonly history = new HistoryStack();
+	private readonly history: HistoryStack;
+	// Whether this controller created its own history, and so may clear
+	// it. A history handed in from outside outlives this controller on
+	// purpose (see markdown/inkBlock.ts) and clearing it on unmount would
+	// defeat the entire point of passing it.
+	private readonly ownsHistory: boolean;
 	private readonly store: AnnotationStore;
 	private readonly pages = new Map<number, PageMount>();
 	private readonly listeners = new Set<() => void>();
@@ -174,6 +186,8 @@ export class AnnotationController {
 
 	constructor(private readonly options: AnnotationControllerOptions = {}) {
 		this.toolState = options.toolState ?? new ToolState();
+		this.ownsHistory = options.history === undefined;
+		this.history = options.history ?? new HistoryStack();
 		this.store = new AnnotationStore(
 			this.history,
 			(pageNumber) => this.redrawBase(pageNumber),
@@ -314,7 +328,7 @@ export class AnnotationController {
 		this.drag = null;
 		this.eraserCursor = null;
 		this.zoomByPage.clear();
-		this.history.clear();
+		if (this.ownsHistory) this.history.clear();
 	}
 
 	// End of life for the controller itself, as distinct from unmounting its
@@ -467,15 +481,21 @@ export class AnnotationController {
 	}
 
 	undo(): void {
-		const pageNumber = this.history.undo();
+		const pageNumber = this.store.applyUndo();
 		this.notify();
-		if (pageNumber !== undefined) this.options.onAnnotationsChanged?.(pageNumber);
+		if (pageNumber !== undefined) {
+			this.redrawOverlay(pageNumber);
+			this.options.onAnnotationsChanged?.(pageNumber);
+		}
 	}
 
 	redo(): void {
-		const pageNumber = this.history.redo();
+		const pageNumber = this.store.applyRedo();
 		this.notify();
-		if (pageNumber !== undefined) this.options.onAnnotationsChanged?.(pageNumber);
+		if (pageNumber !== undefined) {
+			this.redrawOverlay(pageNumber);
+			this.options.onAnnotationsChanged?.(pageNumber);
+		}
 	}
 
 	// ---- Page-level actions ----

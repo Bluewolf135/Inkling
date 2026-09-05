@@ -165,6 +165,23 @@ export function scaleAnnotation(annotation: Annotation, from: Rect, to: Rect): A
 	return { ...annotation, start: project(annotation.start), end: project(annotation.end) };
 }
 
+// Scales an annotation about the origin by a single factor, stroke width
+// included.
+//
+// Distinct from scaleAnnotation above, which maps one rectangle onto
+// another for a resize-handle drag and deliberately leaves width alone —
+// resizing a selection should not fatten its lines. This is for moving an
+// annotation between two coordinate spaces that differ only in resolution,
+// where the width is a length like any other and has to come with it.
+export function scaleAnnotationUniform(annotation: Annotation, factor: number): Annotation {
+	const point = (p: Point): Point => (p.p === undefined ? { x: p.x * factor, y: p.y * factor } : { x: p.x * factor, y: p.y * factor, p: p.p });
+	const width = annotation.width * factor;
+
+	if (annotation.kind === 'note') return { ...annotation, width, at: point(annotation.at) };
+	if (annotation.kind === 'stroke') return { ...annotation, width, points: annotation.points.map(point) };
+	return { ...annotation, width, start: point(annotation.start), end: point(annotation.end) };
+}
+
 export function normalizeRect(a: Point, b: Point): Rect {
 	return {
 		minX: Math.min(a.x, b.x),

@@ -196,3 +196,116 @@ describe('findInkBlockById', () => {
 		expect(findInkBlockById(lines, 'ink-a')).toEqual({ lineStart: 0, lineEnd: 5 });
 	});
 });
+
+describe('stroke fidelity through a block', () => {
+	it('keeps pressure through a round trip', () => {
+		// It used to be written and never read back, so a block saved a
+		// tapered stroke and redrew it flat about a second later, when its
+		// own save re-rendered it.
+		const source = serializeInkBlock({
+			...emptyInkBlock(),
+			annotations: [
+				{
+					id: 'ink-1',
+					kind: 'stroke',
+					tool: 'pen',
+					color: '#000000',
+					width: 3,
+					points: [{ x: 1, y: 2, p: 0.25 }, { x: 3, y: 4, p: 1 }],
+				},
+			],
+		});
+
+		const [read] = parseInkBlock(source).data.annotations;
+		const points = read?.kind === 'stroke' ? read.points : [];
+		expect(points[0]?.p).toBeCloseTo(0.25, 2);
+		expect(points[1]?.p).toBe(1);
+	});
+
+	it('leaves a pressureless point pressureless', () => {
+		const source = serializeInkBlock({
+			...emptyInkBlock(),
+			annotations: [
+				{ id: 'ink-1', kind: 'stroke', tool: 'pen', color: '#000000', width: 3, points: [{ x: 1, y: 2 }, { x: 3, y: 4 }] },
+			],
+		});
+		const [read] = parseInkBlock(source).data.annotations;
+		const points = read?.kind === 'stroke' ? read.points : [];
+		for (const point of points) expect(point.p).toBeUndefined();
+	});
+
+	it('drops a pressure outside the range a stylus can report', () => {
+		// Inventing a pressure is worse than having none.
+		const source = JSON.stringify({
+			annotations: [
+				{
+					id: 'ink-1',
+					kind: 'stroke',
+					tool: 'pen',
+					color: '#000000',
+					width: 3,
+					points: [{ x: 1, y: 2, p: 4 }, { x: 3, y: 4, p: -1 }],
+				},
+			],
+		});
+		const [read] = parseInkBlock(source).data.annotations;
+		const points = read?.kind === 'stroke' ? read.points : [];
+		expect(points).toHaveLength(2);
+		for (const point of points) expect(point.p).toBeUndefined();
+	});
+
+	it('writes coordinates at a sane precision instead of full float', () => {
+		// JSON.stringify writes "123.45678901234567" by default, for a
+		// coordinate whose last twelve digits nobody can see. With every
+		// stylus sample now captured, that is the bulk of the note.
+		const points = Array.from({ length: 200 }, (_, index) => ({
+			x: 100 + Math.sin(index / 9) * 137.4213456789,
+			y: 200 + Math.cos(index / 7) * 88.72311234,
+			p: 0.4 + Math.sin(index / 30) * 0.3,
+		}));
+		const block = {
+			...emptyInkBlock(),
+			annotations: [{ id: 'ink-1', kind: 'stroke' as const, tool: 'pen' as const, color: '#000000', width: 3, points }],
+		};
+
+		const serialized = serializeInkBlock(block);
+		expect(serialized).not.toMatch(/\d\.\d{3,}/);
+		// Comfortably under half of what full precision costs.
+		expect(serialized.length).toBeLessThan(JSON.stringify(block).length * 0.6);
+	});
+
+	it('rounds only what it writes, never the live annotations', () => {
+		// Rounding in place would move ink under the pen, by a fraction of a
+		// pixel, on every save.
+		const point = { x: 1.23456789, y: 2.3456789 };
+		const block = {
+			...emptyInkBlock(),
+			annotations: [{ id: 'ink-1', kind: 'stroke' as const, tool: 'pen' as const, color: '#000000', width: 3, points: [point, { x: 5, y: 6 }] }],
+		};
+		serializeInkBlock(block);
+		expect(point.x).toBe(1.23456789);
+	});
+
+	it('still recovers a shape it rounded', () => {
+		const source = serializeInkBlock({
+			...emptyInkBlock(),
+			annotations: [
+				{
+					id: 'ink-1',
+					kind: 'shape',
+					tool: 'rectangle',
+					color: '#000000',
+					width: 2,
+					start: { x: 10.987654, y: 20.123456 },
+					end: { x: 100.5, y: 200.5 },
+				},
+			],
+		});
+		const [read] = parseInkBlock(source).data.annotations;
+		expect(read?.kind).toBe('shape');
+		if (read?.kind === 'shape') {
+			expect(read.start.x).toBeCloseTo(11, 0);
+			expect(read.end.x).toBe(100.5);
+		}
+	});
+});
