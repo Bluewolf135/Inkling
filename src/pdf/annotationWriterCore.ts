@@ -1,6 +1,7 @@
 import { PDFDocument } from 'pdf-lib';
 import type { Annotation } from '../annotate/types';
 import { pruneOrphanedInklingAnnotations, readInklingAnnotations, stripInklingAnnotations, writeInklingAnnotations } from './annotationSync';
+import { compareFingerprints, fingerprintDocument } from './fingerprint';
 
 // The actual pdf-lib work, with no worker plumbing around it, so the exact
 // same code can run either off the main thread (annotationWriter.worker.ts,
@@ -67,5 +68,33 @@ export async function writeDocument(
 	for (const { pageNumber, annotations } of pages) {
 		writeInklingAnnotations(doc, pageNumber - 1, annotations);
 	}
-	return toArrayBuffer(await doc.save());
+
+	// Fingerprinted *after* the mutation, because the mutated document is the
+	// intended result — the thing the produced bytes are supposed to equal.
+	// Our own annotations are excluded from the fingerprint, so having just
+	// rewritten them doesn't register as a change.
+	const intended = fingerprintDocument(doc);
+	const bytes = await doc.save();
+
+	// The check that makes a silent pdf-lib fault loud. Reparsing the bytes
+	// we are about to hand back costs a full parse per save, which is real
+	// work — it is why this lives in the writer worker and why the save
+	// cadence is scaled to file size (see pdf/saveCadence.ts). The
+	// alternative is a book quietly losing structure with nobody noticing for
+	// months.
+	//
+	// updateMetadata: false because this parse is read-only; letting it stamp
+	// a new ModDate would make the verification copy differ from the bytes
+	// actually being written.
+	const written = await PDFDocument.load(bytes, { updateMetadata: false });
+	const difference = compareFingerprints(intended, fingerprintDocument(written));
+	if (difference) {
+		// Thrown, never returned alongside the bytes: there must be no path
+		// where a caller gets something back and has to decide whether to
+		// trust it. The view's existing catch leaves the file untouched and
+		// re-marks the pages dirty.
+		throw new Error(`Inkling: refusing to save, the PDF changed unexpectedly (${difference}).`);
+	}
+
+	return toArrayBuffer(bytes);
 }
