@@ -1,4 +1,5 @@
 import { boundingBox, unionBoundingBox } from './geometry';
+import { hasPressure, outlinePath, smoothedPath, type PathSegment } from './stroke';
 import { Annotation, HIGHLIGHTER_OPACITY, Point, Rect } from './types';
 
 const SELECTION_COLOR = '#1971c2';
@@ -51,6 +52,31 @@ function withHalo(
 
 const CHROME_DASH = [4, 3];
 
+// Walks the shared path description (see annotate/stroke.ts) onto a canvas.
+// Its twin lives in src/pdf/contentStream.ts, emitting the same segments as
+// PDF operators — the two must stay in step, which is why neither of them
+// computes the segments itself.
+function tracePath(ctx: CanvasRenderingContext2D, segments: PathSegment[]): void {
+	ctx.beginPath();
+	for (const segment of segments) {
+		if (segment.kind === 'move') ctx.moveTo(segment.to.x, segment.to.y);
+		else if (segment.kind === 'line') ctx.lineTo(segment.to.x, segment.to.y);
+		else ctx.quadraticCurveTo(segment.control.x, segment.control.y, segment.to.x, segment.to.y);
+	}
+}
+
+// A stroke drawn as a filled shape rather than a stroked line, which is the
+// only way a line's width can vary along its length.
+function fillOutline(ctx: CanvasRenderingContext2D, ring: Point[]): void {
+	const [first, ...rest] = ring;
+	if (!first || rest.length === 0) return;
+	ctx.beginPath();
+	ctx.moveTo(first.x, first.y);
+	for (const point of rest) ctx.lineTo(point.x, point.y);
+	ctx.closePath();
+	ctx.fill();
+}
+
 function drawPolyline(ctx: CanvasRenderingContext2D, points: Point[]): void {
 	const [first, ...rest] = points;
 	if (!first || rest.length === 0) return;
@@ -82,7 +108,18 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation): 
 	}
 
 	if (annotation.kind === 'stroke') {
-		drawPolyline(ctx, annotation.points);
+		// A pen that reported pressure is drawn as a tapered outline; a
+		// highlighter never is — a highlighter that tapered would read as a
+		// mistake, and its text-snapped form is a straight segment at line
+		// height anyway. Everything else is the smoothed path, which is what
+		// stops fast handwriting coming out visibly faceted.
+		if (annotation.tool === 'pen' && hasPressure(annotation.points)) {
+			ctx.fillStyle = annotation.color;
+			fillOutline(ctx, outlinePath(annotation.points, annotation.width));
+		} else {
+			tracePath(ctx, smoothedPath(annotation.points));
+			ctx.stroke();
+		}
 	} else {
 		const { start, end } = annotation;
 		switch (annotation.tool) {
