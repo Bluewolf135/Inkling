@@ -1,6 +1,7 @@
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import { boundingBox } from '../annotate/geometry';
-import { arrowHeadOps, ellipseOps, moveLineOps, rectangleOps } from './contentStream';
+import { hasPressure, outlinePath, smoothedPath } from '../annotate/stroke';
+import { arrowHeadOps, ellipseOps, moveLineOps, pathOps, polygonOps, rectangleOps } from './contentStream';
 import { Annotation, DEFAULT_COLOR, DEFAULT_WIDTH, HIGHLIGHTER_OPACITY, Point, ShapeAnnotation, StrokeAnnotation } from '../annotate/types';
 
 // Mirrors pdf-lib's own (unexported) PDFContext.obj()/stream() literal
@@ -98,6 +99,23 @@ function tagAndAdd(pdfDoc: PDFDocument, page: PDFPage, id: string, fields: PdfLi
 	page.node.addAnnot(pdfDoc.context.register(dict));
 }
 
+function fillHeader(color: string): string[] {
+	const [r, g, b] = hexToRgb(color);
+	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`];
+}
+
+// Pressure, one byte per sample, under a private key.
+//
+// There is nowhere in the standard to put it: /InkList is a flat list of
+// coordinates with no per-point width, and no other annotation entry
+// carries one either. pdf-lib preserves dictionary entries it does not
+// understand and other readers ignore keys they do not know, so a private
+// dict is both safe and invisible. A byte per sample is plenty — a
+// thousandth of a unit of pressure is not worth the file size, and these
+// arrays are as long as the stroke is.
+const INKLING_EXTRAS = 'Inkling';
+const PRESSURE_KEY = 'P';
+
 function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotation): void {
 	const [r, g, b] = hexToRgb(stroke.color);
 	const box = boundingBox(stroke);
@@ -105,20 +123,40 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 	const bbox = [box.minX - pad, box.minY - pad, box.maxX + pad, box.maxY + pad];
 
 	const opacity = stroke.tool === 'highlighter' ? HIGHLIGHTER_OPACITY : 1;
-	const content = [...strokeHeader(stroke.color, stroke.width), moveLineOps(stroke.points), 'S'].join('\n');
+	// A highlighter never varies its width (see annotate/stroke.ts), so it
+	// never carries pressure — recording any for one would be dead weight in
+	// every file that has one.
+	const varying = stroke.tool === 'pen' && hasPressure(stroke.points);
+	// Filled outline for a pressure stroke, stroked path for everything else:
+	// no PDF stroking operator can vary a line's width along its length.
+	// Either way the geometry comes from the same shared module the canvas
+	// draws from, so the file matches what the user watched themselves draw.
+	const content = varying
+		? [...fillHeader(stroke.color), polygonOps(outlinePath(stroke.points, stroke.width)), 'f'].join('\n')
+		: [...strokeHeader(stroke.color, stroke.width), pathOps(smoothedPath(stroke.points)), 'S'].join('\n');
 	const apRef = buildAppearanceStream(pdfDoc, bbox, content, opacity);
 
-	tagAndAdd(pdfDoc, page, stroke.id, {
+	const fields: PdfLiteralObject = {
 		Type: 'Annot',
 		Subtype: 'Ink',
 		Rect: bbox,
+		// The raw path, whatever the appearance stream above does with it —
+		// for a filled outline this is the only place another PDF reader can
+		// find the line the pen actually took.
 		InkList: [stroke.points.flatMap((p) => [p.x, p.y])],
 		C: [r, g, b],
 		CA: opacity,
 		BS: { W: stroke.width },
 		F: 4,
 		AP: { N: apRef },
-	});
+	};
+	if (varying) {
+		fields[INKLING_EXTRAS] = {
+			[PRESSURE_KEY]: stroke.points.map((p) => Math.round(Math.min(Math.max(p.p ?? 1, 0), 1) * 255)),
+		};
+	}
+
+	tagAndAdd(pdfDoc, page, stroke.id, fields);
 }
 
 function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation): void {
@@ -320,7 +358,26 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 		if (points.length < 2) return null;
 
 		const opacity = dict.lookupMaybe(PDFName.of('CA'), PDFNumber)?.asNumber() ?? 1;
-		return { id, kind: 'stroke', tool: opacity < 0.9 ? 'highlighter' : 'pen', color, width, points };
+		const tool = opacity < 0.9 ? 'highlighter' : 'pen';
+
+		// Applied only when it describes exactly these points. A length
+		// mismatch means something else edited the path without knowing about
+		// our private key, and stretching the old pressures over a different
+		// number of samples would be inventing data about how hard someone
+		// pressed.
+		const pressures = dict
+			.lookupMaybe(PDFName.of(INKLING_EXTRAS), PDFDict)
+			?.lookupMaybe(PDFName.of(PRESSURE_KEY), PDFArray);
+		const values = pressures ? numbersFromArray(pressures) : [];
+		if (values.length === points.length) {
+			for (let index = 0; index < points.length; index++) {
+				const point = points[index];
+				const value = values[index];
+				if (point && value !== undefined) point.p = Math.min(Math.max(value / 255, 0), 1);
+			}
+		}
+
+		return { id, kind: 'stroke', tool, color, width, points };
 	}
 
 	if (subtype === 'Line') {

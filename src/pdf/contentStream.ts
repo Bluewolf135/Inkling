@@ -1,3 +1,4 @@
+import { PathSegment } from '../annotate/stroke';
 import { Point } from '../annotate/types';
 
 // Standard Bezier approximation constant for a quarter-circle arc.
@@ -14,6 +15,33 @@ export function moveLineOps(points: Point[]): string {
 	if (!first) return '';
 	const parts = [`${n(first.x)} ${n(first.y)} m`];
 	for (const p of rest) parts.push(`${n(p.x)} ${n(p.y)} l`);
+	return parts.join('\n');
+}
+
+// The PDF twin of render.ts's tracePath: the same shared path description
+// (see annotate/stroke.ts), emitted as operators instead of canvas calls.
+// A quadratic is written as PDF's `v` — a cubic that reuses the current
+// point as its first control, which is exactly what a quadratic is —
+// because PDF has no quadratic operator of its own.
+export function pathOps(segments: PathSegment[]): string {
+	const parts: string[] = [];
+	for (const segment of segments) {
+		if (segment.kind === 'move') parts.push(`${n(segment.to.x)} ${n(segment.to.y)} m`);
+		else if (segment.kind === 'line') parts.push(`${n(segment.to.x)} ${n(segment.to.y)} l`);
+		else parts.push(`${n(segment.control.x)} ${n(segment.control.y)} ${n(segment.to.x)} ${n(segment.to.y)} v`);
+	}
+	return parts.join('\n');
+}
+
+// A closed ring, for filling — the shape a pressure-varying stroke takes,
+// since no PDF stroking operator can change a line's width along its
+// length.
+export function polygonOps(points: Point[]): string {
+	const [first, ...rest] = points;
+	if (!first || rest.length < 2) return '';
+	const parts = [`${n(first.x)} ${n(first.y)} m`];
+	for (const point of rest) parts.push(`${n(point.x)} ${n(point.y)} l`);
+	parts.push('h');
 	return parts.join('\n');
 }
 
