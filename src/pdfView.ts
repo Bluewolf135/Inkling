@@ -335,6 +335,10 @@ export class PdfAnnotateView extends FileView {
 	// or a teardown can close it rather than leaving it floating over a
 	// page it no longer belongs to.
 	private noteEditor: HTMLElement | null = null;
+	// A per-session override of the inversion setting, or null to follow
+	// it. Not persisted: it answers "this one scan is unreadable", not "I
+	// always want this".
+	private sessionInversion: boolean | null = null;
 	// Tracked ourselves rather than trusting FileView's own `this.file` at
 	// transition time — see onLoadFile's flush-before-teardown for why.
 	private currentFile: TFile | null = null;
@@ -367,6 +371,8 @@ export class PdfAnnotateView extends FileView {
 			onToggleNavigation: () => this.toggleNavigationPanel(),
 			onEditNote: (pageNumber, point, existing) => this.editNote(pageNumber, point, existing),
 			isPressureEnabled: () => getSettings().pressure,
+			onToggleInversion: () => this.toggleInversion(),
+			isInverted: () => this.isInverted(),
 		});
 	}
 
@@ -404,6 +410,9 @@ export class PdfAnnotateView extends FileView {
 		// type into. So listen globally and check that this view is the one
 		// the user is actually looking at.
 		this.registerDomEvent(document, 'keydown', (event) => this.handleKey(event));
+		// Obsidian fires this on a theme switch, which is what follow-theme
+		// has to react to.
+		this.registerEvent(this.app.workspace.on('css-change', () => this.applyInversion()));
 	}
 
 	// Bare letters are safe here in a way they would not be in a note: this
@@ -548,6 +557,9 @@ export class PdfAnnotateView extends FileView {
 		const token = ++this.renderToken;
 		this.teardown();
 		this.contentEl.addClass('inkling-pdf-view');
+		// A new document is a new question about legibility.
+		this.sessionInversion = null;
+		this.applyInversion();
 		this.disposeToolbar = buildToolbar(this.contentEl, this.controller);
 		this.buildNavigationPanel();
 
@@ -1414,6 +1426,32 @@ export class PdfAnnotateView extends FileView {
 	private closeNoteEditor(): void {
 		this.noteEditor?.remove();
 		this.noteEditor = null;
+	}
+
+	// Whether the PDF page canvas is inverted, from the setting plus the
+	// current theme. Only the page: the annotation layers sit above it as
+	// separate elements, so ink keeps its real colours either way.
+	private applyInversion(): void {
+		const setting = this.getSettings().darkInversion;
+		const inverted =
+			this.sessionInversion ?? (setting === 'on' || (setting === 'follow-theme' && document.body.hasClass('theme-dark')));
+		this.contentEl.toggleClass('is-inverted', inverted);
+		this.controller.refreshUi();
+	}
+
+	// Flips inversion for this session without writing the setting — the
+	// answer to "this one scan is unreadable" rather than to "I always want
+	// this". Cleared when the file changes, because the next document is a
+	// different question.
+	toggleInversion(): void {
+		const setting = this.getSettings().darkInversion;
+		const current = setting === 'on' || (setting === 'follow-theme' && document.body.hasClass('theme-dark'));
+		this.sessionInversion = !(this.sessionInversion ?? current);
+		this.applyInversion();
+	}
+
+	isInverted(): boolean {
+		return this.contentEl.hasClass('is-inverted');
 	}
 
 	// Leaves something visible instead of the blank/black screen a failed

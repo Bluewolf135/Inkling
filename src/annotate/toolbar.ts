@@ -176,6 +176,14 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		{ icon: 'file-plus', fallback: '＋', title: 'Add page' },
 		() => controller.addPage(),
 	);
+	// Darkens the page under the ink. A reading action like zoom, so it
+	// stays available on a document that cannot be written to.
+	const invertButton = iconButton(
+		'inkling-tool-button',
+		{ icon: 'contrast', fallback: '◐', title: 'Invert page' },
+		() => controller.toggleInversion(),
+	);
+
 	// Opens the outline and find panel. Like zoom, a reading action, so it
 	// stays enabled when the document is read-only.
 	const navButton = iconButton(
@@ -183,7 +191,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		{ icon: 'panel-left', fallback: '☰', title: 'Outline and find' },
 		() => controller.toggleNavigation(),
 	);
-	actionGroup.append(undoButton, redoButton, separator(), deleteButton, clearPageButton, addPageButton, navButton);
+	actionGroup.append(undoButton, redoButton, separator(), deleteButton, clearPageButton, addPageButton, invertButton, navButton);
 
 	// Readouts, not controls — pushed to the far end of the strip (see
 	// .inkling-toolbar-status) so the things you press stay together on the
@@ -260,7 +268,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		const noteButton = toolButtons.get('note');
 		if (noteButton && !controller.canTakeNotes()) noteButton.hidden = true;
 		for (const group of [colorGroup, widthGroup, statusGroup]) group.hidden = collapsed;
-		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, navButton]) button.hidden = collapsed;
+		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, invertButton, navButton]) button.hidden = collapsed;
 		setIcon(collapseButton, collapsed ? 'chevrons-down' : 'chevrons-up');
 		setTooltip(collapseButton, collapsed ? 'Show tools' : 'Collapse tools');
 		for (const [tool, button] of toolButtons) {
@@ -330,7 +338,9 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		if (!collapsed) {
 			addPageButton.hidden = !controller.getCanManagePages();
 			navButton.hidden = !controller.canToggleNavigation();
+			invertButton.hidden = !controller.canInvert();
 		}
+		invertButton.toggleClass('is-active', controller.isInverted());
 		addPageButton.disabled = readOnly;
 	};
 	refresh();

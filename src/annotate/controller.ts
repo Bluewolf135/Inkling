@@ -106,6 +106,11 @@ export interface AnnotationControllerOptions {
 	// commit time rather than at capture: turning it off should change
 	// how the next stroke is drawn, not require reopening the file.
 	isPressureEnabled?: () => boolean;
+	// Dark-mode page inversion, which belongs to the host: only it has a
+	// page canvas to invert. A surface without one omits both and the
+	// toolbar hides the control.
+	onToggleInversion?: () => void;
+	isInverted?: () => boolean;
 	// Asks the host to show or hide its navigation panel. Same reasoning:
 	// the panel belongs to the PDF view, not to the shared controller.
 	onToggleNavigation?: () => void;
@@ -459,6 +464,18 @@ export class AnnotationController {
 
 	addPage(): void {
 		this.options.onAddPage?.();
+	}
+
+	canInvert(): boolean {
+		return this.options.onToggleInversion !== undefined;
+	}
+
+	isInverted(): boolean {
+		return this.options.isInverted?.() ?? false;
+	}
+
+	toggleInversion(): void {
+		this.options.onToggleInversion?.();
 	}
 
 	canTakeNotes(): boolean {

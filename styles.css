@@ -494,6 +494,21 @@
 }
 
 /* ---------------------------------------------------------------------
+   Dark-mode page inversion
+
+   Only the PDF’s own canvas is inverted. The annotation layers are
+   separate elements stacked above it, so ink keeps its real colours
+   against an inverted page — which is the whole reason this is three
+   lines rather than a re-render. hue-rotate puts colours back the right
+   way round after invert flips them; without it a blue diagram comes out
+   orange.
+   --------------------------------------------------------------------- */
+
+.inkling-pdf-view.is-inverted .inkling-pdf-page {
+	filter: invert(1) hue-rotate(180deg);
+}
+
+/* ---------------------------------------------------------------------
    Note editor
 
    Anchored inside the page placeholder rather than fixed to the viewport,
