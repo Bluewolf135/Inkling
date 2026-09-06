@@ -190,21 +190,20 @@ function surfaceScale(containerEl: HTMLElement, storedWidth: number): number {
 // (where the key is a real page number) always gets the same key here.
 const BLOCK_PAGE = 1;
 
-// Blocks whose tool strip the user has opened, by note path and starting
-// line. Module-level for the same reason tool state is plugin-level: an
+// Blocks the user has opened for editing, by note path and block id.
+//
+// Module-level for the same reason tool state is plugin-level: an
 // InkBlockView does not survive its own save. Writing a block rewrites the
 // fence, Obsidian re-renders that section, and the render child — toolbar
-// and all — is torn down and rebuilt, so a strip opened before writing
-// vanished about a second after the pen came up. Remembering it out here
-// means the rebuilt block opens with the strip the user left open.
+// and all — is torn down and rebuilt about a second after the pen comes up.
+// Without this, every stroke would close the block you were drawing in.
 //
-// A save replaces the block's body with a single line and so never moves
-// its own fence, which is what makes the line number usable as identity
-// across exactly the case this exists for. Editing prose *above* a block
-// does move it, and can leave an entry pointing at whatever block now
-// starts on that line; the cost is a tool strip opening somewhere it wasn't
-// asked for, one click to dismiss, which is not worth a block-id field in
-// everyone's notes to avoid.
+// Keyed by id rather than by the fence's starting line, which is what this
+// used to use. A line number is only identity for as long as nothing above
+// the block moves, and prose edited above one left an entry pointing at
+// whichever block now starts on that line. That was worth living with when
+// the cost was a tool strip opening uninvited; it is not now that the same
+// entry decides which block accepts ink.
 const openToolStrips = new Set<string>();
 
 // Manual resizing, via the drag handle along a block's bottom edge.
@@ -242,7 +241,7 @@ class InkBlockView {
 	// Identifies this block across the re-render its own save causes — see
 	// openToolStrips. Null when the block's position can't be read, in which
 	// case the tool strip simply isn't remembered.
-	private readonly stripKey: string | null;
+	private readonly stripKey: string;
 
 	// This block's own identity in the note, and the exact text it rendered
 	// from — the two things a save checks before overwriting a fence. See
@@ -307,8 +306,9 @@ class InkBlockView {
 		const rescued = unsavedInk.get(recoveryKey(ctx.sourcePath, this.blockId));
 		this.data = rescued ? { ...rescued, id: this.blockId } : { ...data, id: this.blockId };
 
-		const section = ctx.getSectionInfo(containerEl);
-		this.stripKey = section ? `${ctx.sourcePath}::${section.lineStart}` : null;
+		// The same key the recovery map uses, and for the same reason: it is
+		// the one name for this block that survives its own save.
+		this.stripKey = recoveryKey(ctx.sourcePath, this.blockId);
 
 		this.retained = retainedHistoryFor(recoveryKey(ctx.sourcePath, this.blockId));
 
@@ -373,6 +373,18 @@ class InkBlockView {
 		// on screen before the save that persists it is attempted.
 		if (rescued && !this.readOnly) this.scheduleWrite();
 
+		// Blocks open closed to editing, and the toggle below is what opens
+		// them. A note is read far more often than it is drawn in, and a
+		// surface that takes ink the moment anything touches it is a surface
+		// that collects stray marks from a stylus resting on the way past —
+		// on the one screen, a tablet, where the pen is also how you scroll.
+		//
+		// This is separate from `this.readOnly` above, which means the block
+		// must *never* be written because we could not fully read it. That
+		// one is permanent and the toggle cannot lift it; this one is the
+		// user's to change whenever they like.
+		this.controller.setReadOnly(true);
+
 		this.buildToolbarToggle();
 		// A read-only block never saves, so offering a handle that appears to
 		// resize it and then silently forgets would be worse than not having
@@ -387,8 +399,6 @@ class InkBlockView {
 		const toggle = this.toolbarHost.createEl('button', { cls: 'inkling-ink-block-toggle' });
 		toggle.type = 'button';
 		drawPencil(toggle);
-		setTooltip(toggle, 'Show drawing tools');
-		toggle.setAttribute('aria-label', 'Show drawing tools');
 		// Stated up front rather than left to setOpen below, which no-ops
 		// when asked for the state it's already in: a collapsed toggle still
 		// has to announce itself as collapsed, not as un-expandable.
@@ -399,17 +409,35 @@ class InkBlockView {
 			if (open) {
 				// Built on demand, not for every block on screen: a note can
 				// hold many of these, and a full tool strip apiece would crowd
-				// out the writing they're meant to sit alongside. Drawing works
-				// without it, using whatever tool is currently selected.
+				// out the writing they're meant to sit alongside.
 				this.disposeToolbar = buildToolbar(this.toolbarHost, this.controller);
 			} else {
 				this.disposeToolbar?.();
 				this.disposeToolbar = null;
 			}
+
+			// What the button is actually for. The strip is the visible half;
+			// this is the half that decides whether the surface takes ink at
+			// all, so a block nobody has asked to edit cannot collect a stray
+			// mark from a pen on its way past.
+			//
+			// A block we could not fully read stays closed to writing whatever
+			// this says — that decision is not the user's to reverse, because
+			// what would be written over is what we failed to understand.
+			this.controller.setReadOnly(!open || this.readOnly);
+
+			const label = open ? 'Done editing this block' : 'Edit this block';
+			setTooltip(toggle, label);
+			toggle.setAttribute('aria-label', label);
 			toggle.toggleClass('is-active', open);
 			toggle.setAttribute('aria-expanded', String(open));
 			this.setResizeHandleVisible(open);
 		};
+
+		// Never a no-op on the first call, whatever setOpen decides below:
+		// the label has to say something before anything is toggled.
+		setTooltip(toggle, 'Edit this block');
+		toggle.setAttribute('aria-label', 'Edit this block');
 
 		toggle.addEventListener('click', () => {
 			const open = this.disposeToolbar === null;
@@ -417,12 +445,11 @@ class InkBlockView {
 			// Recorded only on a real click. A strip that came and went with a
 			// re-render must not count as the user having opened or closed
 			// anything.
-			if (this.stripKey === null) return;
 			if (open) openToolStrips.add(this.stripKey);
 			else openToolStrips.delete(this.stripKey);
 		});
 
-		setOpen(this.stripKey !== null && openToolStrips.has(this.stripKey));
+		setOpen(openToolStrips.has(this.stripKey));
 	}
 
 	// Applies a new drawing-surface height. Both parts have to move
