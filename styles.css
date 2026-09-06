@@ -151,7 +151,6 @@
 	   treatment Obsidian gives its own floating surfaces. The opaque
 	   fallback goes first for renderers without backdrop-filter. */
 	background-color: var(--background-secondary);
-	background-color: color-mix(in srgb, var(--background-secondary) 88%, transparent);
 	backdrop-filter: blur(12px);
 	border-bottom: 1px solid var(--background-modifier-border);
 	box-shadow: var(--shadow-s);
@@ -163,6 +162,17 @@
 	   touch-action handling in src/annotate/pointer.ts, just triggered by a
 	   different app-level gesture recognizer instead of page scrolling. */
 	touch-action: none;
+}
+
+/* The translucent version, where it is supported. Written as a feature
+   query rather than as a second background-color in the rule above: the
+   two-declarations-and-let-the-parser-drop-one trick says the same thing,
+   but says it invisibly, and reads as a mistake to anything checking for
+   duplicate properties. */
+@supports (background-color: color-mix(in srgb, red 50%, transparent)) {
+	.inkling-toolbar {
+		background-color: color-mix(in srgb, var(--background-secondary) 88%, transparent);
+	}
 }
 
 .inkling-toolbar-bar {
@@ -315,32 +325,34 @@
 	opacity: 0.35;
 }
 
-.inkling-toolbar .inkling-color-swatch {
+.inkling-toolbar button.inkling-color-swatch.inkling-color-swatch {
 	cursor: pointer;
-	/* !important throughout: Obsidian's mobile theme applies its own button
-	   sizing (almost certainly a minimum touch-target height/width, a common
-	   mobile-accessibility default) through a selector with higher
-	   specificity than a single class here — `appearance: none` alone wasn't
-	   enough to stop it from still winning on width/height, which is what
-	   kept these pill-shaped despite being sized as perfect squares. This is
-	   a deliberately narrow, cosmetic override of the host app's styles, not
-	   a pattern to reach for elsewhere. */
-	width: 18px !important;
-	height: 18px !important;
-	min-width: 18px !important;
-	min-height: 18px !important;
-	max-width: 18px !important;
-	max-height: 18px !important;
-	margin: 3px !important;
-	padding: 0 !important;
-	border: none !important;
-	border-radius: 50% !important;
+	/* The doubled class in the selector is deliberate. Obsidian's mobile
+	   theme applies its own button sizing (almost certainly a minimum
+	   touch-target height/width, a common mobile-accessibility default)
+	   through a selector that outranks a single class here — `appearance:
+	   none` alone wasn't enough to stop it winning on width/height, which
+	   is what kept these pill-shaped despite being sized as perfect
+	   squares. Repeating the class raises this rule's specificity above the
+	   theme's, which is what the plugin guidelines ask for in place of an
+	   importance override. The two rules below repeat it for the same
+	   reason: they have to keep outranking this one. */
+	width: 18px;
+	height: 18px;
+	min-width: 18px;
+	min-height: 18px;
+	max-width: 18px;
+	max-height: 18px;
+	margin: 3px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
 	appearance: none;
 	-webkit-appearance: none;
-	box-sizing: border-box !important;
+	box-sizing: border-box;
 	/* The swatch's own color comes from src/annotate/toolbar.ts — it's the
 	   one thing about a swatch that is data rather than styling. */
-	background-color: var(--inkling-swatch-color) !important;
+	background-color: var(--inkling-swatch-color);
 	/* A hairline drawn *inside* the circle, so a swatch close to the page
 	   color (near-white through the custom picker, or the near-black
 	   default ink on a dark theme) still has a visible edge. */
@@ -348,17 +360,17 @@
 	transition: transform 100ms ease, box-shadow 100ms ease;
 }
 
-.inkling-toolbar .inkling-color-swatch:hover {
+.inkling-toolbar button.inkling-color-swatch.inkling-color-swatch:hover {
 	transform: scale(1.15);
 }
 
 /* A ring drawn outside the swatch rather than a border inside it: a border
    would eat into the 18px circle and make the selected color visibly
    smaller than its neighbours, whereas a shadow takes up no layout space at
-   all (which is also what keeps it clear of the !important sizing above).
+   all (which is also what keeps it clear of the fixed sizing above).
    The first ring is a gap in the toolbar's own color, so the accent ring
    reads as separate from the swatch instead of a fat outline on it. */
-.inkling-toolbar .inkling-color-swatch.is-active {
+.inkling-toolbar button.inkling-color-swatch.inkling-color-swatch.is-active {
 	box-shadow:
 		inset 0 0 0 1px var(--background-modifier-border),
 		0 0 0 2px var(--background-secondary),
@@ -789,9 +801,12 @@
 }
 
 /* Squares off the bottom corners where the resize handle joins on, so the
-   two read as one panel instead of two stacked boxes. Purely cosmetic — a
-   browser without :has() just keeps the rounded corners. */
-.inkling-ink-block-surface:has(+ .inkling-ink-block-handle) {
+   two read as one panel instead of two stacked boxes. The class is set in
+   src/markdown/inkBlock.ts when the handle is built, rather than matched
+   with a :has selector — the handle is created by that code anyway, so
+   asking the browser to find it was work to establish something already
+   known. */
+.inkling-ink-block-surface.inkling-has-handle {
 	border-radius: var(--radius-m) var(--radius-m) 0 0;
 }
 
