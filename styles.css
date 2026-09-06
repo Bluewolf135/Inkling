@@ -835,6 +835,19 @@
 	background-color: var(--background-secondary);
 }
 
+/* The handle is only offered while the block's tool strip is open, so a
+   note being read has no drag target sitting between each block and the
+   prose under it — dragging to scroll used to catch it and stretch the
+   block instead of moving the page.
+
+   Restated here rather than left to the `hidden` attribute alone, at a
+   specificity that wins: the rule above sets `display: flex`, and an author
+   rule beats the browser's own `[hidden] { display: none }` however the
+   attribute is set. Exactly the same trap as the tool buttons above. */
+.inkling-ink-block-handle[hidden] {
+	display: none;
+}
+
 .inkling-ink-block-handle:hover {
 	background-color: var(--background-modifier-hover);
 }
