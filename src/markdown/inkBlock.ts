@@ -355,7 +355,13 @@ class InkBlockView {
 		// piece of the note's own content rather than plugin chrome.
 		const toggle = this.toolbarHost.createEl('button', { cls: 'inkling-ink-block-toggle' });
 		toggle.type = 'button';
-		setIconOrText(toggle, 'pencil-ruler', 'Tools');
+		// pen-tool rather than pencil-ruler: the icon set belongs to the host
+		// app, and a phone running an older Obsidian simply does not have the
+		// newer name — reported as a blank button, with every other icon in the
+		// strip drawing fine, which is what narrowed it to this one. pen-tool
+		// has been in the set far longer, and the label below covers whatever
+		// this build turns out not to know.
+		setIconOrText(toggle, 'pen-tool', 'Tools');
 		setTooltip(toggle, 'Show drawing tools');
 		toggle.setAttribute('aria-label', 'Show drawing tools');
 		// Stated up front rather than left to setOpen below, which no-ops

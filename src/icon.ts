@@ -18,12 +18,23 @@ import { setIcon } from 'obsidian';
 //
 // Asking whether the icon has anything *in* it answers the question that
 // was meant, and turns a missing icon back into a legible label.
+// Marks a control that is showing its label instead of an icon, so the
+// stylesheet can give it room. A button sized for a 16px glyph has none:
+// the ink block's toggle is a 30px square with no padding, so falling back
+// to the word "Tools" inside it would have looked just as broken as the
+// blank button it replaced.
+export const ICON_FALLBACK_CLASS = 'inkling-icon-fallback';
+
 export function setIconOrText(el: HTMLElement, icon: string, text: string): void {
 	setIcon(el, icon);
 
 	const drawn = el.querySelector('svg');
-	if (drawn && drawn.childElementCount > 0) return;
+	if (drawn && drawn.childElementCount > 0) {
+		el.removeClass(ICON_FALLBACK_CLASS);
+		return;
+	}
 
 	drawn?.remove();
 	el.setText(text);
+	el.addClass(ICON_FALLBACK_CLASS);
 }

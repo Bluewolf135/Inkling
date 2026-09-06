@@ -755,6 +755,19 @@
 	transition: background-color 100ms ease, color 100ms ease;
 }
 
+/* Showing its label instead of an icon, because the host app's icon set
+   did not have the one asked for — see src/icon.ts. The square above is
+   sized for a 16px glyph and has no padding, so the word would have been
+   clipped to something that looked just as broken as the blank button it
+   replaced. */
+.inkling-ink-block .inkling-ink-block-toggle.inkling-icon-fallback {
+	width: auto;
+	min-width: 30px;
+	padding: 0 var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+	line-height: 1;
+}
+
 .inkling-ink-block .inkling-ink-block-toggle:hover {
 	background-color: var(--background-modifier-hover);
 	color: var(--text-normal);
