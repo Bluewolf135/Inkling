@@ -1,6 +1,6 @@
 import { boundingBox, unionBoundingBox } from './geometry';
-import { hasPressure, outlinePath, smoothedPath, type PathSegment } from './stroke';
-import { Annotation, HIGHLIGHTER_OPACITY, NOTE_MARKER_SIZE, Point, Rect } from './types';
+import { hasPressure, outlinePath, smoothedPath } from './stroke';
+import { Annotation, HIGHLIGHTER_OPACITY, NOTE_MARKER_SIZE, Point, Rect, StrokeAnnotation } from './types';
 
 const SELECTION_COLOR = '#1971c2';
 const HANDLE_SIZE = 10;
@@ -52,29 +52,67 @@ function withHalo(
 
 const CHROME_DASH = [4, 3];
 
-// Walks the shared path description (see annotate/stroke.ts) onto a canvas.
-// Its twin lives in src/pdf/contentStream.ts, emitting the same segments as
-// PDF operators — the two must stay in step, which is why neither of them
-// computes the segments itself.
-function tracePath(ctx: CanvasRenderingContext2D, segments: PathSegment[]): void {
-	ctx.beginPath();
-	for (const segment of segments) {
-		if (segment.kind === 'move') ctx.moveTo(segment.to.x, segment.to.y);
-		else if (segment.kind === 'line') ctx.lineTo(segment.to.x, segment.to.y);
-		else ctx.quadraticCurveTo(segment.control.x, segment.control.y, segment.to.x, segment.to.y);
-	}
+// Whether this stroke draws as a filled outline rather than a stroked line.
+//
+// A pen that reported pressure is drawn as a tapered outline, since neither
+// a canvas stroke nor a PDF `S` operator can vary a line's width along its
+// length. A highlighter never is — a highlighter that tapered would read as
+// a mistake, and its text-snapped form is a straight segment at line height
+// anyway.
+function isTapered(annotation: StrokeAnnotation): boolean {
+	return annotation.tool === 'pen' && hasPressure(annotation.points);
 }
 
-// A stroke drawn as a filled shape rather than a stroked line, which is the
-// only way a line's width can vary along its length.
-function fillOutline(ctx: CanvasRenderingContext2D, ring: Point[]): void {
-	const [first, ...rest] = ring;
-	if (!first || rest.length === 0) return;
-	ctx.beginPath();
-	ctx.moveTo(first.x, first.y);
-	for (const point of rest) ctx.lineTo(point.x, point.y);
-	ctx.closePath();
-	ctx.fill();
+// Builds a stroke's canvas path from the shared path description (see
+// annotate/stroke.ts). Its twin lives in src/pdf/contentStream.ts, emitting
+// the same segments as PDF operators — the two must stay in step, which is
+// why neither of them computes the segments itself.
+function buildStrokePath(annotation: StrokeAnnotation): Path2D {
+	const path = new Path2D();
+
+	if (isTapered(annotation)) {
+		const [first, ...rest] = outlinePath(annotation.points, annotation.width);
+		if (!first || rest.length === 0) return path;
+		path.moveTo(first.x, first.y);
+		for (const point of rest) path.lineTo(point.x, point.y);
+		path.closePath();
+		return path;
+	}
+
+	for (const segment of smoothedPath(annotation.points)) {
+		if (segment.kind === 'move') path.moveTo(segment.to.x, segment.to.y);
+		else if (segment.kind === 'line') path.lineTo(segment.to.x, segment.to.y);
+		else path.quadraticCurveTo(segment.control.x, segment.control.y, segment.to.x, segment.to.y);
+	}
+	return path;
+}
+
+// Built stroke paths, kept so that redrawing a page does not rebuild them.
+//
+// This is what stops a block costing its full ink every time it comes back
+// on screen. Rebuilding a tapered stroke walks every sample twice — once to
+// drop repeats, once to offset it — and allocates a ring of two points per
+// sample, all to arrive at the same shape it had a moment ago.
+//
+// Keyed on the annotation object itself, which is what makes it correct
+// with no invalidation logic at all: the store replaces annotations
+// wholesale on every edit rather than mutating them in place (see the note
+// on `unchanged` in annotate/store.ts), so an edited stroke is a new object
+// that simply misses, and the entry for the old one goes when it does.
+const strokePaths = new WeakMap<StrokeAnnotation, Path2D>();
+
+// `cache` is false for the overlay's draft stroke: `draftFor` in
+// annotate/controller.ts builds a fresh annotation every frame, so caching
+// one would allocate an entry per frame and never once hit.
+function strokePath(annotation: StrokeAnnotation, cache: boolean): Path2D {
+	if (!cache) return buildStrokePath(annotation);
+
+	const existing = strokePaths.get(annotation);
+	if (existing) return existing;
+
+	const built = buildStrokePath(annotation);
+	strokePaths.set(annotation, built);
+	return built;
 }
 
 function drawPolyline(ctx: CanvasRenderingContext2D, points: Point[]): void {
@@ -137,7 +175,7 @@ function drawNoteMarker(ctx: CanvasRenderingContext2D, at: Point, color: string)
 	ctx.restore();
 }
 
-function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation): void {
+function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, cache: boolean): void {
 	ctx.save();
 	ctx.strokeStyle = annotation.color;
 	ctx.lineWidth = annotation.width;
@@ -154,17 +192,14 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation): 
 	}
 
 	if (annotation.kind === 'stroke') {
-		// A pen that reported pressure is drawn as a tapered outline; a
-		// highlighter never is — a highlighter that tapered would read as a
-		// mistake, and its text-snapped form is a straight segment at line
-		// height anyway. Everything else is the smoothed path, which is what
+		// Anything not tapered draws as the smoothed path, which is what
 		// stops fast handwriting coming out visibly faceted.
-		if (annotation.tool === 'pen' && hasPressure(annotation.points)) {
+		const path = strokePath(annotation, cache);
+		if (isTapered(annotation)) {
 			ctx.fillStyle = annotation.color;
-			fillOutline(ctx, outlinePath(annotation.points, annotation.width));
+			ctx.fill(path);
 		} else {
-			tracePath(ctx, smoothedPath(annotation.points));
-			ctx.stroke();
+			ctx.stroke(path);
 		}
 	} else {
 		const { start, end } = annotation;
@@ -267,7 +302,7 @@ export interface OverlayOptions {
 export function renderBase(ctx: CanvasRenderingContext2D, annotations: Annotation[]): void {
 	const { canvas } = ctx;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
-	for (const annotation of annotations) drawAnnotation(ctx, annotation);
+	for (const annotation of annotations) drawAnnotation(ctx, annotation, true);
 }
 
 // The live/interactive layer — the in-progress draft stroke or shape, the
@@ -279,7 +314,7 @@ export function renderOverlay(ctx: CanvasRenderingContext2D, options: OverlayOpt
 	const { canvas } = ctx;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-	if (options.draft) drawAnnotation(ctx, options.draft);
+	if (options.draft) drawAnnotation(ctx, options.draft, false);
 
 	const selected = options.selected;
 	if (selected && selected.length > 0) {

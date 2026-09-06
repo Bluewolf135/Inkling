@@ -190,3 +190,29 @@ export function normalizeRect(a: Point, b: Point): Rect {
 		maxY: Math.max(a.y, b.y),
 	};
 }
+
+// Pulls a point inside a surface of `width` x `height`.
+//
+// Pointer capture is why this is needed. Once a stroke starts, every
+// subsequent move is delivered to the surface that captured the pointer,
+// wherever the pen actually is — that is the whole point of capture, and it
+// is what lets a stroke survive a finger straying off the edge mid-letter.
+// The cost is that a stroke dragged past the edge kept recording out there:
+// on an 800-wide block, coordinates reaching x=1200 and y=-167, drawn
+// outside the block, saved into the note, and invisible only because a
+// canvas discards what falls off it.
+//
+// Clamped rather than dropped, so the stroke slides along the edge and
+// stays one continuous line. Dropping the outside samples instead would cut
+// the stroke into pieces and reconnect them with a straight line across the
+// gap, which is a bigger change to what the user drew than sliding is.
+//
+// The in-bounds point is returned as-is rather than copied: this runs on
+// every sample of every stroke, and the overwhelming majority are already
+// inside.
+export function clampPointToBounds(point: Point, width: number, height: number): Point {
+	const x = Math.min(Math.max(point.x, 0), width);
+	const y = Math.min(Math.max(point.y, 0), height);
+	if (x === point.x && y === point.y) return point;
+	return point.p === undefined ? { x, y } : { x, y, p: point.p };
+}

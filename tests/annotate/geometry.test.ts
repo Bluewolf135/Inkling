@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	boundingBox,
+	clampPointToBounds,
 	distanceToSegment,
 	hitTestAnnotation,
 	normalizeRect,
@@ -188,5 +189,37 @@ describe('note annotations', () => {
 			{ x: 0, y: 200 },
 		];
 		expect(polygonEnclosesAnnotation(note, square)).toBe(true);
+	});
+});
+
+describe('clampPointToBounds', () => {
+	it('returns an in-bounds point unchanged, and by identity', () => {
+		const point = { x: 10, y: 20 };
+		expect(clampPointToBounds(point, 800, 450)).toBe(point);
+	});
+
+	it('pulls a point back from past the right edge', () => {
+		expect(clampPointToBounds({ x: 1200.7, y: 100 }, 800, 450)).toEqual({ x: 800, y: 100 });
+	});
+
+	it('pulls a point back from below the bottom edge', () => {
+		expect(clampPointToBounds({ x: 100, y: 900 }, 800, 450)).toEqual({ x: 100, y: 450 });
+	});
+
+	it('pulls a negative point back to the origin', () => {
+		expect(clampPointToBounds({ x: -40, y: -166.9 }, 800, 450)).toEqual({ x: 0, y: 0 });
+	});
+
+	it('clamps both axes at once', () => {
+		expect(clampPointToBounds({ x: 9000, y: -5 }, 800, 450)).toEqual({ x: 800, y: 0 });
+	});
+
+	it('keeps pressure on a point it moves', () => {
+		expect(clampPointToBounds({ x: 1000, y: 100, p: 0.62 }, 800, 450)).toEqual({ x: 800, y: 100, p: 0.62 });
+	});
+
+	it('leaves a point exactly on the edge alone', () => {
+		const point = { x: 800, y: 450 };
+		expect(clampPointToBounds(point, 800, 450)).toBe(point);
 	});
 });

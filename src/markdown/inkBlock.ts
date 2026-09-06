@@ -101,10 +101,26 @@ function retainedHistoryFor(key: string): RetainedHistory {
 // twice over (see PageMount), for every block in the note.
 const MAX_SURFACE_SCALE = 3;
 
-// How far outside the viewport a block still keeps its canvases. Wide
-// enough that scrolling at a normal speed always meets a block that is
-// already drawn, rather than a blank sheet filling in late.
-const SURFACE_RETAIN_MARGIN = '400px 0px';
+// How far outside the viewport a block mounts its canvases. Wide enough
+// that scrolling at a normal speed always meets a block that is already
+// drawn, rather than a blank sheet filling in late.
+const SURFACE_MOUNT_MARGIN = '400px 0px';
+
+// How far outside it a block gives them up again — deliberately much
+// further out than it mounts at.
+//
+// One margin for both meant a block sitting right on the boundary
+// mounted and released on every small scroll, and each cycle allocates
+// two canvases, redraws every stroke, and throws it all away again. A
+// scroll that rocks back and forth by a few dozen pixels — which is
+// what reading looks like — did that repeatedly.
+//
+// The gap between the two is the hysteresis: crossing in is not the same
+// place as crossing back out, so nothing oscillates. The cost is that a
+// block up to 1200px away still holds its canvases, which is the memory
+// Phase E set out to bound; three times the mount margin keeps that well
+// short of what it was before, when every block in the note held them.
+const SURFACE_RELEASE_MARGIN = '1200px 0px';
 
 // Ink that was drawn but could not be written to the note, kept alive
 // across the re-render that would otherwise throw it away.
@@ -224,7 +240,10 @@ class InkBlockView {
 	// The element the canvases are mounted into, and whether they
 	// currently are. See watchVisibility.
 	private readonly contentEl: HTMLElement;
-	private observer: IntersectionObserver | null = null;
+	private observers: IntersectionObserver[] = [];
+	// The pending frame in watchVisibility, so detaching before it runs
+	// cannot leave a callback pointing at a torn-down block.
+	private watchHandle: number | null = null;
 	private mounted = false;
 	// Whether the file’s annotations have been handed to the store yet.
 	// Once they have, the store is the live truth and a remount must not
@@ -394,6 +413,10 @@ class InkBlockView {
 
 	private buildResizeHandle(): void {
 		const handle = this.containerEl.createDiv({ cls: 'inkling-ink-block-handle' });
+		// Lets the surface square off the corners the handle joins on to.
+		// Set here rather than found with a :has() selector, since this is
+		// the code that decides the handle exists at all.
+		this.surfaceEl.addClass('inkling-has-handle');
 		handle.setAttribute('aria-label', 'Drag to resize this ink block');
 		setTooltip(handle, 'Drag to resize');
 
@@ -462,18 +485,62 @@ class InkBlockView {
 	// reason and with the same margin: render ahead of the reader so a
 	// block is ready before it is seen, and let go of the ones they have
 	// scrolled well past.
+	// Waits for the block to be in the layout, then watches it.
+	//
+	// The wait is the point. An IntersectionObserver's root has to be the
+	// element that actually scrolls — Obsidian's `.markdown-preview-view`,
+	// not the viewport — and at construction time this block is not in the
+	// document yet, so there is nothing to find. That is the same reason
+	// mountSurface measures its width when it mounts rather than here.
+	//
+	// Getting the root wrong is not a small miss: a margin measured against
+	// the viewport buys nothing at all, because an ancestor that scrolls
+	// clips the block to empty long before the viewport does. Observed with
+	// a block 73px below the fold and a 400px margin — `isIntersecting` was
+	// false against the viewport and true against the scroller. So the
+	// look-ahead below only exists when the root is right, and without it a
+	// block mounts at the instant it becomes visible and is drawn late.
 	private watchVisibility(): void {
-		const observer = new IntersectionObserver(
-			(entries) => {
-				for (const entry of entries) {
-					if (entry.isIntersecting) this.mountSurface();
-					else this.releaseSurface();
-				}
-			},
-			{ rootMargin: SURFACE_RETAIN_MARGIN },
-		);
-		observer.observe(this.surfaceEl);
-		this.observer = observer;
+		let framesLeft = 5;
+
+		const start = (): void => {
+			if (this.detached) return;
+
+			// Retried rather than assumed: one frame is normally enough, but
+			// a block inside a folded section or an inactive tab can take
+			// longer to land. Falling back to the viewport after a few tries
+			// is a worse look-ahead, never a broken block.
+			if (!this.surfaceEl.isConnected && framesLeft-- > 0) {
+				this.watchHandle = window.requestAnimationFrame(start);
+				return;
+			}
+			this.watchHandle = null;
+
+			const root = findScrollParent(this.surfaceEl);
+
+			// Two observers rather than one, because mounting and releasing
+			// happen at different distances and a single observer only has
+			// the one boundary. Each ignores the edge that is not its own.
+			const mount = new IntersectionObserver(
+				(entries) => {
+					if (entries.some((entry) => entry.isIntersecting)) this.mountSurface();
+				},
+				{ root, rootMargin: SURFACE_MOUNT_MARGIN },
+			);
+			const release = new IntersectionObserver(
+				(entries) => {
+					if (entries.every((entry) => !entry.isIntersecting)) this.releaseSurface();
+				},
+				{ root, rootMargin: SURFACE_RELEASE_MARGIN },
+			);
+
+			for (const observer of [mount, release]) {
+				observer.observe(this.surfaceEl);
+				this.observers.push(observer);
+			}
+		};
+
+		this.watchHandle = window.requestAnimationFrame(start);
 	}
 
 	private mountSurface(): void {
@@ -766,8 +833,12 @@ class InkBlockView {
 	}
 
 	detach(): void {
-		this.observer?.disconnect();
-		this.observer = null;
+		if (this.watchHandle !== null) {
+			window.cancelAnimationFrame(this.watchHandle);
+			this.watchHandle = null;
+		}
+		for (const observer of this.observers) observer.disconnect();
+		this.observers = [];
 		if (this.writeHandle !== null) {
 			window.clearTimeout(this.writeHandle);
 			this.writeHandle = null;

@@ -1,6 +1,7 @@
 import { eraseAt } from './eraser';
 import {
 	boundingBox,
+	clampPointToBounds,
 	distance,
 	hitTestAnnotation,
 	normalizeRect,
@@ -12,6 +13,7 @@ import {
 import { createId } from './id';
 import { attachPointerGestures, currentZoom, GestureHandlers, zoomAbout } from './pointer';
 import { recognizeShape } from './recognize';
+import { SIMPLIFY_EPSILON, simplifyPoints } from './simplify';
 import { handleRects, renderBase, renderOverlay } from './render';
 import { AnnotationStore } from './store';
 import { HistoryStack } from './history';
@@ -66,7 +68,13 @@ interface PageMount {
 	// selection/eraser-cursor and is repainted on every pointer move. See
 	// render.ts's renderBase/renderOverlay for why this split matters.
 	base: CanvasRenderingContext2D;
-	overlay: CanvasRenderingContext2D;
+	// The overlay's element is always here — it is the surface that receives
+	// pointer events, so it has to exist from the moment the page mounts.
+	// Its 2D context is not: acquiring one is what makes the browser
+	// allocate the backing store, width x height x 4 bytes, and a page
+	// somebody only ever scrolls past never needs it. See overlayContext.
+	overlayCanvas: HTMLCanvasElement;
+	overlay: CanvasRenderingContext2D | null;
 	// The zoomable wrapper the canvases live in — the element the zoom
 	// transform is applied to. Held so a zoom asked for from the toolbar
 	// or the keyboard, which has no pointer to work back from, can reach
@@ -228,11 +236,10 @@ export class AnnotationController {
 		overlayCanvas.height = height;
 
 		const base = baseCanvas.getContext('2d');
-		const overlay = overlayCanvas.getContext('2d');
-		if (!base || !overlay) throw new Error('Inkling: could not acquire a 2D context for the annotation layer.');
+		if (!base) throw new Error('Inkling: could not acquire a 2D context for the annotation layer.');
 
 		const detach = attachPointerGestures(overlayCanvas, () => this.getHandlersFor(pageNumber));
-		this.pages.set(pageNumber, { base, overlay, content: host, detach });
+		this.pages.set(pageNumber, { base, overlayCanvas, overlay: null, content: host, detach });
 		this.redrawBase(pageNumber);
 		this.redrawOverlay(pageNumber);
 	}
@@ -266,8 +273,8 @@ export class AnnotationController {
 		if (!mount) return;
 		mount.base.canvas.width = width;
 		mount.base.canvas.height = height;
-		mount.overlay.canvas.width = width;
-		mount.overlay.canvas.height = height;
+		mount.overlayCanvas.width = width;
+		mount.overlayCanvas.height = height;
 		this.store.setPageLive(pageNumber, annotations);
 		this.redrawOverlay(pageNumber);
 	}
@@ -317,7 +324,7 @@ export class AnnotationController {
 		if (!mount) return;
 		mount.detach();
 		mount.base.canvas.remove();
-		mount.overlay.canvas.remove();
+		mount.overlayCanvas.remove();
 		this.pages.delete(pageNumber);
 	}
 
@@ -609,13 +616,19 @@ export class AnnotationController {
 		switch (tool) {
 			case 'pen':
 			case 'highlighter':
-				this.drag = { pageNumber, mode: { kind: 'draw', tool, points: [point], lastMovedAt: performance.now() } };
+				this.drag = {
+					pageNumber,
+					mode: { kind: 'draw', tool, points: [this.clampToPage(pageNumber, point)], lastMovedAt: performance.now() },
+				};
 				break;
 			case 'line':
 			case 'rectangle':
 			case 'oval':
 			case 'arrow':
-				this.drag = { pageNumber, mode: { kind: 'shape', tool, start: point, end: point } };
+				this.drag = {
+					pageNumber,
+					mode: { kind: 'shape', tool, start: this.clampToPage(pageNumber, point), end: this.clampToPage(pageNumber, point) },
+				};
 				break;
 			case 'eraser':
 				this.drag = { pageNumber, mode: { kind: 'erase', before: this.store.getPage(pageNumber) } };
@@ -679,6 +692,24 @@ export class AnnotationController {
 		this.notify();
 	}
 
+	// Keeps a drawn point inside the page it is being drawn on.
+	//
+	// Only drawing is clamped. Erasing and lassoing outside the surface are
+	// harmless — there is nothing out there to act on — and clamping a move
+	// or resize would change what dragging a selection does, which is a
+	// separate decision from this one.
+	//
+	// The surface's own pixel size is the bound, which is the same space the
+	// incoming point is already in: annotate/pointer.ts maps client
+	// coordinates through the canvas's displayed size to its backing store,
+	// so a zoomed or stretched surface is already accounted for by the time
+	// a point arrives here.
+	private clampToPage(pageNumber: number, point: Point): Point {
+		const mount = this.pages.get(pageNumber);
+		if (!mount) return point;
+		return clampPointToBounds(point, mount.base.canvas.width, mount.base.canvas.height);
+	}
+
 	private handleMove(pageNumber: number, point: Point): void {
 		if (this.readOnly) return;
 		if (!this.drag || this.drag.pageNumber !== pageNumber) return;
@@ -690,16 +721,17 @@ export class AnnotationController {
 				// resting on glass still reports a jittery stream of samples,
 				// and treating those as motion would mean the hold gesture
 				// could never be performed at all.
+				const clamped = this.clampToPage(pageNumber, point);
 				const previous = mode.points[mode.points.length - 1];
-				if (!previous || Math.hypot(point.x - previous.x, point.y - previous.y) > HOLD_STILLNESS_PX) {
+				if (!previous || Math.hypot(clamped.x - previous.x, clamped.y - previous.y) > HOLD_STILLNESS_PX) {
 					mode.lastMovedAt = performance.now();
 				}
-				mode.points.push(point);
+				mode.points.push(clamped);
 				this.scheduleOverlayRedraw(pageNumber);
 				break;
 			}
 			case 'shape':
-				mode.end = point;
+				mode.end = this.clampToPage(pageNumber, point);
 				this.redrawOverlay(pageNumber);
 				break;
 			case 'erase':
@@ -732,12 +764,12 @@ export class AnnotationController {
 
 		switch (mode.kind) {
 			case 'draw': {
-				mode.points.push(point);
+				mode.points.push(this.clampToPage(pageNumber, point));
 				if (mode.points.length >= 2) this.commitDrawStroke(pageNumber, mode);
 				break;
 			}
 			case 'shape': {
-				mode.end = point;
+				mode.end = this.clampToPage(pageNumber, point);
 				if (distance(mode.start, mode.end) > 2) this.commitNew(pageNumber, this.shapeFromDraft(mode));
 				break;
 			}
@@ -899,11 +931,23 @@ export class AnnotationController {
 	}
 
 	private strokeFromDraft(mode: { tool: DrawToolType; points: Point[] }): StrokeAnnotation {
+		// Thinned here, at the moment the stroke commits, rather than when it
+		// is written to the file. A save lands about a second after the pen
+		// lifts and re-renders the block from what it wrote — so simplifying
+		// there would visibly change the ink after the fact, which is exactly
+		// the bug that made a tapered stroke redraw itself flat (see the
+		// pressure note in src/markdown/inkBlockFormat.ts). Doing it on commit
+		// means what you see the instant you lift the pen is what is stored.
+		//
+		// After shape recognition and highlighter snapping above, both of
+		// which read the full sample set and are better for it.
+		const simplified = simplifyPoints(mode.points, SIMPLIFY_EPSILON);
+
 		// Pressure is stripped rather than never captured, so the setting
 		// governs one place — what gets committed — instead of being
 		// checked in the pointer layer, the renderer, and the serializer.
 		const keepPressure = this.options.isPressureEnabled?.() ?? true;
-		const points = keepPressure ? mode.points : mode.points.map(({ x, y }) => ({ x, y }));
+		const points = keepPressure ? simplified : simplified.map(({ x, y }) => ({ x, y }));
 		return { id: createId(), kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.getWidth(), points };
 	}
 
@@ -982,7 +1026,26 @@ export class AnnotationController {
 				? this.store.getPage(pageNumber).filter((a) => this.selection.ids.has(a.id))
 				: undefined;
 
-		renderOverlay(mount.overlay, { selected, draft, lassoPath, eraserCursor });
+		// Nothing to draw and nothing ever drawn: leave the overlay
+		// unallocated. This is the whole point of deferring it — a page being
+		// read rather than drawn on reaches here on every mount and would
+		// otherwise pay for a full-size canvas to clear it and stop.
+		const empty = !draft && !lassoPath && !eraserCursor && (!selected || selected.length === 0);
+		if (empty && !mount.overlay) return;
+
+		const overlay = this.overlayContext(mount);
+		renderOverlay(overlay, { selected, draft, lassoPath, eraserCursor });
+	}
+
+	// The overlay's drawing context, acquired the first time something
+	// actually needs to be drawn on it and kept from then on.
+	private overlayContext(mount: PageMount): CanvasRenderingContext2D {
+		if (mount.overlay) return mount.overlay;
+
+		const overlay = mount.overlayCanvas.getContext('2d');
+		if (!overlay) throw new Error('Inkling: could not acquire a 2D context for the annotation layer.');
+		mount.overlay = overlay;
+		return overlay;
 	}
 
 	private draftFor(mode: DragMode | null): Annotation | null {
