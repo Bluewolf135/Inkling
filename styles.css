@@ -290,7 +290,7 @@
 	   button styles its icon by setting those rather than by reaching into
 	   the SVG. Also covers the text fallback in toolbar.ts, for an icon name
 	   an older Obsidian doesn't know. */
-	--icon-size: var(--icon-s);
+	--icon-size: var(--icon-s, 16px);
 	--icon-color: currentColor;
 	transition: background-color 100ms ease, color 100ms ease;
 }
@@ -468,7 +468,7 @@
 .is-mobile .inkling-toolbar .inkling-tool-button {
 	width: 34px;
 	height: 34px;
-	--icon-size: var(--icon-m);
+	--icon-size: var(--icon-m, 18px);
 }
 
 .is-mobile .inkling-toolbar-sep {
@@ -497,7 +497,7 @@
 
 .inkling-pdf-message-icon {
 	display: flex;
-	--icon-size: var(--icon-xl);
+	--icon-size: var(--icon-xl, 32px);
 	--icon-color: var(--text-faint);
 }
 
@@ -667,7 +667,7 @@
 }
 
 .inkling-pdf-readonly .inkling-pdf-message-icon {
-	--icon-size: var(--icon-m);
+	--icon-size: var(--icon-m, 18px);
 }
 
 .inkling-pdf-spinner {
@@ -750,7 +750,7 @@
 	background-color: var(--background-primary);
 	box-shadow: none;
 	color: var(--text-muted);
-	--icon-size: var(--icon-s);
+	--icon-size: var(--icon-s, 16px);
 	--icon-color: currentColor;
 	transition: background-color 100ms ease, color 100ms ease;
 }
@@ -891,7 +891,7 @@
 	   puts an icon's box at the very top of the text block, which sits high
 	   against the cap height beside it. */
 	margin-top: 1px;
-	--icon-size: var(--icon-s);
+	--icon-size: var(--icon-s, 16px);
 	--icon-color: var(--text-warning);
 }
 

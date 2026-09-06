@@ -1,4 +1,5 @@
-import { setIcon, setTooltip } from 'obsidian';
+import { setTooltip } from 'obsidian';
+import { setIconOrText } from '../icon';
 import { AnnotationController } from './controller';
 import { MAX_ZOOM } from './pointer';
 import { MAX_WIDTH, MIN_WIDTH, PRESET_COLORS, ToolType } from './types';
@@ -62,8 +63,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 function iconButton(className: string, spec: ButtonSpec, onClick: () => void): HTMLButtonElement {
 	const button = el('button', `clickable-icon ${className}`);
 	button.type = 'button';
-	setIcon(button, spec.icon);
-	if (button.childElementCount === 0) button.setText(spec.fallback);
+	setIconOrText(button, spec.icon, spec.fallback);
 	setTooltip(button, spec.title);
 	button.setAttribute('aria-label', spec.title);
 	button.addEventListener('click', onClick);
@@ -269,7 +269,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		if (noteButton && !controller.canTakeNotes()) noteButton.hidden = true;
 		for (const group of [colorGroup, widthGroup, statusGroup]) group.hidden = collapsed;
 		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, invertButton, navButton]) button.hidden = collapsed;
-		setIcon(collapseButton, collapsed ? 'chevrons-down' : 'chevrons-up');
+		setIconOrText(collapseButton, collapsed ? 'chevrons-down' : 'chevrons-up', collapsed ? '⌄' : '⌃');
 		setTooltip(collapseButton, collapsed ? 'Show tools' : 'Collapse tools');
 		for (const [tool, button] of toolButtons) {
 			const active = tool === activeTool;

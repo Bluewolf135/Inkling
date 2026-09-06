@@ -10,6 +10,7 @@ import {
 	type Annotation,
 } from '../annotate';
 import { createId } from '../annotate/id';
+import { setIconOrText } from '../icon';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
@@ -354,8 +355,7 @@ class InkBlockView {
 		// piece of the note's own content rather than plugin chrome.
 		const toggle = this.toolbarHost.createEl('button', { cls: 'inkling-ink-block-toggle' });
 		toggle.type = 'button';
-		setIcon(toggle, 'pencil-ruler');
-		if (toggle.childElementCount === 0) toggle.setText('Tools');
+		setIconOrText(toggle, 'pencil-ruler', 'Tools');
 		setTooltip(toggle, 'Show drawing tools');
 		toggle.setAttribute('aria-label', 'Show drawing tools');
 		// Stated up front rather than left to setOpen below, which no-ops
