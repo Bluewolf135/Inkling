@@ -106,3 +106,32 @@ describe('compactInkBlocks', () => {
 		expect(twice.content).toBe(once.content);
 	});
 });
+
+describe('compactInkBlocks id repair', () => {
+	const EMPTY = '{"version":1,"width":800,"height":450,"annotations":[]}';
+
+	// Two blocks with no id and no ink in them are the same bytes, so nothing
+	// can tell them apart — which is how one block's drawing was written into
+	// another's. An id is what makes them distinguishable again.
+	it('gives an id to every block that has none', () => {
+		const result = compactInkBlocks(note(EMPTY, EMPTY, EMPTY));
+		expect(result.stamped).toBe(3);
+
+		const ids = [...result.content.matchAll(/"id":"([^"]+)"/g)].map((m) => m[1]);
+		expect(ids).toHaveLength(3);
+		expect(new Set(ids).size).toBe(3);
+	});
+
+	it('leaves an existing id alone', () => {
+		const result = compactInkBlocks(note('{"version":1,"id":"ink-keepme","width":800,"height":450,"annotations":[]}'));
+		expect(result.stamped).toBe(0);
+		expect(result.content).toContain('ink-keepme');
+	});
+
+	it('rewrites a block that needs only an id, with nothing to thin', () => {
+		const result = compactInkBlocks(note(EMPTY));
+		expect(result.pointsBefore).toBe(0);
+		expect(result.blocks).toBe(1);
+		expect(result.content).toContain('"id":"');
+	});
+});

@@ -113,7 +113,7 @@ export default class InklingPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'compact-ink-blocks',
-			name: 'Compact ink blocks in this note',
+			name: 'Compact and repair ink blocks in this note',
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
 				if (!file) return false;
@@ -243,11 +243,16 @@ export default class InklingPlugin extends Plugin {
 			return;
 		}
 
-		const dropped = Math.round(((result.pointsBefore - result.pointsAfter) / result.pointsBefore) * 100);
+		const dropped =
+			result.pointsBefore > 0 ? Math.round(((result.pointsBefore - result.pointsAfter) / result.pointsBefore) * 100) : 0;
 		const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+		// Named separately because they are different repairs: thinning is
+		// about size, an id is about a block being findable at all when it
+		// comes to save.
+		const ids = result.stamped > 0 ? ` ${result.stamped} block${result.stamped === 1 ? '' : 's'} given an id.` : '';
 		new Notice(
-			`Inkling: compacted ${result.blocks} ink block${result.blocks === 1 ? '' : 's'} — ` +
-				`${dropped}% fewer points, ${mb(source.length)} to ${mb(result.content.length)}.${unreadable}`,
+			`Inkling: rewrote ${result.blocks} ink block${result.blocks === 1 ? '' : 's'} — ` +
+				`${dropped}% fewer points, ${mb(source.length)} to ${mb(result.content.length)}.${ids}${unreadable}`,
 			10_000,
 		);
 	}

@@ -289,3 +289,46 @@ export function findInkBlockById(lines: readonly string[], blockId: string): Ink
 
 	return null;
 }
+
+// Finds the ink block whose body is exactly `body`, but only when the note
+// holds precisely one of them.
+//
+// This is how a block with no id of its own gets located, and the
+// uniqueness requirement is the whole point. Two ink blocks nobody has
+// drawn in yet are byte-identical — the same fifty-five characters of empty
+// JSON — so their text is not an identity, it is a description that fits
+// both.
+//
+// Trusting it anyway is how a note lost work. Obsidian's getSectionInfo
+// can hand a block the line range of a *different* block, the range was
+// checked by comparing text, two empty blocks compared equal, and the save
+// went through: one block's drawing written into another block's fence,
+// which from the outside looks exactly like the work in the first block
+// vanishing the moment the second one was touched.
+//
+// Returning null when the answer is ambiguous makes the save fail instead,
+// and a failed save keeps the ink (see unsavedInk in markdown/inkBlock.ts)
+// rather than putting it somewhere it does not belong.
+export function findUniqueInkBlockByBody(lines: readonly string[], body: string): InkBlockRange | null {
+	const wanted = body.trim();
+	if (!wanted) return null;
+
+	let found: InkBlockRange | null = null;
+	for (let index = 0; index < lines.length; index++) {
+		if (!isOpeningFence(lines[index])) continue;
+
+		let close = index + 1;
+		while (close < lines.length && !isClosingFence(lines[close])) close++;
+		if (close >= lines.length) return null;
+
+		if (lines.slice(index + 1, close).join('\n').trim() === wanted) {
+			// A second match means the text identifies nothing.
+			if (found) return null;
+			found = { lineStart: index, lineEnd: close };
+		}
+
+		index = close;
+	}
+
+	return found;
+}

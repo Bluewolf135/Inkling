@@ -14,10 +14,10 @@ import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
 	findInkBlockById,
+	findUniqueInkBlockByBody,
 	emptyInkBlock,
 	inkBlockMarkdown,
 	parseInkBlock,
-	readInkBlockId,
 	serializeInkBlock,
 } from './inkBlockFormat';
 
@@ -214,7 +214,8 @@ class InkBlockView {
 
 	// This block's own identity in the note, and the exact text it rendered
 	// from — the two things a save checks before overwriting a fence. See
-	// matchesThisBlock for why "it's an ink block" was not enough.
+	// locate/findUniqueInkBlockByBody for why "it's an ink block" was not
+	// enough.
 	private readonly blockId: string;
 	private renderedSource: string;
 	// One report per view, not one per save: a mismatch repeats on every
@@ -241,6 +242,9 @@ class InkBlockView {
 	// currently are. See watchVisibility.
 	private readonly contentEl: HTMLElement;
 	private observers: IntersectionObserver[] = [];
+	// The drag handle along the block's bottom edge, shown only while the
+	// tool strip is open. See setResizeHandleVisible.
+	private resizeHandleEl: HTMLElement | null = null;
 	// The pending frame in watchVisibility, so detaching before it runs
 	// cannot leave a callback pointing at a torn-down block.
 	private watchHandle: number | null = null;
@@ -259,7 +263,7 @@ class InkBlockView {
 	) {
 		const { data, malformed } = parseInkBlock(source);
 		// A block written before ids existed picks one up the first time it
-		// saves; until then matchesThisBlock falls back to the source text.
+		// saves; until then it is located by its exact source text instead.
 		this.blockId = data.id ?? createId();
 		this.renderedSource = source.trim();
 
@@ -373,6 +377,7 @@ class InkBlockView {
 			}
 			toggle.toggleClass('is-active', open);
 			toggle.setAttribute('aria-expanded', String(open));
+			this.setResizeHandleVisible(open);
 		};
 
 		toggle.addEventListener('click', () => {
@@ -411,12 +416,34 @@ class InkBlockView {
 		);
 	}
 
+	// Shows or hides the resize handle along with the tool strip.
+	//
+	// The handle spans the block's whole bottom edge, which put a drag target
+	// between every block and the prose under it. Scrolling a note by dragging
+	// — which is how a note gets read on a touchscreen — caught it, and the
+	// block stretched instead of the page moving.
+	//
+	// Resizing is a deliberate act and a rare one, so it now lives behind the
+	// same "Tools" toggle the pens do: no strip open, no handle to catch. A
+	// block being read has nothing draggable on it at all.
+	private setResizeHandleVisible(visible: boolean): void {
+		if (!this.resizeHandleEl) return;
+		this.resizeHandleEl.hidden = !visible;
+		this.surfaceEl.toggleClass('inkling-has-handle', visible);
+	}
+
 	private buildResizeHandle(): void {
 		const handle = this.containerEl.createDiv({ cls: 'inkling-ink-block-handle' });
+		this.resizeHandleEl = handle;
 		// Lets the surface square off the corners the handle joins on to.
 		// Set here rather than found with a :has() selector, since this is
 		// the code that decides the handle exists at all.
-		this.surfaceEl.addClass('inkling-has-handle');
+		//
+		// Built once but shown only while the tool strip is open, and the
+		// strip's own state decides which — a block whose strip the user left
+		// open comes back with its handle, and every other block comes back
+		// without one. See setResizeHandleVisible.
+		this.setResizeHandleVisible(this.disposeToolbar !== null);
 		handle.setAttribute('aria-label', 'Drag to resize this ink block');
 		setTooltip(handle, 'Drag to resize');
 
@@ -742,55 +769,29 @@ class InkBlockView {
 	// drawing was written into another’s, and how refusing that write then
 	// lost the drawing instead.
 	//
-	// getSectionInfo is still the fallback, for the one case an id search
-	// cannot answer: a block that has never been saved, and so carries no id
-	// in the file yet. There it is checked against the exact text this view
-	// rendered from before anything is written.
+	// For the one case an id search cannot answer — a block that has never
+	// been saved, and so carries no id in the file yet — the note is searched
+	// for the fence holding this view's exact text instead. getSectionInfo is
+	// not consulted at all any more, and that is the fix for a second way
+	// this lost work.
+	//
+	// It used to be the fallback, with its reported range checked against
+	// that same text before writing. The check could not do the job it was
+	// given: two ink blocks nobody has drawn in yet are the same fifty-five
+	// bytes of empty JSON, so an empty block compared equal to *any* other
+	// empty block, a misreported range sailed through, and one block's
+	// drawing was written into another block's fence — which reads, from the
+	// outside, as the work in the first block disappearing the moment the
+	// second one was touched.
+	//
+	// Searching for a uniquely-matching fence answers the question directly
+	// and refuses when the answer is ambiguous, which a failed save turns
+	// into ink kept rather than ink misplaced.
 	private locate(lines: readonly string[]): { lineStart: number; lineEnd: number } | null {
 		const byId = findInkBlockById(lines, this.blockId);
 		if (byId) return byId;
 
-		const section = this.ctx.getSectionInfo(this.containerEl);
-		if (!section) return null;
-		if (section.lineEnd >= lines.length) return null;
-		if (!this.matchesThisBlock(section.lineStart, section.lineEnd, (line) => lines[line])) return null;
-		return { lineStart: section.lineStart, lineEnd: section.lineEnd };
-	}
-
-	// Confirms the lines about to be replaced really are *this* block's
-	// fence, so a stale or mistaken position can never put one block's
-	// drawing over another's, or over the user's prose.
-	//
-	// Checking the shape — an opening ```inkling and a closing ``` — is not
-	// enough, and that was the bug: every ink block in a note has exactly
-	// that shape, so when Obsidian's getSectionInfo handed a block the line
-	// range of a *different* one (which it does in a note holding several),
-	// the write sailed through and the drawing from one block turned up
-	// duplicated in the one below it. Identity has to be checked, not just
-	// kind.
-	private matchesThisBlock(lineStart: number, lineEnd: number, lineAt: (line: number) => string | undefined): boolean {
-		if (lineEnd <= lineStart) return false;
-		const opening = lineAt(lineStart);
-		const closing = lineAt(lineEnd);
-		if (opening === undefined || closing === undefined) return false;
-		if (!opening.trimStart().startsWith('```') || !opening.includes(INK_BLOCK_LANGUAGE)) return false;
-		if (!closing.trimStart().startsWith('```')) return false;
-
-		const body: string[] = [];
-		for (let line = lineStart + 1; line < lineEnd; line++) {
-			const text = lineAt(line);
-			if (text === undefined) return false;
-			body.push(text);
-		}
-		const source = body.join('\n');
-
-		const id = readInkBlockId(source);
-		if (id !== null) return id === this.blockId;
-		// No id in that fence: a block from before ids existed, or one this
-		// view has not yet stamped. Matching the exact text this view
-		// rendered from is as specific as the older format allows, and it
-		// still separates a block with ink in it from an empty neighbour.
-		return source.trim() === this.renderedSource;
+		return findUniqueInkBlockByBody(lines, this.renderedSource);
 	}
 
 	// The block is not where it should be. The drawing is already stashed
@@ -915,7 +916,9 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState): void {
 		editorCallback: (editor) => {
 			// Stamped with its id up front, so a note full of freshly inserted
 			// blocks — which are otherwise byte-identical — can still tell
-			// itself apart at save time. See InkBlockView.matchesThisBlock.
+			// itself apart at save time. Two blocks with no id and no ink in
+			// them are the same bytes, and so cannot be told apart at all —
+			// see findUniqueInkBlockByBody.
 			// Trailing newline so the cursor ends up on a fresh line after
 			// the block rather than inside the fence.
 			editor.replaceSelection(`${inkBlockMarkdown({ ...emptyInkBlock(), id: createId() })}\n`);

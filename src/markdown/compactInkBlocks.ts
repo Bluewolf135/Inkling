@@ -1,3 +1,4 @@
+import { createId } from '../annotate/id';
 import { SIMPLIFY_EPSILON, simplifyPoints } from '../annotate/simplify';
 import { Annotation } from '../annotate/types';
 import { INK_BLOCK_LANGUAGE, parseInkBlock, serializeInkBlock } from './inkBlockFormat';
@@ -6,6 +7,8 @@ export interface CompactResult {
 	content: string;
 	// Blocks actually rewritten.
 	blocks: number;
+	// Blocks that had no id and were given one.
+	stamped: number;
 	// Blocks deliberately left alone because they could not be fully read.
 	skipped: number;
 	pointsBefore: number;
@@ -59,6 +62,7 @@ export function compactInkBlocks(source: string): CompactResult {
 	const out: string[] = [];
 
 	let blocks = 0;
+	let stamped = 0;
 	let skipped = 0;
 	let pointsBefore = 0;
 	let pointsAfter = 0;
@@ -93,6 +97,16 @@ export function compactInkBlocks(source: string): CompactResult {
 		const annotations = simplifyAnnotations(data.annotations);
 		const after = countPoints(annotations);
 
+		// A block with no id cannot be told apart from any other block that
+		// has none and no ink in it — they are the same bytes — so a save
+		// could not safely find which fence was its own, and now refuses
+		// rather than guessing (see findUniqueInkBlockByBody). Giving each
+		// one an id is what makes it writable again, and it is why this
+		// command repairs as well as compacts.
+		const id = data.id ?? createId();
+		const needsId = !data.id;
+		if (needsId) stamped++;
+
 		pointsBefore += before;
 		pointsAfter += after;
 
@@ -101,7 +115,7 @@ export function compactInkBlocks(source: string): CompactResult {
 		// back with its keys in the parser's order rather than the order it
 		// was written in — and that would be a no-op edit to every block in
 		// the note, re-uploaded through a replicating vault for no benefit.
-		if (after === before) {
+		if (after === before && !needsId) {
 			for (let copy = index; copy <= close; copy++) out.push(lines[copy] ?? '');
 			index = close;
 			continue;
@@ -109,10 +123,10 @@ export function compactInkBlocks(source: string): CompactResult {
 
 		blocks++;
 		out.push(line ?? '');
-		out.push(serializeInkBlock({ ...data, annotations }));
+		out.push(serializeInkBlock({ ...data, id, annotations }));
 		out.push(lines[close] ?? '');
 		index = close;
 	}
 
-	return { content: out.join('\n'), blocks, skipped, pointsBefore, pointsAfter };
+	return { content: out.join('\n'), blocks, stamped, skipped, pointsBefore, pointsAfter };
 }

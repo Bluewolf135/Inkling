@@ -5,6 +5,7 @@ import {
 	INK_BLOCK_VERSION,
 	emptyInkBlock,
 	findInkBlockById,
+	findUniqueInkBlockByBody,
 	parseInkBlock,
 	readInkBlockId,
 	serializeInkBlock,
@@ -307,5 +308,42 @@ describe('stroke fidelity through a block', () => {
 			expect(read.start.x).toBeCloseTo(11, 0);
 			expect(read.end.x).toBe(100.5);
 		}
+	});
+});
+
+describe('findUniqueInkBlockByBody', () => {
+	const empty = '{"version":1,"width":800,"height":450,"annotations":[]}';
+	const drawn = '{"version":1,"width":800,"height":450,"annotations":[{"id":"s","kind":"stroke","tool":"pen","color":"#1e1e1e","width":3,"points":[{"x":1,"y":2},{"x":3,"y":4}]}]}';
+
+	function note(...bodies: string[]): string[] {
+		return bodies.flatMap((b) => ['```inkling', b, '```', '']);
+	}
+
+	it('finds the one fence carrying that text', () => {
+		expect(findUniqueInkBlockByBody(note(empty, drawn), drawn)).toEqual({ lineStart: 4, lineEnd: 6 });
+	});
+
+	// The bug this exists for. Two ink blocks that have never been drawn in
+	// are byte-identical, so text cannot tell them apart — and the save that
+	// trusted it wrote one block's drawing into the other, which read as the
+	// first block's work vanishing.
+	it('refuses when two fences carry the same text', () => {
+		expect(findUniqueInkBlockByBody(note(empty, empty), empty)).toBeNull();
+	});
+
+	it('refuses when three fences carry the same text', () => {
+		expect(findUniqueInkBlockByBody(note(empty, empty, empty), empty)).toBeNull();
+	});
+
+	it('refuses when no fence carries it', () => {
+		expect(findUniqueInkBlockByBody(note(empty), drawn)).toBeNull();
+	});
+
+	it('ignores leading and trailing whitespace, the way the caller stores it', () => {
+		expect(findUniqueInkBlockByBody(['```inkling', `  ${drawn}  `, '```'], drawn)).toEqual({ lineStart: 0, lineEnd: 2 });
+	});
+
+	it('does not treat a fence of another language as an ink block', () => {
+		expect(findUniqueInkBlockByBody(['```js', drawn, '```'], drawn)).toBeNull();
 	});
 });
