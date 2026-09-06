@@ -1,8 +1,9 @@
-import { FileView, ItemView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { FileView, ItemView, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
 import { ToolState } from './annotate';
 import { collectAnnotations } from './extract/extract';
 import { extractionNotePath, mergeIntoNote, renderExtraction } from './extract/extractFormat';
+import { compactInkBlocks } from './markdown/compactInkBlocks';
 import { registerInkBlock } from './markdown/inkBlock';
 import { registerNoteCreation } from './noteCreation';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
@@ -111,6 +112,17 @@ export default class InklingPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'compact-ink-blocks',
+			name: 'Compact ink blocks in this note',
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+				if (!file) return false;
+				if (!checking) void this.compactInkBlocksIn(file);
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: 'extract-annotations',
 			name: 'Extract annotations to a note',
 			checkCallback: (checking) => {
@@ -183,6 +195,63 @@ export default class InklingPlugin extends Plugin {
 	// Runs `act` on the active annotate view, or reports that there is none.
 	// The checking pass must not act, which is the whole contract of
 	// checkCallback and easy to get subtly wrong when it is inlined.
+	// Thins the strokes in every ink block in a note, for blocks written
+	// before strokes were thinned as they were drawn (see
+	// annotate/simplify.ts).
+	//
+	// Through the vault rather than the open editor, unlike the ink block
+	// save path. That path makes a small, targeted replaceRange inside one
+	// fence; this rewrites the whole document, and setValue on a view in
+	// preview mode does not survive — the view re-syncs from the file and
+	// the change is simply gone, which is exactly what happened the first
+	// time this was written that way. vault.process is atomic and does not
+	// care which mode the note is being viewed in.
+	//
+	// The cost is that this is not a single editor undo step. It is the one
+	// operation in the plugin that deliberately discards detail, so it says
+	// so plainly, and Obsidian's own file recovery is the way back.
+	private async compactInkBlocksIn(file: TFile): Promise<void> {
+		const source = await this.app.vault.read(file);
+		const result = compactInkBlocks(source);
+
+		const unreadable = result.skipped > 0 ? ` ${result.skipped} could not be read and were left alone.` : '';
+
+		if (result.blocks === 0) {
+			new Notice(`Inkling: nothing to compact in this note.${unreadable}`);
+			return;
+		}
+
+		try {
+			let wrote = false;
+			await this.app.vault.process(file, (current) => {
+				// Refuses rather than overwrites if the note moved under us
+				// between reading it and writing it back. Recomputing here
+				// instead would mean silently compacting something the user
+				// has not seen the numbers for.
+				if (current !== source) return current;
+				wrote = true;
+				return result.content;
+			});
+
+			if (!wrote) {
+				new Notice('Inkling: the note changed while compacting, so nothing was written. Try again.');
+				return;
+			}
+		} catch (error) {
+			console.error('Inkling: failed to compact ink blocks.', error);
+			new Notice('Inkling: could not compact this note. Nothing was changed.');
+			return;
+		}
+
+		const dropped = Math.round(((result.pointsBefore - result.pointsAfter) / result.pointsBefore) * 100);
+		const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+		new Notice(
+			`Inkling: compacted ${result.blocks} ink block${result.blocks === 1 ? '' : 's'} — ` +
+				`${dropped}% fewer points, ${mb(source.length)} to ${mb(result.content.length)}.${unreadable}`,
+			10_000,
+		);
+	}
+
 	private withAnnotateView(checking: boolean, act: (view: PdfAnnotateView) => void): boolean {
 		const view = this.app.workspace.getActiveViewOfType(PdfAnnotateView);
 		if (!view) return false;
