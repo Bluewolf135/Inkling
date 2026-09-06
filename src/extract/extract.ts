@@ -1,24 +1,33 @@
+import { PDFArray, PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, PDFRef, PDFString } from 'pdf-lib';
 import { getDocument, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
 // From types, not the '../annotate' barrel: the barrel re-exports the
 // toolbar, which imports the Obsidian API, and pulling that in here made
 // this module — the whole of PDF reading — impossible to test in Node.
 import { PRESET_COLORS } from '../annotate/types';
+import { ID_PREFIX, INKLING_EXTRAS, QUOTE_KEY } from '../pdf/annotationFormat';
 import { groupIntoLines, quoteBetween, type PositionedBox } from '../pdf/textLines';
 import type { ExtractedAnnotation } from './extractFormat';
 
 // Reading a PDF's annotations back out, with their text.
 //
-// pdf.js does both halves here, rather than pdf-lib doing the annotations
-// and pdf.js the text. Extraction is strictly read-only, and pdf.js already
-// gives normalised `rect`, `contents`, `color` and `subtype` for foreign
-// annotations as well as ours — so using it for both means one parse and
-// one set of conventions, rather than two views of the same file that have
-// to be reconciled.
-
-// The same `ink-` tag every write applies (see pdf/annotationSync.ts). Read
-// here rather than imported, because that module is about writing and this
-// one must never write.
-const ID_PREFIX = 'ink-';
+// Two libraries, each doing the half it can. pdf-lib reads the annotation
+// dictionaries — it sees every key, including /NM (the stable `ink-` id)
+// and our own private /Inkling /Q (the words a highlight covered, captured
+// when it was drawn). pdf.js reads the page text, which is the one thing
+// pdf-lib cannot do.
+//
+// This was pdf.js for both, on the reasoning that one parse and one set of
+// conventions beats reconciling two views of the same file. The reasoning
+// was sound; the premise was not. pdf.js exposes no /NM and no private keys
+// at all, so every annotation read back as foreign however plainly it was
+// ours, every block reference was derived from a position rather than the
+// stable id sitting right there in the file, and the stored quote was never
+// read — which meant a scanned page, with highlights but no text layer,
+// extracted nothing at all.
+//
+// Nothing extra is written to make this work. The PDF already carried all
+// of it; only the reader had to change. Extraction stays strictly
+// read-only: pdf-lib is used to load and inspect, never to save.
 
 // The default colour categories: the palette's own names. Track D lets
 // these be renamed, so "Yellow = definition, Red = disagree" works.
@@ -28,44 +37,11 @@ export function defaultColorLabels(): Record<string, string> {
 	return labels;
 }
 
-// A number out of a value pdf.js types loosely. Read by index rather than
-// destructured, because an ArrayLike is not iterable and a cast to an array
-// of numbers would be a claim about the contents rather than a check of
-// them — and this reads a file other software wrote.
-function numberAt(value: unknown, index: number): number | null {
-	if (typeof value !== 'object' || value === null) return null;
-	const entry: unknown = (value as Record<number, unknown>)[index];
-	return typeof entry === 'number' && Number.isFinite(entry) ? entry : null;
-}
-
-// pdf.js reports an annotation's colour as 0-255 components, or omits it.
-function toHex(color: unknown): string {
-	const r = numberAt(color, 0);
-	const g = numberAt(color, 1);
-	const b = numberAt(color, 2);
-	if (r === null || g === null || b === null) return '';
-	const part = (value: number) => Math.round(Math.min(Math.max(value, 0), 255)).toString(16).padStart(2, '0');
-	return `#${part(r)}${part(g)}${part(b)}`;
-}
-
-// The shape of a pdf.js annotation, narrowed to what is read here. Declared
-// rather than imported: pdf.js types this loosely, and naming the four
-// fields actually used says more than `any` would.
-interface RawAnnotation {
-	id?: unknown;
-	subtype?: unknown;
-	rect?: unknown;
-	// pdf.js hands back /Contents as `contentsObj: { str, dir }`, not as a
-	// `contents` string. Reading the string that was never there meant every
-	// comment extracted as empty — and a note annotation, whose text is the
-	// whole of it, was then dropped by the guard below for having neither a
-	// quote nor a note. `contents` is kept as a fallback and read second,
-	// since it costs nothing and this is a pinned dependency we do not
-	// control the shape of.
-	contentsObj?: unknown;
-	contents?: unknown;
-	color?: unknown;
-	annotationName?: unknown;
+interface Rect {
+	minX: number;
+	minY: number;
+	maxX: number;
+	maxY: number;
 }
 
 // Annotations a person added to mark up the document, which is the PDF
@@ -102,21 +78,59 @@ const MARKUP_SUBTYPES: ReadonlySet<string> = new Set([
 	'Redact',
 ]);
 
-function contentsOf(raw: RawAnnotation): string {
-	const obj = raw.contentsObj;
-	if (typeof obj === 'object' && obj !== null) {
-		const str = (obj as { str?: unknown }).str;
-		if (typeof str === 'string') return str.trim();
-	}
-	return typeof raw.contents === 'string' ? raw.contents.trim() : '';
+// A text string out of a dictionary.
+//
+// Both string types are accepted because both are legal and other software
+// writes both: a literal `(note)` and a hex `<6E6F7465>` are the same value
+// spelled differently, and a reader that knows only one of them silently
+// loses every comment written by whichever tool prefers the other.
+function textOf(dict: PDFDict, key: string): string {
+	const value = dict.lookup(PDFName.of(key));
+	if (value instanceof PDFString || value instanceof PDFHexString) return value.decodeText().trim();
+	return '';
 }
 
-function rectOf(raw: RawAnnotation): { minX: number; minY: number; maxX: number; maxY: number } | null {
-	const x1 = numberAt(raw.rect, 0);
-	const y1 = numberAt(raw.rect, 1);
-	const x2 = numberAt(raw.rect, 2);
-	const y2 = numberAt(raw.rect, 3);
-	if (x1 === null || y1 === null || x2 === null || y2 === null) return null;
+function toHex(r: number, g: number, b: number): string {
+	const part = (v: number) =>
+		Math.round(Math.max(0, Math.min(1, v)) * 255)
+			.toString(16)
+			.padStart(2, '0');
+	return `#${part(r)}${part(g)}${part(b)}`;
+}
+
+// An annotation's colour from /C, whose component count says which space it
+// is in — 1 grey, 3 RGB, 4 CMYK, and 0 meaning "no colour", which the spec
+// allows and which is why this can come back empty.
+function colorOf(dict: PDFDict): string {
+	const array = dict.lookupMaybe(PDFName.of('C'), PDFArray);
+	if (!array) return '';
+
+	const parts = array
+		.asArray()
+		.filter((entry): entry is PDFNumber => entry instanceof PDFNumber)
+		.map((entry) => entry.asNumber());
+
+	const [a, b, c, d] = parts;
+	if (parts.length === 1 && a !== undefined) return toHex(a, a, a);
+	if (parts.length === 3 && a !== undefined && b !== undefined && c !== undefined) return toHex(a, b, c);
+	if (parts.length === 4 && a !== undefined && b !== undefined && c !== undefined && d !== undefined) {
+		return toHex((1 - a) * (1 - d), (1 - b) * (1 - d), (1 - c) * (1 - d));
+	}
+	return '';
+}
+
+function rectOf(dict: PDFDict): Rect | null {
+	const array = dict.lookupMaybe(PDFName.of('Rect'), PDFArray);
+	if (!array) return null;
+
+	const [x1, y1, x2, y2] = array
+		.asArray()
+		.filter((entry): entry is PDFNumber => entry instanceof PDFNumber)
+		.map((entry) => entry.asNumber());
+	if (x1 === undefined || y1 === undefined || x2 === undefined || y2 === undefined) return null;
+
+	// Normalised, because a /Rect is only required to name two opposite
+	// corners — it is not required to name them in any particular order.
 	return {
 		minX: Math.min(x1, x2),
 		minY: Math.min(y1, y2),
@@ -150,7 +164,7 @@ async function pageLines(page: PDFPageProxy) {
 // text. This is what makes extraction work retroactively — on highlights
 // made before quotes were stored, and on ones made in other PDF software,
 // which never stored anything of ours at all.
-function quoteUnder(lines: ReturnType<typeof groupIntoLines>, rect: { minX: number; minY: number; maxX: number; maxY: number }): string {
+function quoteUnder(lines: ReturnType<typeof groupIntoLines>, rect: Rect): string {
 	const parts: string[] = [];
 	for (const line of lines) {
 		const half = line.height / 2;
@@ -167,57 +181,115 @@ export interface CollectOptions {
 	onProgress?: (pageNumber: number, pageCount: number) => void;
 }
 
-export async function collectAnnotations(bytes: ArrayBuffer, options: CollectOptions = {}): Promise<ExtractedAnnotation[]> {
-	let pdf: PDFDocumentProxy | null = null;
-	const found: ExtractedAnnotation[] = [];
+// One annotation, read as far as the dictionaries alone can take it. `rect`
+// and `needsQuote` are working state and do not survive into the result.
+interface Pending {
+	entry: ExtractedAnnotation;
+	rect: Rect;
+	needsQuote: boolean;
+}
 
+function readAnnotationDict(dict: PDFDict, pageNumber: number): Pending | null {
+	const subtype = dict.lookupMaybe(PDFName.of('Subtype'), PDFName)?.decodeText() ?? '';
+	if (!MARKUP_SUBTYPES.has(subtype)) return null;
+
+	const rect = rectOf(dict);
+	if (!rect) return null;
+
+	const name = textOf(dict, 'NM');
+	const foreign = !name.startsWith(ID_PREFIX);
+
+	// Ours if it carries our tag, and then the quote it was drawn over was
+	// stored with it — so no text layer is needed to recover it, and a
+	// scanned page reads back exactly as well as a typeset one.
+	const stored = dict.lookupMaybe(PDFName.of(INKLING_EXTRAS), PDFDict);
+	const quote = stored ? textOf(stored, QUOTE_KEY) : '';
+
+	return {
+		rect,
+		needsQuote: !quote,
+		entry: {
+			// A foreign annotation may carry no name of its own, so one is
+			// derived from where it sits. Ours does carry one, and using it
+			// is what makes a block reference in the extracted note survive
+			// the annotation moving.
+			id: name || `ext-p${pageNumber}-${Math.round(rect.minX)}-${Math.round(rect.minY)}`,
+			pageNumber,
+			color: colorOf(dict) || '#1e1e1e',
+			quote,
+			note: textOf(dict, 'Contents'),
+			foreign,
+			top: rect.maxY,
+		},
+	};
+}
+
+// Recovers the quotes that were not stored, by reading the text under each
+// annotation. Only pages that need it are opened, and if none do, pdf.js is
+// never loaded at all — which is the common case for a book annotated in
+// Inkling, and why reading annotation dictionaries with a second library
+// does not make extraction slower.
+async function fillMissingQuotes(bytes: ArrayBuffer, byPage: Map<number, Pending[]>): Promise<void> {
+	const pages = [...byPage].filter(([, pending]) => pending.some((p) => p.needsQuote)).map(([pageNumber]) => pageNumber);
+	if (pages.length === 0) return;
+
+	let pdf: PDFDocumentProxy | null = null;
 	try {
 		pdf = await getDocument({ data: bytes }).promise;
-
-		for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-			options.onProgress?.(pageNumber, pdf.numPages);
-			const page = await pdf.getPage(pageNumber);
-
-			const raw = (await page.getAnnotations()) as RawAnnotation[];
-			if (raw.length === 0) continue;
-
-			// Only paid for on pages that actually have annotations. On a
-			// 900-page book with ten highlights that is ten text extractions
-			// rather than nine hundred.
-			const lines = await pageLines(page);
-
-			for (const annotation of raw) {
-				if (!MARKUP_SUBTYPES.has(String(annotation.subtype))) continue;
-
-				const rect = rectOf(annotation);
-				if (!rect) continue;
-
-				const name = typeof annotation.annotationName === 'string' ? annotation.annotationName : '';
-				const foreign = !name.startsWith(ID_PREFIX);
-				const note = contentsOf(annotation);
-				const quote = quoteUnder(lines, rect);
-
-				// A pen doodle in a margin is not a note. Including every
-				// stroke would bury the annotations that are.
-				if (!quote && !note) continue;
-
-				found.push({
-					// A foreign annotation may have no name of its own, so
-					// one is derived from where it sits — stable across runs,
-					// which is what the block reference needs.
-					id: name || `ext-p${pageNumber}-${Math.round(rect.minX)}-${Math.round(rect.minY)}`,
-					pageNumber,
-					color: toHex(annotation.color) || '#1e1e1e',
-					quote,
-					note,
-					foreign,
-					top: rect.maxY,
-				});
+		for (const pageNumber of pages) {
+			if (pageNumber > pdf.numPages) continue;
+			const lines = await pageLines(await pdf.getPage(pageNumber));
+			for (const pending of byPage.get(pageNumber) ?? []) {
+				if (pending.needsQuote) pending.entry.quote = quoteUnder(lines, pending.rect);
 			}
 		}
 	} finally {
 		await pdf?.destroy();
 	}
+}
 
+export async function collectAnnotations(bytes: ArrayBuffer, options: CollectOptions = {}): Promise<ExtractedAnnotation[]> {
+	const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+	const pages = doc.getPages();
+
+	const byPage = new Map<number, Pending[]>();
+	for (let index = 0; index < pages.length; index++) {
+		const pageNumber = index + 1;
+		options.onProgress?.(pageNumber, pages.length);
+
+		const annots = pages[index]?.node.Annots();
+		if (!annots) continue;
+
+		const pending: Pending[] = [];
+		for (const entry of annots.asArray()) {
+			// An /Annots entry is normally a reference, but the spec permits
+			// the dictionary inline and some writers take it.
+			const dict = entry instanceof PDFRef ? doc.context.lookupMaybe(entry, PDFDict) : entry instanceof PDFDict ? entry : null;
+			if (!dict) continue;
+
+			try {
+				const read = readAnnotationDict(dict, pageNumber);
+				if (read) pending.push(read);
+			} catch (error) {
+				// One malformed annotation in a book is not a reason to
+				// extract none of the others.
+				console.error('Inkling: skipping an unreadable annotation while extracting.', error);
+			}
+		}
+
+		if (pending.length > 0) byPage.set(pageNumber, pending);
+	}
+
+	await fillMissingQuotes(bytes, byPage);
+
+	const found: ExtractedAnnotation[] = [];
+	for (const pending of byPage.values()) {
+		for (const { entry } of pending) {
+			// A pen doodle in a margin is not a note. Including every stroke
+			// would bury the annotations that are.
+			if (!entry.quote && !entry.note) continue;
+			found.push(entry);
+		}
+	}
 	return found;
 }

@@ -1,6 +1,7 @@
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import { boundingBox } from '../annotate/geometry';
 import { hasPressure, outlinePath, smoothedPath } from '../annotate/stroke';
+import { ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY } from './annotationFormat';
 import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, polygonOps, rectangleOps } from './contentStream';
 import {
 	Annotation,
@@ -24,15 +25,6 @@ interface PdfLiteralObject {
 	[key: string]: PdfLiteral;
 }
 type PdfLiteralArray = PdfLiteral[];
-
-// Every annotation Inkling writes is tagged with its stable id in the PDF's
-// `/NM` field (the spec's own "unique annotation name" — a perfect fit for
-// our purposes). The `ink-` prefix (see src/annotate/id.ts) is what lets us
-// tell our own annotations apart from ones authored by other software on
-// read, and what limits our writes to only ever touching our own
-// annotations — foreign annotations are never inspected past this check,
-// so they're never at risk of being corrupted or dropped.
-const ID_PREFIX = 'ink-';
 
 // Whether an annotation dict is one of ours, by the `/NM` tag every write
 // applies. Exported because verification needs the same answer (see
@@ -113,28 +105,6 @@ function fillHeader(color: string): string[] {
 	const [r, g, b] = hexToRgb(color);
 	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`];
 }
-
-// Pressure, one byte per sample, under a private key.
-//
-// There is nowhere in the standard to put it: /InkList is a flat list of
-// coordinates with no per-point width, and no other annotation entry
-// carries one either. pdf-lib preserves dictionary entries it does not
-// understand and other readers ignore keys they do not know, so a private
-// dict is both safe and invisible. A byte per sample is plenty — a
-// thousandth of a unit of pressure is not worth the file size, and these
-// arrays are as long as the stroke is.
-const INKLING_EXTRAS = 'Inkling';
-const PRESSURE_KEY = 'P';
-
-// The text an annotation covers, under the same private key as pressure.
-//
-// /Contents is where the *user’s* note goes — that is the standard field,
-// and putting it there is why other PDF readers show it as a tooltip
-// instead of losing it. The quoted text cannot go there too: on read there
-// would be no way to tell which of the two a /Contents string was, and
-// guessing wrong turns a highlight of the book into a comment the user
-// never wrote.
-const QUOTE_KEY = 'Q';
 
 // Copies the fields every annotation kind shares into a dict being built.
 // The private extras dict is created lazily, so an annotation with neither

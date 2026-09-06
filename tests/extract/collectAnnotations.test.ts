@@ -1,6 +1,8 @@
-import { PDFDocument, PDFName, PDFString, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFHexString, PDFName, PDFString, StandardFonts } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { collectAnnotations } from '../../src/extract/extract';
+import { writeInklingAnnotations } from '../../src/pdf/annotationSync';
+import type { Annotation } from '../../src/annotate/types';
 
 // Fixtures are generated here rather than committed as binaries, the same
 // way the annotationSync tests do it, so the repo holds no opaque test data.
@@ -83,5 +85,106 @@ describe('collectAnnotations', () => {
 		const found = await collectAnnotations(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
 		expect(found).toHaveLength(1);
 		expect(found[0]?.note).toBe('look here');
+	});
+});
+
+describe('collectAnnotations, on Inkling’s own annotations', () => {
+	async function withInklingAnnotations(annotations: Annotation[], text = true): Promise<ArrayBuffer> {
+		const doc = await PDFDocument.create();
+		const page = doc.addPage([612, 792]);
+		if (text) {
+			const font = await doc.embedFont(StandardFonts.Helvetica);
+			page.drawText(TEXT, { x: 50, y: 700, size: 12, font });
+		}
+		writeInklingAnnotations(doc, 0, annotations);
+		const bytes = await doc.save();
+		return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+	}
+
+	const highlight: Annotation = {
+		id: 'ink-abc123',
+		kind: 'stroke',
+		tool: 'highlighter',
+		color: '#f08c00',
+		width: 12,
+		points: [{ x: 50, y: 706 }, { x: 200, y: 706 }],
+		note: 'my comment here',
+		quote: 'Chapter 1: Setting Up',
+	};
+
+	// pdf.js exposes no /NM at all, so every annotation used to read back as
+	// somebody else's however plainly it was ours — and the block reference
+	// in the extracted note was derived from a position rather than the id
+	// sitting in the file, so it changed whenever the annotation moved.
+	it('knows its own annotations from foreign ones, and keeps their ids', async () => {
+		const found = await collectAnnotations(await withInklingAnnotations([highlight]));
+		expect(found).toHaveLength(1);
+		expect(found[0]?.id).toBe('ink-abc123');
+		expect(found[0]?.foreign).toBe(false);
+	});
+
+	it('reads the comment back', async () => {
+		const found = await collectAnnotations(await withInklingAnnotations([highlight]));
+		expect(found[0]?.note).toBe('my comment here');
+	});
+
+	// The stored quote is why this works on a scan: there is no text layer to
+	// recover the words from, and there does not need to be.
+	it('recovers the stored quote from a page with no text at all', async () => {
+		const found = await collectAnnotations(await withInklingAnnotations([highlight], false));
+		expect(found).toHaveLength(1);
+		expect(found[0]?.quote).toBe('Chapter 1: Setting Up');
+	});
+
+	it('keeps a note annotation, whose text is the whole of it', async () => {
+		const note: Annotation = {
+			id: 'ink-note1',
+			kind: 'note',
+			color: '#e03131',
+			width: 3,
+			at: { x: 300, y: 300 },
+			note: 'a sticky note',
+		};
+		const found = await collectAnnotations(await withInklingAnnotations([note], false));
+		expect(found).toHaveLength(1);
+		expect(found[0]?.note).toBe('a sticky note');
+		expect(found[0]?.foreign).toBe(false);
+	});
+});
+
+describe('collectAnnotations, reading what other software wrote', () => {
+	// A literal (note) and a hex <6E6F7465> are the same value spelled two
+	// ways, and both are legal. Knowing only one loses every comment written
+	// by whichever tool prefers the other.
+	it('reads a comment stored as a hex string', async () => {
+		const doc = await PDFDocument.create();
+		const page = doc.addPage([612, 792]);
+		const dict = doc.context.obj({
+			Type: 'Annot',
+			Subtype: 'Text',
+			Rect: [40, 100, 60, 120],
+			Contents: PDFHexString.fromText('written in hex'),
+		});
+		page.node.set(PDFName.of('Annots'), doc.context.obj([doc.context.register(dict)]));
+		const bytes = await doc.save();
+		const found = await collectAnnotations(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+		expect(found).toHaveLength(1);
+		expect(found[0]?.note).toBe('written in hex');
+	});
+
+	it('reads a grey colour, which is one component rather than three', async () => {
+		const doc = await PDFDocument.create();
+		const page = doc.addPage([612, 792]);
+		const dict = doc.context.obj({
+			Type: 'Annot',
+			Subtype: 'Text',
+			Rect: [40, 100, 60, 120],
+			Contents: PDFString.of('grey'),
+			C: [0.5],
+		});
+		page.node.set(PDFName.of('Annots'), doc.context.obj([doc.context.register(dict)]));
+		const bytes = await doc.save();
+		const found = await collectAnnotations(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+		expect(found[0]?.color).toBe('#808080');
 	});
 });
