@@ -824,10 +824,31 @@ class InkBlockView {
 	// Any open editor on this note, not just the focused one — drawing on a
 	// canvas doesn't necessarily move focus to the note's editor, and a note
 	// can be open in a split alongside the one being looked at.
+	// The editor to save through, or null to go to the file instead.
+	//
+	// A view in reading mode is skipped, and that is not a nicety: an edit
+	// made through its editor is silently discarded. Measured in the running
+	// app — replaceRange on a reading-mode view changed the buffer, left
+	// `dirty` false, never reached disk, and was gone the moment the view
+	// re-synced from the file.
+	//
+	// That made this the worst kind of failure. The write did not throw, so
+	// the save counted itself a success, cleared the recovery entry that
+	// exists to survive a failed save, and left the ink on screen with
+	// nothing in the file — until the next re-render, which took it. Exactly
+	// the "it glitched and it was gone" this plugin already has one fix for;
+	// that fix addressed a save that could not find its block, and this is a
+	// save that finds it and writes somewhere that does not last.
+	//
+	// Live Preview reports 'source' here, the same as source mode, so only
+	// reading view takes the file path below — which is the path that works
+	// regardless of what is open.
 	private findOpenEditor() {
 		for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
 			const view = leaf.view;
-			if (view instanceof MarkdownView && view.file?.path === this.ctx.sourcePath) return view.editor;
+			if (!(view instanceof MarkdownView) || view.file?.path !== this.ctx.sourcePath) continue;
+			if (view.getMode() === 'preview') continue;
+			return view.editor;
 		}
 		return null;
 	}
