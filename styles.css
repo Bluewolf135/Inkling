@@ -295,15 +295,6 @@
 	transition: background-color 100ms ease, color 100ms ease;
 }
 
-/* The UA's own `[hidden] { display: none }` is a single attribute selector,
-   so the `display: flex` above beats it and a button hidden from script
-   (`addPageButton.hidden = ...`) stayed on screen — which is how "Add page"
-   turned up on imported PDFs, where there is no such thing as adding a
-   template page. Restated here at a specificity that wins. */
-.inkling-toolbar .inkling-tool-button[hidden] {
-	display: none;
-}
-
 .inkling-toolbar .inkling-tool-button:hover:not(:disabled) {
 	background-color: var(--background-modifier-hover);
 	color: var(--text-normal);
@@ -859,19 +850,6 @@
 	background-color: var(--background-secondary);
 }
 
-/* The handle is only offered while the block's tool strip is open, so a
-   note being read has no drag target sitting between each block and the
-   prose under it — dragging to scroll used to catch it and stretch the
-   block instead of moving the page.
-
-   Restated here rather than left to the `hidden` attribute alone, at a
-   specificity that wins: the rule above sets `display: flex`, and an author
-   rule beats the browser's own `[hidden] { display: none }` however the
-   attribute is set. Exactly the same trap as the tool buttons above. */
-.inkling-ink-block-handle[hidden] {
-	display: none;
-}
-
 .inkling-ink-block-handle:hover {
 	background-color: var(--background-modifier-hover);
 }
@@ -929,4 +907,29 @@
 .inkling-create-note-modal .setting-item:first-child {
 	border-top: none;
 	padding-top: 0;
+}
+
+/* Anything of ours hidden from script actually hides.
+   ==================================================
+
+   The browser's own `[hidden] { display: none }` lives in the user-agent
+   stylesheet, which every author rule outranks — so any element here that
+   sets `display` stayed on screen when script set `hidden` on it, with no
+   error and nothing to see in the markup but an attribute that plainly
+   should have worked.
+
+   It caught three separate things before being recognised as one: "Add
+   page" showing on imported PDFs where there is no template page to add;
+   the ink block's resize handle staying draggable so that scrolling a note
+   stretched the block; and the outline panel sitting permanently above the
+   first page of every PDF, with its toolbar button appearing to do nothing.
+   The toolbar's colour and width groups were the same, so collapsing the
+   strip never really collapsed it.
+
+   One rule instead of one per element, matched on the class prefix every
+   element here carries. Two attribute selectors outrank the single-class
+   `display` rules above, and it sits at the end of the file so it also wins
+   any tie on source order — which is why it must stay last. */
+[class*='inkling-'][hidden] {
+	display: none;
 }
