@@ -1,5 +1,8 @@
 import { getDocument, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
-import { PRESET_COLORS } from '../annotate';
+// From types, not the '../annotate' barrel: the barrel re-exports the
+// toolbar, which imports the Obsidian API, and pulling that in here made
+// this module — the whole of PDF reading — impossible to test in Node.
+import { PRESET_COLORS } from '../annotate/types';
 import { groupIntoLines, quoteBetween, type PositionedBox } from '../pdf/textLines';
 import type { ExtractedAnnotation } from './extractFormat';
 
@@ -52,9 +55,60 @@ interface RawAnnotation {
 	id?: unknown;
 	subtype?: unknown;
 	rect?: unknown;
+	// pdf.js hands back /Contents as `contentsObj: { str, dir }`, not as a
+	// `contents` string. Reading the string that was never there meant every
+	// comment extracted as empty — and a note annotation, whose text is the
+	// whole of it, was then dropped by the guard below for having neither a
+	// quote nor a note. `contents` is kept as a fallback and read second,
+	// since it costs nothing and this is a pinned dependency we do not
+	// control the shape of.
+	contentsObj?: unknown;
 	contents?: unknown;
 	color?: unknown;
 	annotationName?: unknown;
+}
+
+// Annotations a person added to mark up the document, which is the PDF
+// specification's own distinction (a "markup annotation", ISO 32000-1
+// table 171) and exactly the line extraction wants.
+//
+// Everything outside this set is furniture rather than markup: /Link most
+// of all. A link's rectangle sits directly on the text it links from, and
+// since a quote is recovered from the words under a rectangle, every entry
+// in a table of contents came back looking precisely like a highlight of
+// its own chapter title. Measured on the book that prompted this: 195
+// pages, 201 link annotations, 0 of them anybody's highlight, and an
+// annotations note with 207 entries in it.
+//
+// /Widget (form fields) and /Popup (the box attached to another
+// annotation, whose text belongs to its parent) are excluded for the same
+// reason.
+const MARKUP_SUBTYPES: ReadonlySet<string> = new Set([
+	'Text',
+	'FreeText',
+	'Line',
+	'Square',
+	'Circle',
+	'Polygon',
+	'PolyLine',
+	'Highlight',
+	'Underline',
+	'Squiggly',
+	'StrikeOut',
+	'Stamp',
+	'Caret',
+	'Ink',
+	'FileAttachment',
+	'Redact',
+]);
+
+function contentsOf(raw: RawAnnotation): string {
+	const obj = raw.contentsObj;
+	if (typeof obj === 'object' && obj !== null) {
+		const str = (obj as { str?: unknown }).str;
+		if (typeof str === 'string') return str.trim();
+	}
+	return typeof raw.contents === 'string' ? raw.contents.trim() : '';
 }
 
 function rectOf(raw: RawAnnotation): { minX: number; minY: number; maxX: number; maxY: number } | null {
@@ -133,12 +187,14 @@ export async function collectAnnotations(bytes: ArrayBuffer, options: CollectOpt
 			const lines = await pageLines(page);
 
 			for (const annotation of raw) {
+				if (!MARKUP_SUBTYPES.has(String(annotation.subtype))) continue;
+
 				const rect = rectOf(annotation);
 				if (!rect) continue;
 
 				const name = typeof annotation.annotationName === 'string' ? annotation.annotationName : '';
 				const foreign = !name.startsWith(ID_PREFIX);
-				const note = typeof annotation.contents === 'string' ? annotation.contents.trim() : '';
+				const note = contentsOf(annotation);
 				const quote = quoteUnder(lines, rect);
 
 				// A pen doodle in a margin is not a note. Including every
