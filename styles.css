@@ -755,6 +755,17 @@
 	transition: background-color 100ms ease, color 100ms ease;
 }
 
+/* Sized in absolute units on purpose. The icon is drawn by the plugin
+   itself (see drawPencil in src/markdown/inkBlock.ts) rather than taken
+   from the host's set, so nothing about it should depend on a theme
+   variable resolving — including its size. */
+.inkling-ink-block .inkling-ink-block-toggle .inkling-block-toggle-icon {
+	display: block;
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
 /* Showing its label instead of an icon, because the host app's icon set
    did not have the one asked for — see src/icon.ts. The square above is
    sized for a 16px glyph and has no padding, so the word would have been

@@ -10,7 +10,6 @@ import {
 	type Annotation,
 } from '../annotate';
 import { createId } from '../annotate/id';
-import { setIconOrText } from '../icon';
 import {
 	INK_BLOCK_LANGUAGE,
 	InkBlockData,
@@ -137,6 +136,38 @@ const SURFACE_RELEASE_MARGIN = '1200px 0px';
 // meant to outlive one cannot live on it. Keyed by note path and block
 // id, so two blocks — or two notes — cannot collide.
 const unsavedInk = new Map<string, InkBlockData>();
+
+// The pencil on the block's tool toggle, drawn here rather than asked for
+// from the host.
+//
+// This button lost its icon twice on a phone — first pencil-ruler, then
+// pen-tool — while every icon in the tool strip beside it drew correctly.
+// The icon set belongs to Obsidian, it is not the same on mobile as on
+// desktop, and a plugin has no way to ask which names a given build knows:
+// setIcon leaves an empty <svg> for one it does not, which is a blank
+// button and no error. Guessing at a name old enough to be safe is a guess
+// that can only be checked by shipping it to a device.
+//
+// Two paths cost nothing and cannot go missing. Shaped and styled like a
+// Lucide glyph — stroke, round caps, currentColor — so it still sits with
+// the rest of the app's chrome, and sized in the stylesheet in absolute
+// units so no theme variable can collapse it either.
+function drawPencil(host: HTMLElement): void {
+	const svg = host.createSvg('svg', {
+		cls: 'inkling-block-toggle-icon',
+		attr: {
+			viewBox: '0 0 24 24',
+			fill: 'none',
+			stroke: 'currentColor',
+			'stroke-width': '2',
+			'stroke-linecap': 'round',
+			'stroke-linejoin': 'round',
+			'aria-hidden': 'true',
+		},
+	});
+	svg.createSvg('path', { attr: { d: 'M12 20h9' } });
+	svg.createSvg('path', { attr: { d: 'M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z' } });
+}
 
 function recoveryKey(sourcePath: string, blockId: string): string {
 	return `${sourcePath}::${blockId}`;
@@ -355,13 +386,7 @@ class InkBlockView {
 		// piece of the note's own content rather than plugin chrome.
 		const toggle = this.toolbarHost.createEl('button', { cls: 'inkling-ink-block-toggle' });
 		toggle.type = 'button';
-		// pen-tool rather than pencil-ruler: the icon set belongs to the host
-		// app, and a phone running an older Obsidian simply does not have the
-		// newer name — reported as a blank button, with every other icon in the
-		// strip drawing fine, which is what narrowed it to this one. pen-tool
-		// has been in the set far longer, and the label below covers whatever
-		// this build turns out not to know.
-		setIconOrText(toggle, 'pen-tool', 'Tools');
+		drawPencil(toggle);
 		setTooltip(toggle, 'Show drawing tools');
 		toggle.setAttribute('aria-label', 'Show drawing tools');
 		// Stated up front rather than left to setOpen below, which no-ops
