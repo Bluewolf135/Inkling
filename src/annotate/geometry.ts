@@ -216,3 +216,45 @@ export function clampPointToBounds(point: Point, width: number, height: number):
 	if (x === point.x && y === point.y) return point;
 	return point.p === undefined ? { x, y } : { x, y, p: point.p };
 }
+
+// Limits a move so the selection stays on the page.
+//
+// The selection's own edges are what have to stay put, not the pointer.
+// Clamping the pointer instead — which is what drawing does, where the
+// pointer *is* the ink — would stop a selection short of the edge by
+// however far from its corner you happened to grab it, and would feel like
+// the drag sticking for no reason.
+//
+// A selection larger than the page cannot be kept inside one, so the rule
+// there becomes "do not make it worse": the two limits cross over, and the
+// range between them is what is left to move within.
+export function clampTranslation(
+	box: Rect,
+	dx: number,
+	dy: number,
+	width: number,
+	height: number,
+): { dx: number; dy: number } {
+	const limit = (delta: number, low: number, high: number): number =>
+		Math.min(Math.max(delta, Math.min(low, high)), Math.max(low, high));
+
+	return {
+		dx: limit(dx, -box.minX, width - box.maxX),
+		dy: limit(dy, -box.minY, height - box.maxY),
+	};
+}
+
+// Pulls a rectangle inside a surface, edge by edge — the resize counterpart
+// to clampTranslation. Each edge is clamped on its own rather than the
+// whole rectangle being shifted, because a resize is meant to change the
+// shape: the handle being dragged should stop at the edge while the corner
+// opposite it stays exactly where it was.
+export function clampRectToBounds(rect: Rect, width: number, height: number): Rect {
+	const clamp = (value: number, max: number): number => Math.min(Math.max(value, 0), max);
+	return {
+		minX: clamp(rect.minX, width),
+		minY: clamp(rect.minY, height),
+		maxX: clamp(rect.maxX, width),
+		maxY: clamp(rect.maxY, height),
+	};
+}

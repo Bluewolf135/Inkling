@@ -2,6 +2,8 @@ import { eraseAt } from './eraser';
 import {
 	boundingBox,
 	clampPointToBounds,
+	clampRectToBounds,
+	clampTranslation,
 	distance,
 	hitTestAnnotation,
 	normalizeRect,
@@ -58,7 +60,11 @@ type DragMode =
 	| { kind: 'shape'; tool: ShapeToolType; start: Point; end: Point }
 	| { kind: 'erase'; before: Annotation[] }
 	| { kind: 'lasso'; points: Point[] }
-	| { kind: 'move'; before: Annotation[]; ids: string[]; origin: Point }
+	// `box` is the selection's bounds at the moment the drag began, held so
+	// every move can be limited against them without recomputing the union
+	// of every selected annotation on each pointer sample. Resize carries
+	// one for the same reason.
+	| { kind: 'move'; before: Annotation[]; ids: string[]; origin: Point; box: Rect }
 	| { kind: 'resize'; before: Annotation[]; ids: string[]; box: Rect; handle: HandleName };
 
 interface PageMount {
@@ -680,9 +686,16 @@ export class AnnotationController {
 				this.selection = { pageNumber, ids: new Set([hit.id]) };
 				this.notify();
 			}
+			const moving = [...this.selection.ids];
 			this.drag = {
 				pageNumber,
-				mode: { kind: 'move', before: annotations, ids: [...this.selection.ids], origin: point },
+				mode: {
+					kind: 'move',
+					before: annotations,
+					ids: moving,
+					origin: point,
+					box: unionBoundingBox(annotations.filter((a) => moving.includes(a.id)).map(boundingBox)),
+				},
 			};
 			return;
 		}
@@ -704,6 +717,21 @@ export class AnnotationController {
 	// coordinates through the canvas's displayed size to its backing store,
 	// so a zoomed or stretched surface is already accounted for by the time
 	// a point arrives here.
+	// The two clamps a selection needs, against the same bounds drawing uses.
+	// Both no-op when the page is not mounted, since there is then nothing to
+	// measure against and refusing to move would be worse than not clamping.
+	private clampMove(pageNumber: number, box: Rect, dx: number, dy: number): { dx: number; dy: number } {
+		const mount = this.pages.get(pageNumber);
+		if (!mount) return { dx, dy };
+		return clampTranslation(box, dx, dy, mount.base.canvas.width, mount.base.canvas.height);
+	}
+
+	private clampRect(pageNumber: number, rect: Rect): Rect {
+		const mount = this.pages.get(pageNumber);
+		if (!mount) return rect;
+		return clampRectToBounds(rect, mount.base.canvas.width, mount.base.canvas.height);
+	}
+
 	private clampToPage(pageNumber: number, point: Point): Point {
 		const mount = this.pages.get(pageNumber);
 		if (!mount) return point;
@@ -742,14 +770,23 @@ export class AnnotationController {
 				this.redrawOverlay(pageNumber);
 				break;
 			case 'move': {
-				const dx = point.x - mode.origin.x;
-				const dy = point.y - mode.origin.y;
+				// Limited by where the selection would end up, not by where
+				// the pointer is: see clampTranslation. Dragging a selection
+				// off the page used to leave it there, invisible only because
+				// a canvas discards what falls off it — the same way drawing
+				// off the edge did before it was clamped.
+				const { dx, dy } = this.clampMove(
+					pageNumber,
+					mode.box,
+					point.x - mode.origin.x,
+					point.y - mode.origin.y,
+				);
 				const next = mode.before.map((a) => (mode.ids.includes(a.id) ? translateAnnotation(a, dx, dy) : a));
 				this.store.setPageLive(pageNumber, next);
 				break;
 			}
 			case 'resize': {
-				const to = resizeRect(mode.box, mode.handle, point);
+				const to = this.clampRect(pageNumber, resizeRect(mode.box, mode.handle, point));
 				const next = mode.before.map((a) => (mode.ids.includes(a.id) ? scaleAnnotation(a, mode.box, to) : a));
 				this.store.setPageLive(pageNumber, next);
 				break;

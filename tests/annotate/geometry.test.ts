@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	boundingBox,
 	clampPointToBounds,
+	clampRectToBounds,
+	clampTranslation,
 	distanceToSegment,
 	hitTestAnnotation,
 	normalizeRect,
@@ -221,5 +223,59 @@ describe('clampPointToBounds', () => {
 	it('leaves a point exactly on the edge alone', () => {
 		const point = { x: 800, y: 450 };
 		expect(clampPointToBounds(point, 800, 450)).toBe(point);
+	});
+});
+
+describe('clampTranslation', () => {
+	const box = { minX: 100, minY: 100, maxX: 300, maxY: 200 };
+
+	it('leaves a move that stays inside alone', () => {
+		expect(clampTranslation(box, 50, 20, 800, 450)).toEqual({ dx: 50, dy: 20 });
+	});
+
+	// The selection's own edges are what must stay on the page, not the
+	// pointer — clamping the pointer instead would stop a selection short
+	// whenever it was grabbed anywhere but its corner.
+	it('stops a selection at the right edge rather than the pointer', () => {
+		expect(clampTranslation(box, 900, 0, 800, 450).dx).toBe(500);
+	});
+
+	it('stops a selection at the left edge', () => {
+		expect(clampTranslation(box, -400, 0, 800, 450).dx).toBe(-100);
+	});
+
+	it('stops a selection at the top and bottom', () => {
+		expect(clampTranslation(box, 0, -400, 800, 450).dy).toBe(-100);
+		expect(clampTranslation(box, 0, 900, 800, 450).dy).toBe(250);
+	});
+
+	// Nothing can keep a selection bigger than the page inside it, so the
+	// rule becomes "do not make it worse" rather than an impossible one.
+	it('still allows a selection larger than the page to be nudged', () => {
+		const huge = { minX: -50, minY: -50, maxX: 850, maxY: 500 };
+		const { dx } = clampTranslation(huge, 500, 0, 800, 450);
+		expect(dx).toBeLessThanOrEqual(50);
+		expect(dx).toBeGreaterThanOrEqual(-50);
+	});
+});
+
+describe('clampRectToBounds', () => {
+	it('leaves a rect that is already inside alone', () => {
+		const rect = { minX: 10, minY: 20, maxX: 100, maxY: 200 };
+		expect(clampRectToBounds(rect, 800, 450)).toEqual(rect);
+	});
+
+	it('pulls every edge back onto the page', () => {
+		expect(clampRectToBounds({ minX: -30, minY: -40, maxX: 900, maxY: 600 }, 800, 450)).toEqual({
+			minX: 0,
+			minY: 0,
+			maxX: 800,
+			maxY: 450,
+		});
+	});
+
+	it('leaves a rect touching the edges exactly alone', () => {
+		const rect = { minX: 0, minY: 0, maxX: 800, maxY: 450 };
+		expect(clampRectToBounds(rect, 800, 450)).toEqual(rect);
 	});
 });
