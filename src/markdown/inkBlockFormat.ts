@@ -245,11 +245,56 @@ export function parseInkBlock(source: string): ParseResult {
 	return { data: { version, id, width, height, annotations }, malformed: droppedAny || fromFuture };
 }
 
+// The exact opening this module writes: a version, then an id holding
+// nothing that needs an escape, then the width. Matching all three is what
+// makes the shortcut below safe — it identifies a block written by
+// serializeInkBlock rather than one that merely happens to start with an id.
+//
+// Whitespace is tolerated throughout because the stored JSON is wrapped and
+// a wrap point can fall between any two of these tokens.
+const WRITTEN_BLOCK_ID = /^\s*\{\s*"version"\s*:\s*-?\d+(?:\.\d+)?\s*,\s*"id"\s*:\s*"([^"\\]+)"\s*,\s*"width"\s*:/;
+
 // The block's identity, read without parsing the rest of it — used when a
 // save has to confirm the fence it is about to overwrite is its own and not
 // a neighbour's. Returns null for anything unreadable, which the caller
 // treats as "can't confirm", never as "matches".
+//
+// "Without parsing the rest of it" was the intent from the start and not what
+// this did: it ran a full JSON.parse to read one short string sitting at the
+// front of the body. A save calls this once per block in the note, so on the
+// largest note in the vault it cost 4.92 ms per save to look at a megabyte of
+// stroke data none of it needed.
+//
+// The front is now read directly for a block shaped the way this module
+// writes them; anything else falls back to the parse. The fallback is what
+// keeps this correct rather than merely fast — the pattern is an optimisation
+// for a known shape, never an assumption that a block has it.
+//
+// One case is deliberately out of contract: a hand-edited block carrying a
+// second top-level "id" later in the body. JSON says the last one wins and
+// the pattern reads the first. Detecting that would mean scanning the whole
+// body, which is the cost being removed. It is safe because of how the
+// answer is used — a save looks for a fence whose id equals its own, this
+// block's own id came from a full parse, so a disagreement makes the save
+// find nothing and refuse, which keeps the ink. It cannot make a save
+// overwrite the wrong fence.
+function writtenBlockId(source: string): string | null {
+	const written = WRITTEN_BLOCK_ID.exec(source);
+	return written ? written[1] ?? null : null;
+}
+
+// How many of a block's lines have to be in hand before its id can be read.
+//
+// The id sits in the first fifty characters of the body and lines wrap at
+// 120, so one is almost always enough; a few more cost nothing and cover a
+// wrap falling somewhere awkward. This is what lets findInkBlockById skip
+// building the rest of the body at all.
+const ID_HEAD_LINES = 4;
+
 export function readInkBlockId(source: string): string | null {
+	const written = writtenBlockId(source);
+	if (written !== null) return written;
+
 	try {
 		const parsed: unknown = JSON.parse(source.trim());
 		if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
@@ -277,6 +322,21 @@ const COORDINATE_DECIMALS = 1;
 const PRESSURE_DECIMALS = 2;
 
 function round(value: number, decimals: number): number {
+	// Most of what this is asked to round is already rounded: a save
+	// re-serializes the whole block, and everything in it that came from the
+	// file was written at this precision in the first place. Multiplying out
+	// and back is exact for those and skips the string formatting, which was
+	// 40% of the time spent serializing the largest block in the vault.
+	//
+	// Only a value that is *not* already at this precision goes the slow way,
+	// and it must, because the two disagree on halfway cases — 0.15 rounds to
+	// 0.1 through toFixed and 0.2 through multiplication, and 10 coordinates
+	// in the vault land on such a case. This keeps toFixed's answer
+	// everywhere and merely stops asking for it when the answer cannot differ.
+	const factor = decimals === 1 ? 10 : 100;
+	const scaled = Math.round(value * factor) / factor;
+	if (scaled === value) return value;
+
 	// The unary + drops a trailing ".0", which toFixed would otherwise
 	// keep and JSON.stringify would faithfully write out.
 	return +value.toFixed(decimals);
@@ -474,8 +534,18 @@ export function findInkBlockById(lines: readonly string[], blockId: string): Ink
 		while (close < lines.length && !isClosingFence(lines[close])) close++;
 		if (close >= lines.length) return null;
 
-		const body = lines.slice(index + 1, close).join('\n');
-		if (readInkBlockId(body) === blockId) return { lineStart: index, lineEnd: close };
+		// The id is read off the first few lines rather than by assembling the
+		// whole block. Joining every body in the note to look at the front of
+		// each was most of what this cost: on the largest note in the vault
+		// that built the better part of a megabyte of strings per save, all
+		// of it discarded immediately.
+		//
+		// A block this module did not write falls back to the full body, and
+		// so keeps its previous behaviour exactly.
+		const head = lines.slice(index + 1, Math.min(close, index + 1 + ID_HEAD_LINES)).join('\n');
+		const fromHead = writtenBlockId(head);
+		const id = fromHead ?? readInkBlockId(lines.slice(index + 1, close).join('\n'));
+		if (id === blockId) return { lineStart: index, lineEnd: close };
 
 		// Resume past this block's closing fence, so its contents can't be
 		// mistaken for the start of another one.

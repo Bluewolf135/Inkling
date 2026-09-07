@@ -84,6 +84,8 @@ export interface TestNote {
 	setContents(next: string): void;
 	/** Saves that went into the editor while it was in reading view. */
 	discardedEditorWrites(): number;
+	/** How many times the save path read the note one line at a time. */
+	getLineCalls(): number;
 	/** Everything the plugin has told the user, in order. */
 	notices(): readonly string[];
 }
@@ -142,6 +144,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 	// Writes that reached the editor while it was in reading view, and so
 	// went nowhere. Any number above zero is the bug.
 	let discardedEditorWrites = 0;
+	let getLineCalls = 0;
 	const file = new TFile(path);
 
 	const vault = {
@@ -169,7 +172,14 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 	// write would make that bug invisible here, exactly as it was in the app.
 	const editor = {
 		lineCount: () => contents.split('\n').length,
-		getLine: (line: number) => contents.split('\n')[line] ?? '',
+		// Counted, because reading a note one line at a time is a real cost
+		// that grew 19-fold when stored JSON started wrapping, and it is
+		// exactly the kind of regression that comes back silently.
+		getLine: (line: number) => {
+			getLineCalls += 1;
+			return contents.split('\n')[line] ?? '';
+		},
+		getValue: () => contents,
 		replaceRange: (
 			text: string,
 			from: { line: number; ch: number },
@@ -289,6 +299,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 			contents = next;
 		},
 		discardedEditorWrites: () => discardedEditorWrites,
+		getLineCalls: () => getLineCalls,
 		notices: () => notices,
 	};
 }

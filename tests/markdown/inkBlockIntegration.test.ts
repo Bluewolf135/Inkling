@@ -230,3 +230,23 @@ describe('the drawing surface', () => {
 		expect(hasCapturedPointer(overlay)).toBe(false);
 	});
 });
+
+describe('the cost of a save', () => {
+	beforeEach(() => {
+		note = mountNote({ blocks: [{ id: 'ink-cost' }], openInEditor: true });
+	});
+
+	// Not a micro-optimisation for its own sake. Stored JSON wraps at 120
+	// characters, which took the largest note in the vault from 409 lines to
+	// 7,788 — and a save that reads the document a line at a time pays a tree
+	// lookup and a string slice for every one of them, on the main thread,
+	// while the pen is still moving.
+	it('reads the note in one call rather than line by line', async () => {
+		note.block(0).openForEditing();
+		note.block(0).drawStroke(STROKE);
+		await note.flushWrites();
+
+		expect(note.strokeCountIn(0)).toBe(1);
+		expect(note.getLineCalls()).toBe(0);
+	});
+});

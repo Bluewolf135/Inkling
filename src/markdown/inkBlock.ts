@@ -757,9 +757,12 @@ class InkBlockView {
 			// working in — one undo step, no external-modification reload,
 			// and no fight with unsaved changes the editor hasn’t flushed to
 			// disk yet.
-			const lineCount = editor.lineCount();
-			const lines: string[] = [];
-			for (let line = 0; line < lineCount; line++) lines.push(editor.getLine(line));
+			// One call, not one per line. Reading the document a line at a
+			// time costs a tree lookup and a string slice apiece, which was
+			// tolerable at 409 lines and is not at 7,788 — the count on the
+			// largest note in the vault once stored JSON began wrapping. This
+			// runs on the main thread while the pen is still moving.
+			const lines = editor.getValue().split('\n');
 
 			const range = this.locate(lines);
 			if (!range) {
