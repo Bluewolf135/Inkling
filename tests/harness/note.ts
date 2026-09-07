@@ -46,6 +46,10 @@ function fenceBodies(contents: string): string[] {
 
 export interface MountedBlock {
 	el: HTMLElement;
+	/** Whether this block currently has its drawing canvases attached. */
+	isMounted(): boolean;
+	/** Report this block visible, as an IntersectionObserver eventually would. */
+	reveal(): void;
 	/**
 	 * Clicks the block's pencil toggle, which is the only thing that opens
 	 * a block to ink — a block nobody has asked to edit refuses it, so that
@@ -105,6 +109,16 @@ export interface MountNoteOptions {
 	/** Reading view reports 'preview'; Live Preview and source both report 'source'. */
 	mode?: 'source' | 'preview';
 	/**
+	 * Whether an IntersectionObserver reports back before the test looks.
+	 *
+	 * A real one never does: its callback is delivered after layout, on a
+	 * later frame. The default here fires immediately because most tests only
+	 * want a mounted surface to draw on, but a block being rebuilt after its
+	 * own save is precisely the case where that frame is visible to the user,
+	 * so it has to be possible to model the wait.
+	 */
+	deferIntersection?: boolean;
+	/**
 	 * The plugin-wide tool. Defaults to the pen: the shared default is
 	 * 'select', which suits a PDF opened to be read, and a surface built to
 	 * be drawn on in a test wants a pen — leaving it unset is how the first
@@ -126,7 +140,7 @@ function defaultContents(blocks: { id?: string }[], width: number, height: numbe
 
 export function mountNote(options: MountNoteOptions = {}): TestNote {
 	installSurfaceStubs();
-	installNoteStubs();
+	installNoteStubs(options.deferIntersection ?? false);
 	resetObsidianStubs();
 
 	// Only the timers inkBlock.ts schedules writes on. Leaving
@@ -305,15 +319,27 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 }
 
 function makeMountedBlock(el: HTMLElement, width: number, height: number): MountedBlock {
-	const canvases = Array.from(el.querySelectorAll('canvas'));
-	// The surface reports its displayed size as its backing size, so a test
-	// works in stored units and no scale sits in the way.
-	for (const canvas of canvases) {
-		canvas.getBoundingClientRect = () => ({
-			x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}),
-		});
-	}
-	const overlay = canvases[1];
+	let canvases: HTMLCanvasElement[] = [];
+	let overlay: HTMLCanvasElement | undefined;
+
+	// Re-read the canvases, which do not exist until the block mounts.
+	const refresh = (): void => {
+		canvases = Array.from(el.querySelectorAll('canvas'));
+		sizeCanvases();
+		overlay = canvases[1];
+	};
+
+	const sizeCanvases = (): void => {
+		// The surface reports its displayed size as its backing size, so a test
+		// works in stored units and no scale sits in the way.
+		for (const canvas of canvases) {
+			canvas.getBoundingClientRect = () => ({
+				x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}),
+			});
+		}
+	};
+
+	refresh();
 	const toggle = el.querySelector<HTMLButtonElement>('.inkling-ink-block-toggle');
 
 	const pointer = (type: string, x: number, y: number, opts: PointerOptions = {}): void => {
@@ -323,6 +349,11 @@ function makeMountedBlock(el: HTMLElement, width: number, height: number): Mount
 
 	return {
 		el,
+		isMounted: () => el.querySelectorAll('canvas').length > 0,
+		reveal: () => {
+			revealElement(el);
+			refresh();
+		},
 		pointer,
 		openForEditing: () => {
 			if (!toggle) throw new Error('this ink block rendered no edit toggle');
@@ -340,24 +371,44 @@ function makeMountedBlock(el: HTMLElement, width: number, height: number): Mount
 	};
 }
 
+let deferIntersection = false;
+
+// Every live observer, so a test can report a block visible at the moment it
+// chooses rather than only at the moment it was observed.
+const observed: { callback: (entries: { isIntersecting: boolean; target: Element }[]) => void; target: Element }[] = [];
+
+function revealElement(el: Element): void {
+	for (const entry of observed) {
+		if (entry.target === el || el.contains(entry.target)) {
+			entry.callback([{ isIntersecting: true, target: entry.target }]);
+		}
+	}
+}
+
 // jsdom has no IntersectionObserver, and inkBlock.ts will not mount a
 // block's canvases without one. Reporting an immediate intersection is the
 // right default: a test that has gone to the trouble of mounting a note is
 // asking about a block on screen.
-function installNoteStubs(): void {
+function installNoteStubs(defer: boolean): void {
 	const scope = globalThis as unknown as Record<string, unknown>;
+	deferIntersection = defer;
 	if (scope.IntersectionObserver) return;
 
 	class StubIntersectionObserver {
 		constructor(private readonly callback: (entries: { isIntersecting: boolean; target: Element }[]) => void) {}
 		observe(target: Element): void {
+			observed.push({ callback: this.callback, target });
+			// A real observer delivers this after layout, on a later frame.
+			if (deferIntersection) return;
 			this.callback([{ isIntersecting: true, target }]);
 		}
 		unobserve(): void {
 			// Nothing held to release.
 		}
 		disconnect(): void {
-			// Nothing held to release.
+			for (let i = observed.length - 1; i >= 0; i--) {
+				if (observed[i]?.callback === this.callback) observed.splice(i, 1);
+			}
 		}
 		takeRecords(): [] {
 			return [];

@@ -173,6 +173,54 @@ function recoveryKey(sourcePath: string, blockId: string): string {
 	return `${sourcePath}::${blockId}`;
 }
 
+// Blocks whose canvases were attached a moment ago, by note path and block id.
+//
+// This exists for one case: a block rebuilt by its own save. Saving rewrites
+// the fence, Obsidian re-renders that section, and the block is destroyed and
+// rebuilt about a second after the pen comes up — which is already why the
+// tool strip, the undo history and the note's scroll position are all kept
+// outside the view that owns them.
+//
+// The rebuilt block is created at full size, because the aspect ratio holds
+// the space, but its canvases wait on an IntersectionObserver reporting it
+// visible, and that report comes a frame or more later. For that window the
+// block is correctly sized and completely empty, so the ink disappears and
+// comes back: the flash people notice after writing, and worse on a tablet,
+// where a higher pixel ratio makes the canvases slower to attach.
+//
+// Deferring is right for every other block — a note holding thirty-nine of
+// them must not allocate seventy-eight canvases to be scrolled past — and
+// wrong only for the one the user is drawing in, which is certainly on screen
+// because they are looking at it.
+const recentlyMounted = new Map<string, number>();
+
+// Long enough to cover the write debounce and the re-render it causes, short
+// enough that a block scrolled away from and returned to still gets the
+// ordinary deferred treatment.
+const REMOUNT_WINDOW_MS = 5000;
+
+// Bounded like the retained histories above, and for the same reason.
+const MAX_RECENTLY_MOUNTED = 32;
+
+function markRecentlyMounted(key: string): void {
+	// Deleted first so re-setting moves it to the end, which is what makes
+	// the eviction below drop the least recently mounted.
+	recentlyMounted.delete(key);
+	recentlyMounted.set(key, Date.now());
+	if (recentlyMounted.size > MAX_RECENTLY_MOUNTED) {
+		const oldest = recentlyMounted.keys().next().value;
+		if (oldest !== undefined) recentlyMounted.delete(oldest);
+	}
+}
+
+function wasRecentlyMounted(key: string): boolean {
+	const at = recentlyMounted.get(key);
+	if (at === undefined) return false;
+	if (Date.now() - at <= REMOUNT_WINDOW_MS) return true;
+	recentlyMounted.delete(key);
+	return false;
+}
+
 // How much sharper than its stored size a block canvas should be backed,
 // given the element it has to fill and the screen it is on.
 function surfaceScale(containerEl: HTMLElement, storedWidth: number): number {
@@ -588,6 +636,11 @@ class InkBlockView {
 	private watchVisibility(): void {
 		let framesLeft = 5;
 
+		// Whether this is a block coming straight back from its own save. See
+		// recentlyMounted: it is the one case where waiting to be told the
+		// block is visible shows the user an empty block instead of their ink.
+		const remounting = wasRecentlyMounted(recoveryKey(this.ctx.sourcePath, this.blockId));
+
 		const start = (): void => {
 			if (this.detached) return;
 
@@ -602,6 +655,13 @@ class InkBlockView {
 			this.watchHandle = null;
 
 			const root = findScrollParent(this.surfaceEl);
+
+			// Straight back on screen, without waiting for the observer's first
+			// report. Guarded on a measurable width because that is what
+			// mountSurface scales the canvases by: a block inside a folded
+			// section measures zero, and mounting it now would back it at the
+			// stored size and leave it there. Those wait, as they always did.
+			if (remounting && this.surfaceEl.clientWidth > 0) this.mountSurface();
 
 			// Two observers rather than one, because mounting and releasing
 			// happen at different distances and a single observer only has
@@ -625,6 +685,12 @@ class InkBlockView {
 			}
 		};
 
+		// A remount skips the frame's wait entirely when the element is
+		// already in the document, which on a re-render it usually is.
+		if (remounting && this.surfaceEl.isConnected) {
+			start();
+			return;
+		}
 		this.watchHandle = window.requestAnimationFrame(start);
 	}
 
@@ -667,6 +733,7 @@ class InkBlockView {
 			this.retained.history.clear();
 		}
 		this.retained.scale = this.scale;
+		markRecentlyMounted(recoveryKey(this.ctx.sourcePath, this.blockId));
 	}
 
 	private releaseSurface(): void {

@@ -119,6 +119,10 @@ const capturedPointers = new WeakMap<Element, Set<number>>();
 const captureHolders = new Map<number, Element>();
 let releaseInstalled = false;
 
+// The width every element reports in the absence of real layout. Matches the
+// default stored block width, so the canvas scale works out to exactly 1.
+const LAYOUT_WIDTH = 800;
+
 /** Whether `el` currently holds pointer capture for `pointerId`. */
 export function hasCapturedPointer(el: Element, pointerId = 1): boolean {
 	return capturedPointers.get(el)?.has(pointerId) ?? false;
@@ -233,6 +237,26 @@ export function installSurfaceStubs(): void {
 		};
 		document.addEventListener('pointerup', release);
 		document.addEventListener('pointercancel', release);
+	}
+
+	// jsdom performs no layout, so every element reports a clientWidth of
+	// zero. The plugin measures that width to decide how sharply to back a
+	// block's canvases, and treats zero as "not in the layout yet" — so
+	// without this the harness silently exercises only the not-yet-measurable
+	// path, and any behaviour that depends on knowing the block's width
+	// cannot be tested at all.
+	//
+	// 800 matches the default stored block width, which keeps the scale at
+	// exactly 1 and leaves every existing test working in stored units.
+	if (!Object.getOwnPropertyDescriptor(HTMLElement.prototype, '__inkLayoutWidth')) {
+		Object.defineProperty(HTMLElement.prototype, '__inkLayoutWidth', { value: true });
+		Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+			configurable: true,
+			get(this: HTMLElement): number {
+				const override = (this as unknown as { __clientWidth?: number }).__clientWidth;
+				return override ?? LAYOUT_WIDTH;
+			},
+		});
 	}
 
 	// Obsidian puts these in the global scope as well as on Element, and
