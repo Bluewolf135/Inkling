@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findInkBlockById, readInkBlockId, serializeInkBlock } from '../../src/markdown/inkBlockFormat';
+import { findInkBlockById, parseInkBlock, readInkBlockId, serializeInkBlock } from '../../src/markdown/inkBlockFormat';
 import type { InkBlockData } from '../../src/markdown/inkBlockFormat';
 import type { Annotation } from '../../src/annotate/types';
 
@@ -135,5 +135,29 @@ describe('locating a block this module did not write', () => {
 		const lines = note.split('\n');
 
 		expect(findInkBlockById(lines, 'ink-pretty')).not.toBeNull();
+	});
+});
+
+describe('a block with two top-level ids', () => {
+	// Pathological, and only reachable by hand-editing. It used to save
+	// normally, because the id a block reported and the id a save searched for
+	// both came from the same full parse and so agreed on JSON's rule that the
+	// last one wins.
+	//
+	// The fast read looks at the front and finds the first. That is fine as
+	// long as *both* sides read it the same way, which is what these pin: an
+	// optimisation may change which of two ids such a block answers with, but
+	// it may not cost the block the ability to be found and saved.
+	const source = '{"version":2,"id":"ink-one","width":800,"height":450,"annotations":[],"id":"ink-two"}';
+
+	it('reports the same id however it is asked', () => {
+		expect(parseInkBlock(source).data.id).toBe(readInkBlockId(source));
+	});
+
+	it('can still be located by the id it reports', () => {
+		const note = `# Notes\n\n\`\`\`inkling\n${source}\n\`\`\`\n`;
+		const id = parseInkBlock(source).data.id ?? '';
+
+		expect(findInkBlockById(note.split('\n'), id)).toEqual({ lineStart: 2, lineEnd: 4 });
 	});
 });

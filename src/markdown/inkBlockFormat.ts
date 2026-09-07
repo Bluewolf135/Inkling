@@ -240,7 +240,16 @@ export function parseInkBlock(source: string): ParseResult {
 	// on that basis.
 	const fromFuture = version > INK_BLOCK_VERSION;
 
-	const id = typeof raw.id === 'string' && raw.id ? raw.id : undefined;
+	// Read through readInkBlockId rather than off the parsed object, so that
+	// the id a block reports is by construction the id a save will search for.
+	//
+	// The two are the same for every block this module has ever written. They
+	// can differ for a hand-edited one carrying two top-level ids, where JSON
+	// says the last wins and the front-reading shortcut finds the first — and
+	// a block whose two answers disagree cannot be located at all, so it
+	// cannot be saved. Taking both from one function is what stops an
+	// optimisation to that shortcut costing a block the ability to be found.
+	const id = readInkBlockId(trimmed) ?? undefined;
 
 	return { data: { version, id, width, height, annotations }, malformed: droppedAny || fromFuture };
 }
