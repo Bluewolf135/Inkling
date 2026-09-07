@@ -44,6 +44,12 @@ export default defineConfig(
 		rules: {
 			'obsidianmd/prefer-create-el': 'off',
 			'obsidianmd/no-global-this': 'off',
+			// Same reasoning, one rule further on. The harness has to build
+			// the scrolling ancestor an IntersectionObserver roots itself at,
+			// and a stylesheet is exactly what a test running in Node does not
+			// have — the rule is about theming the user's app, which is not
+			// what this DOM is.
+			'obsidianmd/no-static-styles-assignment': 'off',
 		},
 	},
 );

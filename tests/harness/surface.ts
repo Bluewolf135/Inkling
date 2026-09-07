@@ -108,18 +108,146 @@ class FakePointerEvent extends Event {
 	}
 }
 
-// Installs everything the controller path expects a browser to have and
-// jsdom does not. Idempotent, so a test file can call it once at the top.
+export function makePointerEvent(type: string, init: PointerOptions & { clientX: number; clientY: number }): Event {
+	return new FakePointerEvent(type, init);
+}
+
+// Which pointer ids each element currently holds capture of. A WeakMap so
+// an element torn down between tests takes its entry with it, plus the
+// reverse lookup an implicit release needs.
+const capturedPointers = new WeakMap<Element, Set<number>>();
+const captureHolders = new Map<number, Element>();
+let releaseInstalled = false;
+
+/** Whether `el` currently holds pointer capture for `pointerId`. */
+export function hasCapturedPointer(el: Element, pointerId = 1): boolean {
+	return capturedPointers.get(el)?.has(pointerId) ?? false;
+}
+
+interface ElementInfo {
+	cls?: string;
+	text?: string;
+	attr?: Record<string, string>;
+	type?: string;
+	href?: string;
+}
+
+function applyInfo(el: Element, info?: ElementInfo): void {
+	if (!info) return;
+	if (info.cls) el.setAttribute('class', info.cls);
+	if (info.text !== undefined) el.textContent = info.text;
+	for (const [name, value] of Object.entries(info.attr ?? {})) el.setAttribute(name, value);
+	if (info.type) el.setAttribute('type', info.type);
+	if (info.href) el.setAttribute('href', info.href);
+}
+
+// Installs everything the plugin expects a browser — and Obsidian — to have
+// and jsdom does not. Idempotent, so a test file can call it once at the top.
+//
+// The DOM helpers below are Obsidian's, not the platform's: createEl and its
+// relatives are added to Element.prototype by the app itself, which is why
+// the obsidianmd lint rules insist on them and why nothing outside Obsidian
+// can call them without this.
 export function installSurfaceStubs(): void {
 	const proto = Element.prototype as unknown as Record<string, unknown>;
 	if (!proto.createEl) {
-		proto.createEl = function (this: Element, tag: string, info?: { cls?: string }): HTMLElement {
+		proto.createEl = function (this: Element, tag: string, info?: ElementInfo): HTMLElement {
 			const child = this.ownerDocument.createElement(tag);
-			if (info?.cls) child.className = info.cls;
+			applyInfo(child, info);
 			this.appendChild(child);
 			return child;
 		};
+		proto.createDiv = function (this: Element, info?: ElementInfo): HTMLElement {
+			return (this as unknown as { createEl: (tag: string, info?: ElementInfo) => HTMLElement }).createEl('div', info);
+		};
+		proto.createSpan = function (this: Element, info?: ElementInfo): HTMLElement {
+			return (this as unknown as { createEl: (tag: string, info?: ElementInfo) => HTMLElement }).createEl('span', info);
+		};
+		proto.createSvg = function (this: Element, tag: string, info?: ElementInfo): SVGElement {
+			const child = this.ownerDocument.createElementNS('http://www.w3.org/2000/svg', tag);
+			applyInfo(child, info);
+			this.appendChild(child);
+			return child;
+		};
+		proto.addClass = function (this: Element, ...classes: string[]): void {
+			this.classList.add(...classes);
+		};
+		proto.removeClass = function (this: Element, ...classes: string[]): void {
+			this.classList.remove(...classes);
+		};
+		proto.toggleClass = function (this: Element, classes: string | string[], value: boolean): void {
+			for (const name of Array.isArray(classes) ? classes : [classes]) this.classList.toggle(name, value);
+		};
+		proto.setText = function (this: Element, text: string): void {
+			this.textContent = text;
+		};
+		// Custom properties, so the stylesheet can size a block from values
+		// only the plugin knows — jsdom's setProperty handles `--` names.
+		proto.setCssProps = function (this: Element, props: Record<string, string>): void {
+			for (const [name, value] of Object.entries(props)) {
+				(this as HTMLElement).style.setProperty(name, value);
+			}
+		};
+		proto.detach = function (this: Element): void {
+			this.remove();
+		};
+		proto.empty = function (this: Element): void {
+			this.replaceChildren();
+		};
+
+		// Pointer capture, which jsdom has no implementation of at all.
+		//
+		// Stubbed rather than left absent: the production code already
+		// tolerates its absence, so a missing implementation quietly turned
+		// every test into the degraded path and left the captured one — the
+		// one that actually runs on a tablet — untested. Recording the calls
+		// makes "was this pointer captured" something a test can assert.
+		proto.setPointerCapture = function (this: Element, pointerId: number): void {
+			const held = capturedPointers.get(this);
+			if (held) held.add(pointerId);
+			else capturedPointers.set(this, new Set([pointerId]));
+			captureHolders.set(pointerId, this);
+		};
+		proto.releasePointerCapture = function (this: Element, pointerId: number): void {
+			capturedPointers.get(this)?.delete(pointerId);
+			captureHolders.delete(pointerId);
+		};
+		proto.hasPointerCapture = function (this: Element, pointerId: number): boolean {
+			return capturedPointers.get(this)?.has(pointerId) ?? false;
+		};
 	}
+
+	// Capture ends implicitly at the end of a gesture. That is the browser's
+	// doing, not the plugin's — which is why pointer.ts only ever releases
+	// capture explicitly in the touch-pan path, and why a stub that held on
+	// to it past pointerup would misreport perfectly correct code as leaking.
+	if (!releaseInstalled) {
+		releaseInstalled = true;
+		const release = (event: Event): void => {
+			const pointerId = (event as unknown as { pointerId?: number }).pointerId;
+			if (pointerId === undefined) return;
+			const holder = captureHolders.get(pointerId);
+			if (!holder) return;
+			capturedPointers.get(holder)?.delete(pointerId);
+			captureHolders.delete(pointerId);
+		};
+		document.addEventListener('pointerup', release);
+		document.addEventListener('pointercancel', release);
+	}
+
+	// Obsidian puts these in the global scope as well as on Element, and
+	// annotate/toolbar.ts builds detached elements with the global form.
+	const globalScope = globalThis as unknown as Record<string, unknown>;
+	globalScope.createEl ??= (tag: string, info?: ElementInfo): HTMLElement => {
+		const child = document.createElement(tag);
+		applyInfo(child, info);
+		return child;
+	};
+	globalScope.createDiv ??= (info?: ElementInfo): HTMLElement =>
+		(globalScope.createEl as (tag: string, info?: ElementInfo) => HTMLElement)('div', info);
+	globalScope.createSpan ??= (info?: ElementInfo): HTMLElement =>
+		(globalScope.createEl as (tag: string, info?: ElementInfo) => HTMLElement)('span', info);
+	globalScope.createFragment ??= (): DocumentFragment => document.createDocumentFragment();
 
 	const canvasProto = HTMLCanvasElement.prototype as unknown as Record<string, unknown>;
 	canvasProto.getContext = function (this: HTMLCanvasElement): FakeContext {
