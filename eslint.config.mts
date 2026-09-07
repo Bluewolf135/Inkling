@@ -33,4 +33,17 @@ export default defineConfig(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{
+		// The obsidianmd rules encode constraints of the Obsidian *runtime* —
+		// use createDiv() rather than document.createElement, prefer the
+		// active window to globalThis. Tests run in Node, where none of those
+		// helpers exist and globalThis is the only window there is, so the
+		// rules would be asking test code to call functions that are not
+		// there. The plugin's own sources are still held to all of them.
+		files: ['tests/**/*.ts'],
+		rules: {
+			'obsidianmd/prefer-create-el': 'off',
+			'obsidianmd/no-global-this': 'off',
+		},
+	},
 );
