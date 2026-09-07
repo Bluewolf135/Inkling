@@ -346,11 +346,82 @@ function storedAnnotation(annotation: Annotation): Record<string, unknown> {
 	return { ...annotation };
 }
 
+// How long a line of stored JSON is allowed to get.
+//
+// A block used to be written as a single line, on the reasoning that a few
+// hundred lines of formatted JSON per drawing would swamp the writing around
+// it. The cost of that was not measured until it turned up in use: a page of
+// handwriting is a line of 164,799 characters, and Obsidian's Live Preview
+// cannot edit a document shaped like that. Typing anywhere in the note
+// lagged, including nowhere near a block.
+//
+// Established by experiment rather than reasoned about. A copy of the note
+// with the fence language changed — so this plugin never ran at all — lagged
+// exactly the same, which ruled out anything Inkling executes. The same copy
+// with the JSON wrapped was smooth. Source mode was smooth throughout, which
+// is what pointed at the rendering pass rather than at CodeMirror's handling
+// of long lines.
+//
+// This is still one JSON document: whitespace between tokens means nothing
+// to a parser, every path that reads a block already joins the fence's lines
+// before parsing, and no version bump is needed. Blocks rewrap as they save.
+export const MAX_STORED_LINE_LENGTH = 120;
+
+// Splits compact JSON into lines no longer than MAX_STORED_LINE_LENGTH,
+// breaking only after a comma that is not inside a string.
+//
+// Inside a string is the case that matters: a newline in a JSON string is a
+// parse error, so wrapping on any comma would corrupt every block holding
+// text with a comma in it. A single value longer than the limit — a very long
+// note, say — has no break point and stays on its own line, which is correct
+// and is why the limit is a target rather than a guarantee.
+function wrapStoredJson(json: string): string {
+	const segments: string[] = [];
+	let start = 0;
+	let inString = false;
+	let escaped = false;
+
+	for (let index = 0; index < json.length; index++) {
+		const char = json[index];
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (inString && char === '\\') {
+			escaped = true;
+			continue;
+		}
+		if (char === '"') {
+			inString = !inString;
+			continue;
+		}
+		if (!inString && char === ',') {
+			segments.push(json.slice(start, index + 1));
+			start = index + 1;
+		}
+	}
+	segments.push(json.slice(start));
+
+	const lines: string[] = [];
+	let current = '';
+	for (const segment of segments) {
+		if (current && current.length + segment.length > MAX_STORED_LINE_LENGTH) {
+			lines.push(current);
+			current = segment;
+		} else {
+			current += segment;
+		}
+	}
+	if (current) lines.push(current);
+
+	return lines.join('\n');
+}
+
 export function serializeInkBlock(data: InkBlockData): string {
-	// Compact rather than pretty-printed: this sits inside the user's own
-	// note, where a few hundred lines of formatted JSON per drawing would
-	// swamp the actual writing around it.
-	return JSON.stringify({
+	// Compact rather than pretty-printed — this sits inside the user's own
+	// note — but wrapped, for the reason recorded above
+	// MAX_STORED_LINE_LENGTH.
+	return wrapStoredJson(JSON.stringify({
 		version: INK_BLOCK_VERSION,
 		// First, so a block's identity is readable without parsing past the
 		// stroke data — which for a densely drawn block is most of the line.
@@ -358,7 +429,7 @@ export function serializeInkBlock(data: InkBlockData): string {
 		width: data.width,
 		height: data.height,
 		annotations: data.annotations.map(storedAnnotation),
-	});
+	}));
 }
 
 export function inkBlockMarkdown(data: InkBlockData = emptyInkBlock()): string {
