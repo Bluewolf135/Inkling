@@ -216,7 +216,8 @@ rewrite from a fresh read.
 ## Open questions, in the order they should be answered
 
 1. Does `appendBinary` exist at `minAppVersion` 1.4.4, and on mobile?
-2. Can a correct xref stream be written for the four books above, and does
+2. Can a correct xref stream be written for the three books above that use
+   one, and does
    pdf.js — and Obsidian's own viewer, and one external reader — accept the
    result?
 3. Does Self-hosted LiveSync actually chunk a PDF such that an append
