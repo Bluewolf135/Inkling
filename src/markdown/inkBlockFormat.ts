@@ -9,7 +9,14 @@ export const INK_BLOCK_LANGUAGE = 'inkling';
 // Present from the first release so a later format change has something to
 // migrate *from* — the alternative (adding versioning once it's needed)
 // means the oldest, least-recoverable blocks are the ones without it.
-export const INK_BLOCK_VERSION = 1;
+//
+// 2 stores stroke coordinates as one flat array of numbers rather than a
+// list of {x, y, p} objects, with pressure in a parallel array beside it.
+// Reading accepts 1 and 2; writing always produces 2, so a block is
+// upgraded in place the first time it is saved. A block declaring a version
+// above this one is treated as malformed and never written over — which is
+// what stops an older build destroying a newer block.
+export const INK_BLOCK_VERSION = 2;
 
 // The drawing surface's own coordinate space, which is what stroke
 // coordinates below are in. Stored per block rather than assumed, so a
@@ -61,6 +68,67 @@ function readPoint(value: unknown): Point | null {
 	return point;
 }
 
+// A single point in either format: `[x, y]` since 2, `{x, y}` before it.
+//
+// Which one is decided by looking at the value rather than at the block's
+// declared `version`, because the version is a claim the file makes about
+// itself and everything here treats the file as untrusted. A block that
+// says 1 and holds flat arrays is still readable, and one that lies the
+// other way does not confuse the reader into misreading coordinates.
+function readFlexiblePoint(value: unknown): Point | null {
+	if (!Array.isArray(value)) return readPoint(value);
+
+	const [x, y, p] = value as unknown[];
+	if (!isFiniteNumber(x) || !isFiniteNumber(y)) return null;
+
+	const point: Point = { x, y };
+	if (isFiniteNumber(p) && p >= 0 && p <= 1) point.p = p;
+	return point;
+}
+
+// A stroke's points, from the flat coordinate array and the optional
+// parallel pressure array beside it.
+//
+// Both arrays are checked against each other before anything is built: a
+// coordinate array of odd length, or a pressure array that does not have
+// exactly one entry per point, means the two have stopped agreeing about
+// how many samples there are. There is no safe way to guess which of them
+// is right, and a stroke rebuilt from the wrong pairing is not the stroke
+// anyone drew — so the whole annotation is dropped, the same call the
+// object form already makes for a single bad point.
+function readFlatStroke(coordinates: readonly unknown[], pressure: unknown): Point[] | null {
+	if (coordinates.length === 0 || coordinates.length % 2 !== 0) return null;
+
+	const count = coordinates.length / 2;
+	let pressures: readonly unknown[] | null = null;
+	if (pressure !== undefined) {
+		if (!Array.isArray(pressure) || pressure.length !== count) return null;
+		pressures = pressure;
+	}
+
+	const points: Point[] = [];
+	for (let index = 0; index < count; index++) {
+		const x = coordinates[index * 2];
+		const y = coordinates[index * 2 + 1];
+		if (!isFiniteNumber(x) || !isFiniteNumber(y)) return null;
+
+		const point: Point = { x, y };
+		if (pressures) {
+			const p = pressures[index];
+			// null is a sample that genuinely had no pressure, which is
+			// different from one whose pressure is zero. Anything else in the
+			// array is a disagreement between it and the coordinates, not a
+			// gap to paper over, and takes the stroke with it.
+			if (p !== null) {
+				if (!isFiniteNumber(p) || p < 0 || p > 1) return null;
+				point.p = p;
+			}
+		}
+		points.push(point);
+	}
+	return points;
+}
+
 // Everything below treats block content as untrusted input, because it is:
 // notes sync between devices, get shared, and can be hand-edited, so a
 // block can hold anything at all by the time it reaches here. A bad value
@@ -82,22 +150,31 @@ function readAnnotation(value: unknown): Annotation | null {
 	if (kind === 'stroke') {
 		if (!DRAW_TOOLS.includes(tool)) return null;
 		if (!Array.isArray(raw.points)) return null;
-		const points: Point[] = [];
-		for (const entry of raw.points) {
-			const point = readPoint(entry);
-			// One bad point invalidates the stroke rather than silently
-			// bending it somewhere else on the page.
-			if (!point) return null;
-			points.push(point);
+
+		// Format 2 holds a flat run of numbers; format 1 holds objects. The
+		// first entry says which, so a stroke is read by its own shape rather
+		// than by what the block claims its version is.
+		let points: Point[] | null;
+		if (typeof raw.points[0] === 'number') {
+			points = readFlatStroke(raw.points, raw.pressure);
+		} else {
+			points = [];
+			for (const entry of raw.points) {
+				const point = readPoint(entry);
+				// One bad point invalidates the stroke rather than silently
+				// bending it somewhere else on the page.
+				if (!point) return null;
+				points.push(point);
+			}
 		}
-		if (points.length === 0) return null;
+		if (!points || points.length === 0) return null;
 		return { id, color, width, kind: 'stroke', tool: tool as DrawToolType, points };
 	}
 
 	if (kind === 'shape') {
 		if (!SHAPE_TOOLS.includes(tool)) return null;
-		const start = readPoint(raw.start);
-		const end = readPoint(raw.end);
+		const start = readFlexiblePoint(raw.start);
+		const end = readFlexiblePoint(raw.end);
 		if (!start || !end) return null;
 		return { id, color, width, kind: 'shape', tool: tool as ShapeToolType, start, end };
 	}
@@ -205,21 +282,68 @@ function round(value: number, decimals: number): number {
 	return +value.toFixed(decimals);
 }
 
-function compactPoint(point: Point): Point {
-	const compact: Point = { x: round(point.x, COORDINATE_DECIMALS), y: round(point.y, COORDINATE_DECIMALS) };
-	if (point.p !== undefined) compact.p = round(point.p, PRESSURE_DECIMALS);
-	return compact;
+// A lone point — a shape's start or end — as `[x, y]`, or `[x, y, p]` when
+// it carries pressure.
+//
+// Pressure on a shape endpoint means nothing to the renderer, which draws
+// shapes as geometry and never tapers them. It is kept anyway because it is
+// there: the pointer samples that placed the corners recorded it, real
+// notes hold it, and dropping a value on the grounds that today's renderer
+// ignores it is how a format loses information it will not get back.
+function flatPoint(point: Point): number[] {
+	const flat = [round(point.x, COORDINATE_DECIMALS), round(point.y, COORDINATE_DECIMALS)];
+	if (point.p !== undefined) flat.push(round(point.p, PRESSURE_DECIMALS));
+	return flat;
 }
 
-// Rounds coordinates for storage without touching the annotations the
-// surface is still drawing from — rounding those in place would move
-// live ink under the pen, by a fraction of a pixel, on every save.
-function compactAnnotation(annotation: Annotation): Annotation {
-	if (annotation.kind === 'stroke') return { ...annotation, points: annotation.points.map(compactPoint) };
-	if (annotation.kind === 'shape') {
-		return { ...annotation, start: compactPoint(annotation.start), end: compactPoint(annotation.end) };
+// A stroke's points as format 2 stores them: coordinates in one flat array,
+// and pressure in a parallel array beside it — the same shape the PDF side
+// already uses, where /InkList holds flat coordinates and the private
+// /Inkling /P a parallel byte array.
+//
+// A point with no pressure writes `null` rather than being left out, so the
+// two arrays always agree on how many samples there are and a gap stays a
+// gap. This started as all-or-nothing — a stroke missing pressure anywhere
+// stored none at all — on the assumption that mixed strokes were a
+// theoretical case. They are not: real notes in daily use hold six-point
+// pen strokes with pressure on some samples and not others, and that rule
+// quietly flattened them. Four bytes for an absent sample is a much better
+// trade than losing the taper on strokes somebody already drew.
+//
+// The array is omitted altogether only when no point has pressure at all,
+// which is the common case for anything drawn with a mouse.
+function flatStroke(points: readonly Point[]): { points: number[]; pressure?: (number | null)[] } {
+	const coordinates: number[] = [];
+	let anyPointHasPressure = false;
+
+	for (const point of points) {
+		coordinates.push(round(point.x, COORDINATE_DECIMALS), round(point.y, COORDINATE_DECIMALS));
+		if (point.p !== undefined) anyPointHasPressure = true;
 	}
-	return annotation;
+	if (!anyPointHasPressure) return { points: coordinates };
+
+	const pressure: (number | null)[] = points.map((point) =>
+		point.p === undefined ? null : round(point.p, PRESSURE_DECIMALS),
+	);
+	return { points: coordinates, pressure };
+}
+
+// Rounds coordinates and flattens them for storage, without touching the
+// annotations the surface is still drawing from — rounding those in place
+// would move live ink under the pen, by a fraction of a pixel, on every
+// save.
+//
+// Every other field is carried through untouched, so a quote or a note
+// captured with the annotation survives a format it says nothing about.
+function storedAnnotation(annotation: Annotation): Record<string, unknown> {
+	if (annotation.kind === 'stroke') {
+		const { points, ...rest } = annotation;
+		return { ...rest, ...flatStroke(points) };
+	}
+	if (annotation.kind === 'shape') {
+		return { ...annotation, start: flatPoint(annotation.start), end: flatPoint(annotation.end) };
+	}
+	return { ...annotation };
 }
 
 export function serializeInkBlock(data: InkBlockData): string {
@@ -233,7 +357,7 @@ export function serializeInkBlock(data: InkBlockData): string {
 		...(data.id ? { id: data.id } : {}),
 		width: data.width,
 		height: data.height,
-		annotations: data.annotations.map(compactAnnotation),
+		annotations: data.annotations.map(storedAnnotation),
 	});
 }
 
