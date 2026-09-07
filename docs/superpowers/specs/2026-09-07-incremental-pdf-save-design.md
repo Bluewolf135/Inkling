@@ -1,9 +1,15 @@
 # Incremental PDF save — design
 
 Status: design, not approved for implementation
-Date: 2026-09-07
+Date: 2026-09-07, revised the same day after review
 Touches the write path hardened by Track A
 (`2026-09-04-write-safety-design.md`), which this must not weaken.
+
+The first draft enumerated the books then in the vault and made design
+decisions against them. That was wrong: the library changes, and a design
+that knows today's five books is a design that breaks on the sixth. This
+revision replaces that with runtime classification and a decline path, and
+the principle below is what everything else hangs off.
 
 ## Why this exists
 
@@ -47,7 +53,9 @@ Two consequences follow, and the second matters more than the first:
 
 1. **The write becomes O(change), not O(document).** Serialization, disk
    I/O, and sync upload all scale with the annotations added rather than
-   with the book.
+   with the book. Note the word *write*: verification still has to parse the
+   whole document, for reasons set out under "Verify before appending"
+   below, and how much of that survives is the largest open question here.
 2. **pdf-lib stops re-encoding the document.** Every byte before the
    appended section is the original file, untouched. The failure
    `pdf/fingerprint.ts` exists to catch — pdf-lib quietly re-encoding
@@ -63,6 +71,35 @@ typings are 1.12.3. Whether `appendBinary` exists that far back is unknown
 and must be established before anything is built. The mitigation is cheap —
 feature-detect it and fall back to the current full-rewrite path — but which
 of the two is the common case changes how this is sold and how it is tested.
+
+## The governing principle
+
+**Incremental save is an optimization, and it must always be able to
+decline.**
+
+Every file is classified when it is opened. One we can confidently classify
+takes the fast path; one we cannot — for any reason, including reasons
+nobody has thought of yet — takes the existing full-rewrite path and is
+merely as slow as it is today. Declining is always correct and never loses
+data.
+
+This is what makes new books safe. The plugin does not need to have seen a
+structure before; it needs to be able to tell that it has not. Any of these
+declines:
+
+- `startxref` cannot be found, or does not point at something that parses as
+  a cross-reference section;
+- the file is encrypted;
+- the cross-reference style is neither of the two we write;
+- the file carries `/XRefStm` (a hybrid-reference file);
+- the last cross-reference section disagrees with pdf-lib about where an
+  object we intend to override actually lives;
+- the file changed on disk since we read it;
+- any assertion in the appender fails for a reason it has no rule for.
+
+A decline is logged once per file per session, never per save, and is not
+surfaced to the user. From the outside it is a save that took as long as it
+used to.
 
 ## How an incremental update works
 
@@ -96,6 +133,53 @@ A reader follows `startxref` to the newest cross-reference section, reads
 object. Object 7 appearing twice is the mechanism working, not a corruption:
 the later one wins.
 
+## What pdf-lib actually does, which is not what you would assume
+
+Verified by reading `pdf-lib@1.17.1` rather than inferred, because three
+design decisions depend on it.
+
+**It never reads the cross-reference table.** `PDFParser.parseDocument`
+walks the file linearly from the header to EOF, parsing every object it
+meets. It reads a trailer only to pick up `/Root` and `/Info`, and
+`maybeRecoverRoot()` scans the parsed objects for a `/Type /Catalog` when
+that fails. `startxref` is parsed and then discarded.
+
+Three consequences:
+
+1. **We have to find `startxref` ourselves**, by scanning the tail of the
+   original bytes. pdf-lib keeps nothing we can ask.
+
+2. **A book with a broken xref opens fine in Inkling today**, because
+   nothing consults it. Appending to such a file — writing a `/Prev` that
+   points at an offset which is not a cross-reference section — produces a
+   file pdf-lib still reads and a stricter reader does not. "Is this file's
+   cross-reference table actually valid?" is a question the plugin has never
+   had to ask, and the classifier now has to ask it of every file. This is
+   the most likely way to ship a corruption bug here, precisely because the
+   plugin's own reader cannot see it.
+
+3. **pdf-lib reads our appended output correctly by construction.** `PDFRef`
+   is interned through a module-level pool keyed on `"<num> <gen> R"`, and
+   `PDFContext.assign` is a `Map.set` on that ref, so a later definition
+   replaces an earlier one. A linear parse of an appended file therefore
+   ends up with the newest version of every object, which is the same answer
+   following the xref chain would give.
+
+**Encrypted files are already handled.** `PDFDocument.load` defaults to
+`ignoreEncryption: false` and throws `EncryptedPDFError`, and Inkling never
+passes the flag (`annotationWriterCore.ts:36`, `:61`, `:96`,
+`extract.ts:252`, `pdfView.ts:1203`). An encrypted book cannot be opened for
+annotation today, so the incremental path can never meet one. The first
+draft listed this as an unknown risk; it is neither unknown nor a risk.
+
+**Object numbering is safe to take from the context.**
+`context.largestObjectNumber` is maintained across every `assign` during the
+linear parse, so it reflects every object anywhere in the file, including
+ones a cross-reference table has marked free. `context.nextRef()` therefore
+cannot collide with an existing object. It must not be reset between appends
+in a session, which means the same `PDFDocument` has to be held across
+saves — which `OpenedDocument` already does.
+
 ## What changes per save
 
 Inkling knows exactly what it touches, so the change set is enumerated
@@ -115,6 +199,21 @@ over-collect. A diff against the loaded model would flag every object
 pdf-lib normalised on parse, and appending those would reintroduce exactly
 the re-encoding risk this design removes.
 
+Each update section's trailer carries the following, which the first draft
+sketched without stating the rules:
+
+- `/Size` — one greater than the largest object number **across the whole
+  chain**, not just this section.
+- `/Prev` — the byte offset of the previous cross-reference section, taken
+  from the `startxref` scanned out of the tail.
+- `/Root`, `/Info` — copied unchanged from the original trailer.
+- `/ID` — an array of two strings. The **first is preserved** as the file's
+  permanent identity; the **second is regenerated** on every update, which
+  is what the array is for. Preserving both, or regenerating both, are
+  different flavours of wrong.
+- Generation numbers stay at 0 for objects we override. Incrementing them is
+  for reusing a freed object number, which we never do.
+
 ## Design decisions
 
 ### Track the change set in the writer, not by comparison
@@ -126,10 +225,25 @@ and pdf-lib's context are all an appender needs.
 This is a change to `annotationSync.ts`'s internals rather than its
 interface, which keeps `extract/` and the read path out of it entirely.
 
-### Match the original file's cross-reference style
+### Classify the file, then match what it already uses
 
-Both styles are in the user's own library, and the largest books use xref
-streams:
+Two cross-reference styles are worth writing: the classic table and the xref
+stream. Which one a file gets is decided per file, at open time, by reading
+that file's own last cross-reference section — never from a build-time
+assumption and never from a list of known books.
+
+A classic table appended after an xref stream is legal (§7.5.8.4, the hybrid
+case) and widely accepted, but "widely accepted" is not a property this
+plugin should rely on in the write path. Matching what the file already uses
+costs one more writer and removes the question.
+
+**The xref stream writer is the largest piece of work in the item** and the
+reason this was never a task to start coding. It is a compressed binary
+structure with a `/W` field-width array, not a text table.
+
+A snapshot of the vault on 2026-09-07, recorded as evidence that both styles
+occur in real use and that the largest books use streams — **not a test
+plan, and not a set of cases to code against**:
 
 | Book | Size | Cross-reference style |
 |---|---|---|
@@ -139,14 +253,25 @@ streams:
 | Units, Trig, Vectors | 6.6 MB | xref stream |
 | Civilian CyberOps Resume | 178 KB | classic table |
 
-A classic table appended after an xref stream is legal (§7.5.8.4, the hybrid
-case) and widely accepted, but "widely accepted" is not a property this
-plugin should be relying on in the write path. Matching what the file
-already uses costs one more writer and removes the question.
+This table will be wrong within weeks. It is here to justify building two
+writers rather than one, and for nothing else.
 
-**This is the largest piece of work in the item** and the reason it was
-never a task to start coding. An xref stream is a compressed binary
-structure with a `/W` field-width array, not a text table.
+### Test against generated fixtures, not against the library
+
+The corpus is synthesised: one fixture per structural class — classic table,
+xref stream, object streams, hybrid `/XRefStm`, linearized, already
+incrementally updated, deliberately broken xref — each built in the test
+itself and each asserted to round-trip.
+
+Testing against the books in the vault instead produces a suite that cannot
+run in CI, depends on files not in the repository, and changes meaning every
+time a book is added or removed.
+
+The vault is still worth one opt-in smoke check: walk whatever PDFs it
+finds and assert the classifier reaches a decision — fast path or decline —
+on every one of them without throwing. That check is about the classifier's
+total coverage, which is precisely the property that has to survive the
+library changing.
 
 ### Compact when the appendix grows past its worth
 
@@ -154,25 +279,78 @@ Appending forever makes a file that grows monotonically. Nothing breaks, but
 a long annotation session on a small PDF could double it.
 
 Rule: when the accumulated appended bytes exceed **20% of the original file
-size or 2 MB, whichever is larger**, the next save is a full `PDFDocument.save()`
-through the existing path, which collapses the chain. Both numbers are
-guesses and should be checked against a real session before they are fixed.
+size, or 8 MB, whichever is smaller**, the next save is a full
+`PDFDocument.save()` through the existing path, which collapses the chain.
 
-### Keep the fingerprint check, but move it
+Smaller, not larger — the first draft had this backwards. A percentage alone
+scales the wrong way as the library grows: 20% of a future 200 MB book is
+40 MB of appendix before anything compacts. The absolute ceiling stops a big
+book accumulating a big appendix; the percentage stops a small one
+compacting constantly.
 
-Verification cannot simply be deleted — an appended file can still be
-malformed, and the appended objects are the ones we wrote. But re-parsing a
-38.9 MB book on every save is the very cost being removed.
+Both numbers are guesses and should be checked against a real session,
+including an eraser-heavy one, before they are fixed.
 
-Proposal, in descending confidence:
+### Verify before appending, because an append cannot be undone
 
-- **Always:** verify the appended region alone — that the new xref resolves,
-  that `/Prev` points at the previous `startxref`, and that every ref in the
-  change set is reachable. This is bounded by the size of the appendix.
-- **On the first save of a session, and on every compaction:** the full
-  `fingerprintDocument` comparison as it works today. A session's first
-  write is where a structurally surprising file would show itself.
-- **Never:** skip verification entirely because appending "cannot" corrupt.
+This is the correction that matters most.
+
+The current path verifies after producing the bytes and before handing them
+to the vault, and a failure means the file on disk is simply never touched.
+That works because a full write is a replacement: declining to perform it
+costs nothing.
+
+An append has no such property. **Obsidian's API has no truncate.** Once
+bytes are on the end of the file, undoing them means rewriting the whole
+document — the exact cost this design exists to avoid, incurred on the
+failure path, on a file that is invalid at that moment.
+
+So verification moves ahead of the write:
+
+- **Before appending, in memory.** Assemble the appendix, concatenate it
+  with the original bytes in memory, and parse the result. Every check the
+  full path makes today — `fingerprintDocument` against the intended
+  document — runs here, on a buffer that has not touched the disk. A failure
+  discards the buffer and falls back to a full rewrite; the file on disk is
+  still the last known-good version.
+- **After appending, the size check only.** Original length plus appendix
+  length against `adapter.stat`, which is what catches a truncated write and
+  is what Track A's after-check is for.
+
+The cost this reintroduces has to be stated plainly: parsing the
+concatenated buffer is O(document), so the 38.9 MB book is still parsed once
+per save. **Serialization, the disk write and the sync upload all become
+O(change); the verification parse does not.**
+
+Whether that is acceptable is an open question below. Three options, none
+yet chosen:
+
+1. Full verification parse on every save. Safest, and still a large win,
+   since parsing is cheaper than serializing plus writing plus uploading.
+2. Full verification on the first save of a session and on every compaction;
+   between them, verify only that the appendix parses in isolation and that
+   every ref in the change set resolves.
+3. Full verification on a background timer rather than per save.
+
+Option 2 is the recommendation and also the decision here most likely to be
+wrong. It should be made against a measurement of what the parse actually
+costs on the largest book, not against this paragraph.
+
+### Deleting an annotation still grows the file
+
+An append-only format cannot remove anything. Erasing rewrites the page's
+`/Annots` without that ref, which is enough for correctness — no reader will
+show it — but the annotation dictionary and its appearance stream stay in
+the file.
+
+Marking them free in the new cross-reference section is correct, cheap for a
+classic table, and what the format is for. It does not reclaim the bytes; it
+stops the objects being reachable.
+
+The bytes come back only at compaction, which means the compaction rule is
+doing more than tidying an appendix: **it is the plugin's only garbage
+collector.** An eraser-heavy session is the case that reaches it first, and
+the one the thresholds should be measured against.
 
 ### `writeBinarySafely` needs a second mode
 
@@ -207,39 +385,64 @@ rewrite from a fresh read.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Append lands on a file sync changed underneath us | **Corrupt PDF** | Size + mtime check before every append; fall back to full rewrite on mismatch |
-| `appendBinary` missing on `minAppVersion` 1.4.4 | Feature unavailable | Feature-detect, fall back to the current path |
-| xref stream writer is wrong in a way pdf.js tolerates | Silent, found later | Verify with a second reader; test against all five books above |
-| Encrypted PDFs | Unknown | Refuse to append; fall back to the current path, which already handles them however it does today |
-| Appendix chain grows unboundedly | File bloat | Compaction rule above |
+| Append lands on a file sync changed underneath us | **Corrupt PDF** | Size + mtime check immediately before every append; decline to full rewrite on mismatch |
+| Appending to a file whose xref was already broken | **Corrupt PDF, invisible to us** | Classifier validates the existing xref before the fast path is ever taken; pdf-lib cannot detect this after the fact, so it has to be a precondition |
+| A bad append cannot be rolled back | **File left invalid** | Verify the concatenated buffer in memory *before* writing; the disk only ever sees bytes that already parsed |
+| xref stream writer wrong in a way pdf-lib tolerates | Silent, found later | pdf-lib is not a witness — it ignores the xref entirely. Verify with pdf.js and one external reader |
+| `appendBinary` missing at `minAppVersion` 1.4.4 or on mobile | Feature unavailable | Feature-detect; decline to the current path |
+| A structure nobody anticipated | None | The decline path. This is what it is for |
+| Appendix grows unboundedly, including from erasing | File bloat | Compaction, which is the only garbage collector |
+| ~~Encrypted PDFs~~ | Not a risk | Already rejected at `PDFDocument.load`; see above |
 
 ## Open questions, in the order they should be answered
 
 1. Does `appendBinary` exist at `minAppVersion` 1.4.4, and on mobile?
-2. Can a correct xref stream be written for the three books above that use
-   one, and does
-   pdf.js — and Obsidian's own viewer, and one external reader — accept the
-   result?
-3. Does Self-hosted LiveSync actually chunk a PDF such that an append
-   re-uploads only the tail? If it re-uploads the whole file regardless, the
-   bandwidth argument disappears and only the CPU and crash-window
-   arguments remain. Those are still enough, but the item's value changes.
-4. What are the real compaction thresholds?
+2. **What does the verification parse actually cost on the largest book?**
+   This decides between the three verification options above, and with them
+   how much of the win survives. It is the question the value of the item
+   now turns on, and it is measurable today against the current code — no
+   part of this design has to exist first.
+3. Does Self-hosted LiveSync chunk a PDF such that an append re-uploads only
+   the tail? If it re-uploads the whole file regardless, the bandwidth
+   argument disappears and only the CPU and crash-window arguments remain.
+   Those are still enough, but the item's value changes.
+4. How many PDFs in a real library fail classification? If the decline rate
+   is high, the fast path is rarely taken and the work is not worth doing.
+   The opt-in vault smoke check answers this directly, and keeps answering
+   it as the library grows.
+5. Can a correct xref stream be written and read back by pdf.js, Obsidian's
+   viewer, and one external reader? Note that pdf-lib is not a witness here
+   — it ignores the cross-reference table, so it will happily accept a
+   stream we got wrong.
+6. What are the real compaction thresholds, measured against an
+   eraser-heavy session rather than a drawing-only one?
 
-Question 3 is worth answering before questions 2 and 4, because it is cheap
-and it is the one that could most change the shape of the work.
+Questions 1 to 4 are all cheap, need none of this design to exist, and any
+of them can kill or reshape the item. Neither 5 nor 6 should be started
+before all four are answered.
 
 ## Recommended sequence
 
-1. A spike, throwaway, answering questions 1 and 3. Neither needs any of
-   this design to exist.
-2. The change-set recorder in `annotationSync.ts` — useful on its own, and
-   testable without an appender.
-3. The classic-table appender, tested against the two books that use one.
-4. The xref-stream appender, tested against the three that use streams.
-5. `writeBinarySafely`'s append mode, with the staleness check.
-6. Verification split, compaction, and the removal of `maxWriteIntervalMs`.
+1. **A spike, throwaway, answering questions 1 to 4.** None of them needs a
+   line of this design to exist, and between them they decide whether the
+   item is worth building at all.
+2. **The classifier**, with the decline path and the generated fixtures. It
+   is useful on its own — it answers question 4 permanently rather than once
+   — and nothing else here can be trusted without it.
+3. **The change-set recorder** in `annotationSync.ts`. Also useful alone,
+   and testable with no appender in existence.
+4. **The classic-table appender**, against its fixtures.
+5. **The xref-stream appender**, against its fixtures.
+6. **`writeBinarySafely`'s append mode**, with the staleness check and
+   in-memory verification ahead of the write.
+7. **Compaction, free-list entries, and the removal of
+   `maxWriteIntervalMs`.**
 
-Step 6 is the payoff and must be last: the throttle is what currently limits
+Step 7 is the payoff and must be last: the throttle is what currently limits
 the blast radius of a bad save, and it should not come out until everything
-under it has been proven against real books.
+under it has been proven.
+
+Steps 2 and 3 are worth doing even if the item is later abandoned. The
+classifier tells us what is actually in a library, and the change-set
+recorder makes the write path describe its own effects — both worth having
+on their own terms.
