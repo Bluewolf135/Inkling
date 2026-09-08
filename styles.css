@@ -932,6 +932,31 @@
 	line-height: var(--line-height-tight);
 }
 
+/* The banner wraps onto a second line once it carries an action, so the text
+   has to be allowed to take the width and the button to keep its own. */
+.inkling-ink-block-banner {
+	flex-wrap: wrap;
+}
+
+.inkling-ink-block-banner-text {
+	flex: 1 1 12em;
+}
+
+/* Deliberately quiet until it is armed. The first click only changes what
+   the button says; the second is the one that discards something, and it is
+   the only point at which this should look like a button you are about to
+   press. */
+.inkling-ink-block-banner-action {
+	flex: none;
+	align-self: center;
+	font-size: var(--font-ui-smaller);
+}
+
+.inkling-ink-block-banner-action.is-armed {
+	background-color: var(--text-warning);
+	color: var(--text-on-accent);
+}
+
 .inkling-ink-block-banner-icon {
 	display: flex;
 	flex: none;

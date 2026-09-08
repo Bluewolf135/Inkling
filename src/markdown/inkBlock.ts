@@ -12,6 +12,7 @@ import {
 import { createId } from '../annotate/id';
 import {
 	INK_BLOCK_LANGUAGE,
+	INK_BLOCK_VERSION,
 	InkBlockData,
 	findInkBlockById,
 	findUniqueInkBlockByBody,
@@ -19,6 +20,7 @@ import {
 	inkBlockMarkdown,
 	parseInkBlock,
 	serializeInkBlock,
+	type InkBlockDamage,
 } from './inkBlockFormat';
 import { InkRescueStore, browserRescueStorage } from './inkRecovery';
 
@@ -173,6 +175,27 @@ function drawPencil(host: HTMLElement): void {
 	});
 	svg.createSvg('path', { attr: { d: 'M12 20h9' } });
 	svg.createSvg('path', { attr: { d: 'M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z' } });
+}
+
+function countOf(n: number, noun: string): string {
+	return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
+// What the banner says, which differs by damage because what the user can do
+// about it differs by damage. The old text covered all three at once — "may
+// have been written by a newer version" — which was a guess presented to
+// someone who could not check it and could not act on it either way.
+function damageMessage(damage: InkBlockDamage): string {
+	switch (damage.kind) {
+		case 'unreadable':
+			return 'Inkling could not read this ink block at all, so it will not be saved over. Its text is still in the note, exactly as it was.';
+		case 'partial':
+			return `Inkling could read ${damage.kept} of the ${damage.kept + damage.dropped} annotations in this ink block, so it will not be saved over.`;
+		case 'from-future':
+			return `This ink block is in format ${damage.version} and this version of Inkling reads format ${INK_BLOCK_VERSION}, so it will not be saved over. Update Inkling to edit it.`;
+		case 'none':
+			return '';
+	}
 }
 
 function recoveryKey(sourcePath: string, blockId: string): string {
@@ -330,6 +353,14 @@ class InkBlockView {
 	// The drag handle along the block's bottom edge, shown only while the
 	// tool strip is open. See setResizeHandleVisible.
 	private resizeHandleEl: HTMLElement | null = null;
+	// What this build could not read in the block's source, and the banner
+	// saying so. Held rather than discarded after the constructor, because
+	// the answer can change underneath a rendered block: a sync conflict
+	// resolves, or the JSON is fixed by hand, and a banner that was decided
+	// once then outlives the damage that caused it.
+	private damage: InkBlockDamage = { kind: 'none' };
+	private bannerEl: HTMLElement | null = null;
+	private disposeRepairWatch: (() => void) | null = null;
 	// The pending frame in watchVisibility, so detaching before it runs
 	// cannot leave a callback pointing at a torn-down block.
 	private watchHandle: number | null = null;
@@ -346,7 +377,7 @@ class InkBlockView {
 		source: string,
 		toolState: ToolState,
 	) {
-		const { data, malformed } = parseInkBlock(source);
+		const { data, damage } = parseInkBlock(source);
 		// A block written before ids existed picks one up the first time it
 		// saves; until then it is located by its exact source text instead.
 		this.blockId = data.id ?? createId();
@@ -414,18 +445,15 @@ class InkBlockView {
 		// so nothing reflows when the canvases come and go.
 		this.watchVisibility();
 
-		if (malformed) {
+		if (damage.kind !== 'none') {
 			// Deliberately never saves over it: a block this build can't fully
 			// read is far more likely to be from a newer version of the
 			// plugin, or damaged in a way the original could still recover,
 			// than something worth replacing with what little parsed.
 			this.readOnly = true;
-			const banner = this.containerEl.createDiv({ cls: 'inkling-ink-block-banner' });
-			setIcon(banner.createDiv({ cls: 'inkling-ink-block-banner-icon' }), 'alert-triangle');
-			banner.createDiv({
-				cls: 'inkling-ink-block-banner-text',
-				text: "Inkling couldn't read this ink block completely, so it won't be saved over. It may have been written by a newer version of the plugin.",
-			});
+			this.damage = damage;
+			this.buildBanner(damage);
+			this.watchForRepair();
 		}
 
 		// Deliberately after mountPage/seedPage above, so the rescued ink is
@@ -449,6 +477,119 @@ class InkBlockView {
 		// resize it and then silently forgets would be worse than not having
 		// one.
 		if (!this.readOnly) this.buildResizeHandle();
+	}
+
+	private buildBanner(damage: InkBlockDamage): void {
+		const banner = this.containerEl.createDiv({ cls: 'inkling-ink-block-banner' });
+		this.bannerEl = banner;
+		setIcon(banner.createDiv({ cls: 'inkling-ink-block-banner-icon' }), 'alert-triangle');
+		banner.createDiv({ cls: 'inkling-ink-block-banner-text', text: damageMessage(damage) });
+
+		// Only a partly-read block is offered a way out, and the reason is the
+		// whole shape of this feature. Nothing survived an unreadable one, so
+		// there is nothing to keep. A block from a newer version did not fail
+		// to parse so much as fail to be understood — what this build dropped
+		// is most likely what that version added, so "keep what survived"
+		// there means "throw away the part written by the newer plugin".
+		if (damage.kind !== 'partial') return;
+		this.buildRecoveryAction(banner, damage.kept, damage.dropped);
+	}
+
+	// Two clicks rather than a modal. The action is not reversible and says
+	// so before it happens, and a confirmation that stays inside the block —
+	// next to the count it is talking about — reads better on a phone than a
+	// dialog that covers the thing being decided about.
+	private buildRecoveryAction(banner: HTMLElement, kept: number, dropped: number): void {
+		const button = banner.createEl('button', {
+			cls: 'inkling-ink-block-banner-action',
+			text: `Keep the ${countOf(kept, 'annotation')} that survived`,
+		});
+		button.type = 'button';
+		let armed = false;
+		button.addEventListener('click', () => {
+			if (!armed) {
+				armed = true;
+				button.setText(`Discard ${countOf(dropped, 'annotation')} and keep ${kept}?`);
+				button.addClass('is-armed');
+				return;
+			}
+			this.recoverWhatSurvived();
+		});
+	}
+
+	// Writing what parsed, deliberately, at the user's word. The block stops
+	// being read-only and saves in the ordinary way — which rewrites the
+	// fence, re-renders the section, and gives back a block with no banner,
+	// its resize handle, and everything else a healthy one has.
+	private recoverWhatSurvived(): void {
+		this.clearDamage();
+		void this.write();
+	}
+
+	// A block that could not be read watches its own note, so that the
+	// decision made when it rendered is not the only one it ever makes.
+	// Registered only while damaged, so a healthy note carries no listeners.
+	private watchForRepair(): void {
+		const vault = this.plugin.app.vault;
+		const ref = vault.on('modify', (file) => {
+			if (file.path !== this.ctx.sourcePath) return;
+			void this.recheckDamage();
+		});
+		this.disposeRepairWatch = () => vault.offref(ref);
+	}
+
+	private async recheckDamage(): Promise<void> {
+		if (this.detached || !this.isDamaged()) return;
+		const file = this.plugin.app.vault.getAbstractFileByPath(this.ctx.sourcePath);
+		if (!(file instanceof TFile)) return;
+
+		let contents: string;
+		try {
+			contents = await this.plugin.app.vault.cachedRead(file);
+		} catch {
+			return;
+		}
+		// Asked again rather than assumed from above: reading the file is
+		// asynchronous, and the block can have been recovered by hand — or
+		// detached — while it was in flight. Through a method returning a
+		// boolean, because comparing the field directly would be narrowed by
+		// the check before the await, and that narrowing is exactly the
+		// assumption an await invalidates.
+		if (this.detached || !this.isDamaged()) return;
+
+		const lines = contents.split('\n');
+		// A block whose id was inside the JSON that failed to parse cannot be
+		// located at all, and there is no honest way to guess which fence
+		// became which — guessing at one is how a drawing once reached another
+		// block. Its banner waits for the note to re-render, as it always did.
+		const range = this.locate(lines);
+		if (!range) return;
+
+		const body = lines.slice(range.lineStart + 1, range.lineEnd).join('\n');
+		const { data, damage } = parseInkBlock(body);
+		if (damage.kind !== 'none') return;
+
+		this.clearDamage();
+		this.renderedSource = body.trim();
+		this.data = { ...data, id: this.blockId };
+		this.surfaceEl.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${this.data.height}` });
+		// Only if the store has already been given this block's annotations;
+		// otherwise the next mount seeds from the data set just above, which
+		// is the same answer one step later.
+		if (this.seeded) this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
+	}
+
+	private isDamaged(): boolean {
+		return this.damage.kind !== 'none';
+	}
+
+	private clearDamage(): void {
+		this.damage = { kind: 'none' };
+		this.readOnly = false;
+		this.bannerEl?.remove();
+		this.bannerEl = null;
+		this.disposeRepairWatch?.();
+		this.disposeRepairWatch = null;
 	}
 
 	private buildToolbarToggle(): void {
@@ -1019,6 +1160,8 @@ class InkBlockView {
 			void this.write();
 		}
 		this.detached = true;
+		this.disposeRepairWatch?.();
+		this.disposeRepairWatch = null;
 		this.disposeToolbar?.();
 		this.disposeToolbar = null;
 		// destroy, not unmountAll: this controller is one of many built over

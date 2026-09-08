@@ -86,6 +86,13 @@ export interface TestNote {
 	rerender(): void;
 	/** Edit the file behind the plugin's back, as sync or the user would. */
 	setContents(next: string): void;
+	/**
+	 * The same, but announced — what a real vault does when a file changes
+	 * on disk. `setContents` models an edit nothing told the plugin about;
+	 * this models one it was told about, which is the only way a block can
+	 * revisit a decision it made when it rendered.
+	 */
+	sync(next: string): Promise<void>;
 	/** Saves that went into the editor while it was in reading view. */
 	discardedEditorWrites(): number;
 	/** How many times the save path read the note one line at a time. */
@@ -161,12 +168,32 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 	let getLineCalls = 0;
 	const file = new TFile(path);
 
+	// Vault events, only as far as anything under test listens to them.
+	// A block that could not be read watches for its own note changing, so
+	// that a banner cannot outlive the damage that caused it — which is
+	// exactly what happened after a sync conflict resolved itself.
+	type VaultListener = { event: string; cb: (file: TFile) => void };
+	const listeners: VaultListener[] = [];
+
 	const vault = {
 		getAbstractFileByPath: (wanted: string) => (wanted === path ? file : null),
 		process: async (target: TFile, fn: (data: string) => string) => {
 			if (target.path !== path) throw new Error(`no such file: ${target.path}`);
 			contents = fn(contents);
 			return contents;
+		},
+		cachedRead: async (target: TFile) => {
+			if (target.path !== path) throw new Error(`no such file: ${target.path}`);
+			return contents;
+		},
+		on: (event: string, cb: (file: TFile) => void): VaultListener => {
+			const ref = { event, cb };
+			listeners.push(ref);
+			return ref;
+		},
+		offref: (ref: VaultListener) => {
+			const at = listeners.indexOf(ref);
+			if (at >= 0) listeners.splice(at, 1);
 		},
 	};
 
@@ -311,6 +338,16 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		rerender: render,
 		setContents: (next: string) => {
 			contents = next;
+		},
+		sync: async (next: string) => {
+			contents = next;
+			for (const listener of [...listeners]) {
+				if (listener.event === 'modify') listener.cb(file);
+			}
+			// Reading a file is asynchronous, so a listener has not finished
+			// reacting by the time it returns. Settled here rather than in
+			// every test that changes a file.
+			await vi.advanceTimersByTimeAsync(0);
 		},
 		discardedEditorWrites: () => discardedEditorWrites,
 		getLineCalls: () => getLineCalls,

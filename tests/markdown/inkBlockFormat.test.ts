@@ -16,11 +16,11 @@ import {
 // note's render down with it.
 describe('parseInkBlock', () => {
 	it('treats empty source as an empty block, not as damage', () => {
-		expect(parseInkBlock('   \n ')).toEqual({ data: emptyInkBlock(), malformed: false });
+		expect(parseInkBlock('   \n ')).toEqual({ data: emptyInkBlock(), malformed: false, damage: { kind: 'none' } });
 	});
 
 	it('flags unparseable JSON as malformed', () => {
-		expect(parseInkBlock('{not json')).toEqual({ data: emptyInkBlock(), malformed: true });
+		expect(parseInkBlock('{not json')).toEqual({ data: emptyInkBlock(), malformed: true, damage: { kind: 'unreadable' } });
 	});
 
 	it('flags a non-object payload as malformed', () => {
@@ -345,5 +345,68 @@ describe('findUniqueInkBlockByBody', () => {
 
 	it('does not treat a fence of another language as an ink block', () => {
 		expect(findUniqueInkBlockByBody(['```js', drawn, '```'], drawn)).toBeNull();
+	});
+});
+
+// Refusing to save over a block we could not read is the right call and is
+// not changing. What is changing is that it used to be the end of the road:
+// one boolean, one banner, and a user left hand-editing JSON. The three ways
+// a block can be damaged want three different answers, so the parser now says
+// which one it met.
+describe('parseInkBlock damage', () => {
+	function withAnnotations(entries: unknown[], version = INK_BLOCK_VERSION): string {
+		return JSON.stringify({ version, width: 400, height: 200, annotations: entries });
+	}
+
+	const good = (id: string): unknown => ({
+		id,
+		kind: 'stroke',
+		tool: 'pen',
+		color: '#000000',
+		width: 3,
+		points: [{ x: 1, y: 2 }, { x: 3, y: 4 }],
+	});
+	const bad = (id: string): unknown => ({ id, kind: 'stroke', tool: 'notatool', color: '#000000', width: 3, points: [] });
+
+	it('reports no damage for a block it read completely', () => {
+		expect(parseInkBlock(withAnnotations([good('ink-1')])).damage.kind).toBe('none');
+	});
+
+	it('reports no damage for an empty block', () => {
+		expect(parseInkBlock('  ').damage.kind).toBe('none');
+	});
+
+	it('reports source it cannot parse at all as unreadable', () => {
+		expect(parseInkBlock('{not json').damage.kind).toBe('unreadable');
+		expect(parseInkBlock('[1, 2, 3]').damage.kind).toBe('unreadable');
+	});
+
+	it('counts what survived and what did not', () => {
+		const damage = parseInkBlock(withAnnotations([good('a'), bad('b'), good('c'), bad('d'), good('e')])).damage;
+
+		expect(damage).toEqual({ kind: 'partial', kept: 3, dropped: 2 });
+	});
+
+	it('reports a block from a newer format version as being from the future', () => {
+		const damage = parseInkBlock(withAnnotations([good('a')], INK_BLOCK_VERSION + 1)).damage;
+
+		expect(damage).toEqual({ kind: 'from-future', version: INK_BLOCK_VERSION + 1 });
+	});
+
+	it('calls a newer block from the future even when it also dropped entries', () => {
+		// The dropped entries are most likely the very thing the newer format
+		// added. Offering to keep "what survived" here would offer to
+		// downgrade a file a newer build wrote, which is the one outcome the
+		// refusal exists to prevent.
+		const damage = parseInkBlock(withAnnotations([good('a'), bad('b')], INK_BLOCK_VERSION + 1)).damage;
+
+		expect(damage.kind).toBe('from-future');
+	});
+
+	it('still answers the old question the same way', () => {
+		expect(parseInkBlock(withAnnotations([good('a')])).malformed).toBe(false);
+		expect(parseInkBlock('{not json').malformed).toBe(true);
+		expect(parseInkBlock(withAnnotations([bad('a')])).malformed).toBe(true);
+		expect(parseInkBlock(withAnnotations([good('a')], INK_BLOCK_VERSION + 1)).malformed).toBe(true);
 	});
 });

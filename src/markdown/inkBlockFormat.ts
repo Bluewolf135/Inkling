@@ -186,18 +186,47 @@ export function emptyInkBlock(): InkBlockData {
 	return { version: INK_BLOCK_VERSION, width: DEFAULT_BLOCK_WIDTH, height: DEFAULT_BLOCK_HEIGHT, annotations: [] };
 }
 
+// Which of the three ways a block can be damaged this one is.
+//
+// One boolean used to cover all of them, which was enough to refuse the save
+// and not enough to offer a way out: what the user can safely be offered
+// differs completely between a block that yielded nothing, a block that
+// yielded most of itself, and a block a newer build wrote.
+export type InkBlockDamage =
+	// Read completely. Nothing to say.
+	| { kind: 'none' }
+	// Not JSON, or JSON that is not a block. Nothing survived the parse, so
+	// there is nothing to offer keeping — only the text in the note, which is
+	// left exactly as it is.
+	| { kind: 'unreadable' }
+	// Some annotations read and some did not. This is the one case where a
+	// recovery is meaningful: what survived is real, and the user can be told
+	// how much of it there is and decide to keep it.
+	| { kind: 'partial'; kept: number; dropped: number }
+	// Written by a newer version of the plugin. Whatever this build could not
+	// read is most likely the very thing that version added, so keeping "what
+	// survived" would be offering to downgrade the file. Never offered.
+	| { kind: 'from-future'; version: number };
+
 export interface ParseResult {
 	data: InkBlockData;
 	// True when the source held something this couldn't make sense of.
 	// Callers surface it rather than quietly presenting a blank block —
 	// silently discarding someone's handwriting (and then overwriting it on
 	// the next edit) is the one failure here that isn't recoverable.
+	//
+	// Kept alongside `damage` because most callers only need the question it
+	// answers: may this block be written over? `damage.kind === 'none'` says
+	// the same thing, and this says it in the words the save path thinks in.
 	malformed: boolean;
+	damage: InkBlockDamage;
 }
+
+const UNDAMAGED: InkBlockDamage = { kind: 'none' };
 
 export function parseInkBlock(source: string): ParseResult {
 	const trimmed = source.trim();
-	if (!trimmed) return { data: emptyInkBlock(), malformed: false };
+	if (!trimmed) return { data: emptyInkBlock(), malformed: false, damage: UNDAMAGED };
 
 	let parsed: unknown;
 	try {
@@ -205,7 +234,7 @@ export function parseInkBlock(source: string): ParseResult {
 		// treating this as untrusted.
 		parsed = JSON.parse(trimmed);
 	} catch {
-		return { data: emptyInkBlock(), malformed: true };
+		return { data: emptyInkBlock(), malformed: true, damage: { kind: 'unreadable' } };
 	}
 
 	// Arrays are excluded explicitly, not incidentally: `typeof [] === 'object'`
@@ -214,7 +243,7 @@ export function parseInkBlock(source: string): ParseResult {
 	// overwrote whatever the block really held. Silently discarding someone's
 	// handwriting is the one failure here that isn't recoverable.
 	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-		return { data: emptyInkBlock(), malformed: true };
+		return { data: emptyInkBlock(), malformed: true, damage: { kind: 'unreadable' } };
 	}
 	const raw = parsed as Record<string, unknown>;
 
@@ -223,15 +252,17 @@ export function parseInkBlock(source: string): ParseResult {
 	const version = isFiniteNumber(raw.version) ? raw.version : INK_BLOCK_VERSION;
 
 	const annotations: Annotation[] = [];
-	let droppedAny = false;
+	let dropped = 0;
 	if (Array.isArray(raw.annotations)) {
 		for (const entry of raw.annotations) {
 			const annotation = readAnnotation(entry);
 			if (annotation) annotations.push(annotation);
-			else droppedAny = true;
+			else dropped += 1;
 		}
 	} else if (raw.annotations !== undefined) {
-		droppedAny = true;
+		// A block whose annotations are not a list at all. Counted as one
+		// loss rather than none: something was there, and it is not here.
+		dropped += 1;
 	}
 
 	// A block written by a *newer* version of the plugin may legitimately
@@ -239,6 +270,15 @@ export function parseInkBlock(source: string): ParseResult {
 	// pretending the result is complete — the caller refuses to overwrite
 	// on that basis.
 	const fromFuture = version > INK_BLOCK_VERSION;
+
+	// From the future first, and the order is the decision: a newer block that
+	// also dropped entries is not a block to offer recovering, because the
+	// entries it dropped are most likely what the newer version added.
+	const damage: InkBlockDamage = fromFuture
+		? { kind: 'from-future', version }
+		: dropped > 0
+			? { kind: 'partial', kept: annotations.length, dropped }
+			: UNDAMAGED;
 
 	// Read through readInkBlockId rather than off the parsed object, so that
 	// the id a block reports is by construction the id a save will search for.
@@ -251,7 +291,7 @@ export function parseInkBlock(source: string): ParseResult {
 	// optimisation to that shortcut costing a block the ability to be found.
 	const id = readInkBlockId(trimmed) ?? undefined;
 
-	return { data: { version, id, width, height, annotations }, malformed: droppedAny || fromFuture };
+	return { data: { version, id, width, height, annotations }, malformed: damage.kind !== 'none', damage };
 }
 
 // The exact opening this module writes: a version, then an id holding
