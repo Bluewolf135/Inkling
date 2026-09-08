@@ -20,6 +20,7 @@ import {
 	parseInkBlock,
 	serializeInkBlock,
 } from './inkBlockFormat';
+import { InkRescueStore, browserRescueStorage } from './inkRecovery';
 
 // Batches rapid successive strokes into one write, the same reasoning as
 // the PDF view's own debounce: every save rewrites a region of the user's
@@ -135,7 +136,12 @@ const SURFACE_RELEASE_MARGIN = '1200px 0px';
 // InkBlockView does not survive its own note's re-render, so anything
 // meant to outlive one cannot live on it. Keyed by note path and block
 // id, so two blocks — or two notes — cannot collide.
-const unsavedInk = new Map<string, InkBlockData>();
+//
+// It was a plain Map until a save that failed and a quit in the same
+// session turned out to lose the drawing anyway. See markdown/inkRecovery
+// for what it holds and where, and — the part that is genuinely new — why a
+// held drawing has to prove the file has not moved on before it is adopted.
+const unsavedInk = new InkRescueStore(browserRescueStorage());
 
 // The pencil on the block's tool toggle, drawn here rather than asked for
 // from the host.
@@ -351,7 +357,12 @@ class InkBlockView {
 		// failed save was trying to update. Adopting it here, and saving
 		// again below, is what turns a failed save into a delayed one
 		// rather than into lost work.
-		const rescued = unsavedInk.get(recoveryKey(ctx.sourcePath, this.blockId));
+		//
+		// Declined unless it matches the block as the file has it now: across
+		// a quit, sync can have brought back a newer version of this block
+		// from another device, and putting a held drawing over that would
+		// overwrite work rather than rescue it.
+		const rescued = unsavedInk.get(ctx.sourcePath, this.blockId, this.renderedSource);
 		this.data = rescued ? { ...rescued, id: this.blockId } : { ...data, id: this.blockId };
 
 		// The same key the recovery map uses, and for the same reason: it is
@@ -812,8 +823,7 @@ class InkBlockView {
 		// on screen and nothing in the file, which the next re-render then
 		// discarded. Stashing first and clearing on success means the only
 		// way to lose ink is to lose the session.
-		const key = recoveryKey(this.ctx.sourcePath, this.blockId);
-		unsavedInk.set(key, this.data);
+		unsavedInk.hold(this.ctx.sourcePath, this.blockId, this.data, this.renderedSource);
 
 		const restoreScroll = this.keepScrollPosition();
 
@@ -844,13 +854,18 @@ class InkBlockView {
 			);
 			this.renderedSource = serialized;
 			this.locateFailures = 0;
-			unsavedInk.delete(key);
+			unsavedInk.forget(this.ctx.sourcePath, this.blockId);
 			restoreScroll();
 			return;
 		}
 
 		const file = this.plugin.app.vault.getAbstractFileByPath(this.ctx.sourcePath);
-		if (!(file instanceof TFile)) return;
+		if (!(file instanceof TFile)) {
+			// No editor and no file: there is nowhere left to write, so the
+			// only copy of this drawing is the one being held.
+			unsavedInk.persist(this.ctx.sourcePath, this.blockId);
+			return;
+		}
 
 		try {
 			let wrote = false;
@@ -868,9 +883,10 @@ class InkBlockView {
 			}
 			this.renderedSource = serialized;
 			this.locateFailures = 0;
-			unsavedInk.delete(key);
+			unsavedInk.forget(this.ctx.sourcePath, this.blockId);
 			restoreScroll();
 		} catch (error) {
+			unsavedInk.persist(this.ctx.sourcePath, this.blockId);
 			console.error('Inkling: failed to save an ink block.', error);
 			new Notice('Inkling: could not save this ink block. Your drawing is still on screen and will be saved again shortly.');
 		}
@@ -927,6 +943,11 @@ class InkBlockView {
 	// resolves it without the user ever knowing, and only a run of
 	// failures is worth telling them about.
 	private handleLocateFailure(): void {
+		// Written out before the retry rather than after the last one. The
+		// retries usually resolve a transient edit within a few seconds, but
+		// those are seconds in which the only copy is in memory, and a crash
+		// is exactly the event this exists for.
+		unsavedInk.persist(this.ctx.sourcePath, this.blockId);
 		this.locateFailures += 1;
 		if (this.locateFailures <= LOCATE_RETRIES) {
 			if (this.writeHandle !== null) window.clearTimeout(this.writeHandle);
@@ -944,7 +965,7 @@ class InkBlockView {
 		this.reportedMismatch = true;
 		console.error(
 			`Inkling: could not find ink block ${this.blockId} in ${this.ctx.sourcePath} to save it. ` +
-				'The drawing is still on screen and is held in memory, and will be written the next time the note renders. ' +
+				'The drawing is still on screen and is held on this device, and will be written the next time the note renders. ' +
 				'If the block was deleted from the note, that is expected.',
 		);
 		new Notice('Inkling: an ink block could not be saved yet. Your drawing is safe — leave the note open.');
@@ -1032,6 +1053,11 @@ class InkBlockChild extends MarkdownRenderChild {
 }
 
 export function registerInkBlock(plugin: Plugin, toolState: ToolState): void {
+	// Once per load. Entries belong to blocks that may never be opened again,
+	// so nothing else will ever expire them, and localStorage is small enough
+	// that a fortnight of abandoned drawings is worth sweeping out.
+	unsavedInk.purgeExpired();
+
 	plugin.registerMarkdownCodeBlockProcessor(INK_BLOCK_LANGUAGE, (source, el, ctx) => {
 		ctx.addChild(new InkBlockChild(el, () => new InkBlockView(plugin, ctx, el, source, toolState)));
 	});

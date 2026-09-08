@@ -250,3 +250,71 @@ describe('the cost of a save', () => {
 		expect(note.getLineCalls()).toBe(0);
 	});
 });
+
+describe('a drawing held back by a failed save', () => {
+	// A note and a block id of its own per test. The rescue buffer outlives
+	// any one block by design — that is the whole point of it — so it also
+	// outlives any one test, and two tests sharing an id share an entry.
+	function heldIn(id: string): TestNote {
+		const held = mountNote({ path: `${id}.md`, blocks: [{ id }], openInEditor: true });
+		held.block(0).openForEditing();
+		held.block(0).drawStroke(STROKE);
+		// The block is gone from the note by the time the debounced write
+		// fires, so the drawing is held rather than written — which is the
+		// whole reason the rescue buffer exists.
+		held.setContents('# Notes\n\nNothing here any more.\n');
+		return held;
+	}
+
+	function blockHolding(id: string, strokes: number): string {
+		const annotations = Array.from({ length: strokes }, (_, index) => ({
+			id: `elsewhere-${index}`,
+			kind: 'stroke' as const,
+			tool: 'pen' as const,
+			color: '#1e1e1e',
+			width: 2,
+			points: [
+				{ x: index, y: 0 },
+				{ x: index + 10, y: 10 },
+			],
+		}));
+		return inkBlockMarkdown({ ...emptyInkBlock(), id, annotations });
+	}
+
+	it('keeps the drawing somewhere that survives quitting Obsidian', async () => {
+		note = heldIn('ink-persisted');
+		await note.flushWrites();
+
+		expect(Object.keys(window.localStorage).some((key) => key.startsWith('inkling:unsaved:'))).toBe(true);
+	});
+
+	it('puts itself back when the block comes back unchanged', async () => {
+		note = heldIn('ink-restored');
+		await note.flushWrites();
+		// Past the retries, so that no pending write survives on the old
+		// view: tearing one down flushes it, and a test that left one
+		// scheduled would be watching that write rather than the rescue.
+		await note.advance(10_000);
+
+		note.setContents(`# Notes\n\n${blockHolding('ink-restored', 0)}\n`);
+		note.rerender();
+		await note.flushWrites();
+
+		expect(note.strokeCountIn(0)).toBe(1);
+	});
+
+	it('stands aside for a version of the block that arrived since', async () => {
+		note = heldIn('ink-superseded');
+		await note.flushWrites();
+		await note.advance(10_000);
+
+		// Sync brings the block back carrying work done on another device. The
+		// held drawing is older than that, however recently it was drawn here,
+		// and writing it would overwrite two strokes with one.
+		note.setContents(`# Notes\n\n${blockHolding('ink-superseded', 2)}\n`);
+		note.rerender();
+		await note.flushWrites();
+
+		expect(note.strokeCountIn(0)).toBe(2);
+	});
+});
