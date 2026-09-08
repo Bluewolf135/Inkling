@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupIntoLines, quoteBetween, type PositionedBox, type TextLine } from '../../src/pdf/textLines';
+import { groupIntoLines, highlightBarHeight, quoteBetween, type PositionedBox, type TextLine } from '../../src/pdf/textLines';
 
 function box(text: string, minX: number, maxX: number, centerY: number, height = 10): PositionedBox {
 	return { text, minX, maxX, centerY, height };
@@ -100,5 +100,25 @@ describe('quoteBetween', () => {
 
 	it('picks up an item the stroke only touched the edge of', () => {
 		expect(quoteBetween(line, 199, 201)).toBe('not disorder exactly');
+	});
+});
+
+describe('highlightBarHeight', () => {
+	it('sits inside the line box rather than filling it', () => {
+		// pdf.js reports a line's height as the font size, which includes the
+		// leading above and below the glyphs. A bar drawn at the full height
+		// runs into the lines above and below it and reads as a lumpy block
+		// rather than as a highlight of these words.
+		expect(highlightBarHeight(12)).toBeLessThan(12);
+		expect(highlightBarHeight(12)).toBeGreaterThan(12 * 0.6);
+	});
+
+	it('scales with the line, so a heading highlights like body text', () => {
+		expect(highlightBarHeight(24)).toBeCloseTo(highlightBarHeight(12) * 2, 5);
+	});
+
+	it('never collapses to nothing on a degenerate line', () => {
+		expect(highlightBarHeight(0)).toBeGreaterThan(0);
+		expect(highlightBarHeight(-5)).toBeGreaterThan(0);
 	});
 });

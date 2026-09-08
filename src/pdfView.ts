@@ -1,14 +1,14 @@
 import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { AnnotationController, buildToolbar, MAX_ZOOM, PRESET_COLORS, ToolState, type Annotation, type Point, type ToolType } from './annotate';
+import { AnnotationController, buildToolbar, MAX_ZOOM, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
 import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
 import { writeBinarySafely } from './vaultWrite';
 import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
 import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
-import { BASELINE_DESCENT_RATIO, groupIntoLines, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
+import { BASELINE_DESCENT_RATIO, groupIntoLines, highlightBarHeight, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { defaultSettings, type InklingSettings } from './settings';
 import { applyTemplateStyle, pageSizeFor, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
@@ -480,10 +480,14 @@ export class PdfAnnotateView extends FileView {
 			return true;
 		}
 
-		// 1-6 pick the preset swatches, in the order they sit in the strip.
+		// 1-6 pick the preset swatches, in the order they sit in the strip —
+		// which means the *current tool's* strip, so 1 is black ink with the
+		// pen selected and yellow with the highlighter, matching what the
+		// toolbar is showing at the time the key is pressed.
+		const palette = paletteFor(this.controller.getTool());
 		const swatch = Number(event.key);
-		if (Number.isInteger(swatch) && swatch >= 1 && swatch <= PRESET_COLORS.length) {
-			const color = PRESET_COLORS[swatch - 1];
+		if (Number.isInteger(swatch) && swatch >= 1 && swatch <= palette.length) {
+			const color = palette[swatch - 1];
 			if (color) {
 				this.controller.setColor(color.value);
 				return true;
@@ -1076,7 +1080,10 @@ export class PdfAnnotateView extends FileView {
 				kind: 'stroke',
 				tool: 'highlighter',
 				color,
-				width: line.height,
+				// Not the full reported line height: that is the font size,
+				// leading included, and a bar drawn at it runs into the lines
+				// above and below. See highlightBarHeight.
+				width: highlightBarHeight(line.height),
 				points: [
 					{ x: from, y: line.centerY },
 					{ x: to, y: line.centerY },

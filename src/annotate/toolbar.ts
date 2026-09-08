@@ -2,7 +2,7 @@ import { setTooltip } from 'obsidian';
 import { setIconOrText } from '../icon';
 import { AnnotationController } from './controller';
 import { MAX_ZOOM } from './pointer';
-import { MAX_WIDTH, MIN_WIDTH, PRESET_COLORS, ToolType } from './types';
+import { MAX_WIDTH, MIN_WIDTH, ToolType, paletteFor } from './types';
 
 // One press of the toolbar's zoom buttons. A ratio rather than a step, for
 // the same reason the wheel uses one: the same press should cover the same
@@ -101,17 +101,30 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 
 	const colorGroup = el('div', 'inkling-toolbar-group inkling-color-group');
 	colorGroup.setAttribute('aria-label', 'Color');
-	const colorButtons = new Map<string, HTMLButtonElement>();
-	for (const { value, label } of PRESET_COLORS) {
+
+	// A fixed row of swatch buttons whose *colours* are repointed at the
+	// active tool's palette on every refresh, rather than a row rebuilt from
+	// scratch when the tool changes. A pen and a highlighter want genuinely
+	// different colours — saturated inks to mark over the page, pale tints to
+	// colour the paper under it — but they want the same six positions, so
+	// that "the second swatch" and the 2 key mean the same place in the strip
+	// whichever tool is in hand.
+	//
+	// Every palette is the same length, which is what makes one row of
+	// buttons enough; the assertion is worth keeping honest because a shorter
+	// one would silently leave a stale swatch at the end of the strip.
+	const swatchCount = Math.max(paletteFor('pen').length, paletteFor('highlighter').length);
+	const colorSwatches: HTMLButtonElement[] = [];
+	for (let index = 0; index < swatchCount; index++) {
 		const swatch = el('button', 'clickable-icon inkling-color-swatch');
 		swatch.type = 'button';
-		// The one thing about a swatch that can't live in the stylesheet:
-		// its color *is* the data.
-		swatch.setCssProps({ '--inkling-swatch-color': value });
-		setTooltip(swatch, label);
-		swatch.setAttribute('aria-label', label);
-		swatch.addEventListener('click', () => controller.setColor(value));
-		colorButtons.set(value, swatch);
+		// Reads the palette at click time rather than closing over a colour,
+		// so a button always applies whatever it is currently showing.
+		swatch.addEventListener('click', () => {
+			const color = paletteFor(controller.getTool())[index];
+			if (color) controller.setColor(color.value);
+		});
+		colorSwatches.push(swatch);
 		colorGroup.appendChild(swatch);
 	}
 	const customColor = el('input', 'inkling-color-custom');
@@ -278,11 +291,24 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		}
 
 		const activeColor = controller.getColor();
-		for (const [color, button] of colorButtons) {
-			const active = color === activeColor;
+		const palette = paletteFor(activeTool);
+		colorSwatches.forEach((button, index) => {
+			const preset = palette[index];
+			// A palette shorter than the row: hide the surplus rather than
+			// leave a swatch showing the previous tool's colour.
+			button.hidden = !preset;
+			if (!preset) return;
+
+			// The one thing about a swatch that can't live in the stylesheet:
+			// its color *is* the data.
+			button.setCssProps({ '--inkling-swatch-color': preset.value });
+			setTooltip(button, preset.label);
+			button.setAttribute('aria-label', preset.label);
+
+			const active = preset.value === activeColor;
 			button.classList.toggle('is-active', active);
 			button.setAttribute('aria-pressed', String(active));
-		}
+		});
 		customColor.value = activeColor;
 
 		const width = controller.getWidth();
@@ -322,7 +348,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		// what the banner above the pages then explains.
 		const readOnly = controller.isReadOnly();
 		for (const button of toolButtons.values()) button.disabled = readOnly;
-		for (const button of colorButtons.values()) button.disabled = readOnly;
+		for (const button of colorSwatches) button.disabled = readOnly;
 		customColor.disabled = readOnly;
 		widthSlider.disabled = readOnly;
 		widthNumber.disabled = readOnly;

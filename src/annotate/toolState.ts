@@ -1,4 +1,4 @@
-import { DEFAULT_COLOR, DEFAULT_WIDTH, MAX_WIDTH, MIN_WIDTH, ToolType } from './types';
+import { DEFAULT_COLOR, DEFAULT_WIDTH, MAX_WIDTH, MIN_WIDTH, ToolType, defaultStyleFor } from './types';
 
 export interface ToolStyle {
 	color: string;
@@ -115,8 +115,12 @@ export class ToolState {
 		this.notify('chrome');
 	}
 
+	// The tool's own default until the user overrides it, not one shared
+	// pair: a highlighter that starts on the pen's fine black nib draws a
+	// hairline smear the first time it is picked up, which is not a
+	// highlighter at all. See defaultStyleFor.
 	private styleFor(tool: ToolType): ToolStyle {
-		return this.styles.get(tool) ?? { color: DEFAULT_COLOR, width: DEFAULT_WIDTH };
+		return this.styles.get(tool) ?? defaultStyleFor(tool);
 	}
 
 	// Lets every live controller repaint its toolbar when the state changes

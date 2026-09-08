@@ -41,6 +41,28 @@ export interface PositionedBox extends TextItemBox {
 // same direction (median 0.176, 10th-90th percentile 0.08-0.24).
 export const BASELINE_DESCENT_RATIO = 0.175;
 
+// How tall a snapped highlight's bar is, as a fraction of the line height
+// pdf.js reports.
+//
+// Below 1 because that reported height is the font size — glyphs *plus* the
+// leading above and below them — and a bar drawn at the full value runs
+// into the lines on either side. Highlighting a paragraph came out as one
+// continuous lumpy block instead of as a stack of separate lines, and a
+// single highlighted line sat visibly taller than the words in it.
+//
+// Not much below 1, though: a real highlighter overshoots the glyphs a
+// little, and a bar clipped to the exact cap-height/descender band reads as
+// a careful underline rather than as a swipe of ink.
+export const HIGHLIGHT_HEIGHT_RATIO = 0.82;
+
+// The bar height for a line of the given height. Floored so that a line
+// pdf.js reports a zero or negative height for — which happens on the odd
+// malformed text run — still produces something visible rather than an
+// invisible zero-width stroke the user cannot find to erase.
+export function highlightBarHeight(lineHeight: number): number {
+	return Math.max(lineHeight * HIGHLIGHT_HEIGHT_RATIO, 1);
+}
+
 // How far apart two items' vertical centres can be, as a fraction of the
 // line height, and still count as the same line. A single visual line is
 // usually several items — one per run of consistent font or style — not one

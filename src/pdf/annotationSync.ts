@@ -62,11 +62,29 @@ function numbersFromArray(array: PDFArray): number[] {
 		.map((o) => o.asNumber());
 }
 
+// The /CA above which an ink annotation is taken to be a pen rather than a
+// highlighter, on read.
+//
+// Derived from HIGHLIGHTER_OPACITY rather than written as a number, because
+// the two are the same decision seen from opposite ends and a literal here
+// is a trap: raise the highlighter's opacity past a hard-coded 0.9 one day
+// and every highlight in every vault silently reads back as a pen stroke.
+// The midpoint between what a highlighter writes and the 1 a pen writes
+// keeps admitting older files (which carry 0.4) while leaving the widest
+// margin on both sides.
+const HIGHLIGHTER_OPACITY_MAX = (HIGHLIGHTER_OPACITY + 1) / 2;
+
 // ---- Writing ----
 
-function strokeHeader(color: string, width: number): string[] {
+// `1 J` is a round cap, `0 J` a flat one. Flat for a highlighter, matching
+// the canvas (see the lineCap note in src/annotate/render.ts): a snapped
+// highlight is one straight segment at the height of the text it covers, so
+// a round cap adds a bulge of half that height past the first and last
+// glyph. Round for everything else, where it is what stops a polyline
+// looking chipped at its ends.
+function strokeHeader(color: string, width: number, flatCap = false): string[] {
 	const [r, g, b] = hexToRgb(color);
-	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} RG`, `${width.toFixed(2)} w`, '1 J 1 j'];
+	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} RG`, `${width.toFixed(2)} w`, `${flatCap ? 0 : 1} J 1 j`];
 }
 
 // The annotation dict's own `/CA` entry (below) is the spec-correct way to
@@ -77,11 +95,33 @@ function strokeHeader(color: string, width: number): string[] {
 // overlay. Baking the alpha into the appearance stream itself via an
 // `ExtGState` + `gs` operator means the translucency is part of what gets
 // drawn, so it's correct regardless of whether the viewer also honors `/CA`.
-function buildAppearanceStream(pdfDoc: PDFDocument, bbox: number[], content: string, opacity = 1): PDFRef {
+//
+// `blend` is the other half of that reasoning, and it is what makes a
+// highlighter a highlighter rather than a translucent smear. Alpha alone
+// paints colour *between* the reader and the words, so text under a
+// highlight loses its contrast; `/BM /Multiply` makes the mark darken the
+// paper instead, leaving black text black because black times anything is
+// black. Its on-screen twin is the highlight layer's mix-blend-mode in
+// styles.css, and the two have to agree or the saved file stops looking
+// like the editor did.
+//
+// The alpha is kept alongside it rather than dropped: a reader that honours
+// `/BM` gets the intended result, and one that ignores it still gets a
+// translucent mark it can read the text through instead of an opaque bar
+// covering it.
+function buildAppearanceStream(
+	pdfDoc: PDFDocument,
+	bbox: number[],
+	content: string,
+	opacity = 1,
+	blend?: 'Multiply',
+): PDFRef {
 	let resources: PdfLiteralObject = {};
 	let body = content;
-	if (opacity < 1) {
-		const gsRef = pdfDoc.context.register(pdfDoc.context.obj({ Type: 'ExtGState', ca: opacity, CA: opacity }));
+	if (opacity < 1 || blend) {
+		const state: PdfLiteralObject = { Type: 'ExtGState', ca: opacity, CA: opacity };
+		if (blend) state.BM = blend;
+		const gsRef = pdfDoc.context.register(pdfDoc.context.obj(state));
 		resources = { ExtGState: { GS0: gsRef } };
 		body = `/GS0 gs\n${content}`;
 	}
@@ -146,7 +186,8 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 	const pad = stroke.width / 2;
 	const bbox = [box.minX - pad, box.minY - pad, box.maxX + pad, box.maxY + pad];
 
-	const opacity = stroke.tool === 'highlighter' ? HIGHLIGHTER_OPACITY : 1;
+	const isHighlight = stroke.tool === 'highlighter';
+	const opacity = isHighlight ? HIGHLIGHTER_OPACITY : 1;
 	// A highlighter never varies its width (see annotate/stroke.ts), so it
 	// never carries pressure — recording any for one would be dead weight in
 	// every file that has one.
@@ -157,8 +198,8 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 	// draws from, so the file matches what the user watched themselves draw.
 	const content = varying
 		? [...fillHeader(stroke.color), polygonOps(outlinePath(stroke.points, stroke.width)), 'f'].join('\n')
-		: [...strokeHeader(stroke.color, stroke.width), pathOps(smoothedPath(stroke.points)), 'S'].join('\n');
-	const apRef = buildAppearanceStream(pdfDoc, bbox, content, opacity);
+		: [...strokeHeader(stroke.color, stroke.width, isHighlight), pathOps(smoothedPath(stroke.points)), 'S'].join('\n');
+	const apRef = buildAppearanceStream(pdfDoc, bbox, content, opacity, isHighlight ? 'Multiply' : undefined);
 
 	const fields: PdfLiteralObject = {
 		Type: 'Annot',
@@ -427,7 +468,7 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 		if (points.length < 2) return null;
 
 		const opacity = dict.lookupMaybe(PDFName.of('CA'), PDFNumber)?.asNumber() ?? 1;
-		const tool = opacity < 0.9 ? 'highlighter' : 'pen';
+		const tool = opacity <= HIGHLIGHTER_OPACITY_MAX ? 'highlighter' : 'pen';
 
 		// Applied only when it describes exactly these points. A length
 		// mismatch means something else edited the path without knowing about

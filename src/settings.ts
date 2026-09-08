@@ -2,7 +2,7 @@
 // that barrel re-exports the toolbar, which imports Obsidian, and this
 // module has to stay loadable without an app around it — which is what
 // makes it testable.
-import { PRESET_COLORS } from './annotate/types';
+import { ALL_PRESET_COLORS } from './annotate/types';
 import { TEMPLATE_STYLES, type PageSizeName, type TemplateStyle } from './templates';
 
 export type { PageSizeName };
@@ -34,7 +34,7 @@ export interface InklingSettings {
 
 function defaultColorLabels(): Record<string, string> {
 	const labels: Record<string, string> = {};
-	for (const { value, label } of PRESET_COLORS) labels[value.toLowerCase()] = label;
+	for (const { value, label } of ALL_PRESET_COLORS) labels[value.toLowerCase()] = label;
 	return labels;
 }
 

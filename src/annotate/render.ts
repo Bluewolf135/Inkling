@@ -1,6 +1,6 @@
 import { boundingBox, unionBoundingBox } from './geometry';
 import { hasPressure, outlinePath, smoothedPath } from './stroke';
-import { Annotation, HIGHLIGHTER_OPACITY, NOTE_MARKER_SIZE, Point, Rect, StrokeAnnotation } from './types';
+import { Annotation, NOTE_MARKER_SIZE, Point, Rect, StrokeAnnotation } from './types';
 
 const SELECTION_COLOR = '#1971c2';
 const HANDLE_SIZE = 10;
@@ -179,11 +179,24 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, c
 	ctx.save();
 	ctx.strokeStyle = annotation.color;
 	ctx.lineWidth = annotation.width;
-	ctx.lineCap = 'round';
+	// Flat ends on a highlighter, round on everything else. A snapped
+	// highlight is one straight segment at the text's own height (see
+	// pdfView.ts), so a round cap adds a bulge of half that height past the
+	// first and last glyph — the pill shape that made highlights read as
+	// drawn blobs rather than as marked text. A real highlighter's chisel
+	// tip stops square, and so does this.
+	ctx.lineCap = isHighlight(annotation) ? 'butt' : 'round';
 	ctx.lineJoin = 'round';
-	if (annotation.kind === 'stroke' && annotation.tool === 'highlighter') {
-		ctx.globalAlpha = HIGHLIGHTER_OPACITY;
-	}
+	// Note there is no globalAlpha here any more. A highlighter's
+	// translucency is a property of the *layer* it lands on, which is
+	// composited into the page with mix-blend-mode: multiply (see
+	// styles.css). Setting it per-annotation was the old behaviour and had
+	// two visible faults: source-over paint at 40% put colour between the
+	// reader and the words, so black text under a highlight came out grey;
+	// and two overlapping strokes each contributed their own 40%, so a
+	// second pass over the same line came out darker than the first. On one
+	// layer at one opacity, overlapping strokes simply paint over each
+	// other and the page beneath keeps its contrast.
 
 	if (annotation.kind === 'note') {
 		drawNoteMarker(ctx, annotation.at, annotation.color);
@@ -225,6 +238,15 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, c
 		}
 	}
 	ctx.restore();
+}
+
+// Whether this annotation belongs on the multiplied highlight layer rather
+// than on the ink layer above it. The two are separated because the blend
+// mode that makes a highlighter correct makes everything else wrong: dark
+// ink multiplied into a dark (or inverted) page disappears, and a note
+// marker's white halo multiplies away to nothing.
+export function isHighlight(annotation: Annotation): boolean {
+	return annotation.kind === 'stroke' && annotation.tool === 'highlighter';
 }
 
 function drawSelectionOutline(ctx: CanvasRenderingContext2D, box: Rect): void {
@@ -302,7 +324,24 @@ export interface OverlayOptions {
 export function renderBase(ctx: CanvasRenderingContext2D, annotations: Annotation[]): void {
 	const { canvas } = ctx;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
-	for (const annotation of annotations) drawAnnotation(ctx, annotation, true);
+	for (const annotation of annotations) {
+		if (!isHighlight(annotation)) drawAnnotation(ctx, annotation, true);
+	}
+}
+
+// The highlight layer — everything drawn with the highlighter, and nothing
+// else. Its own canvas so it can be multiplied into the page (styles.css)
+// without taking the pen, the shapes and the note markers with it.
+//
+// Drawn at full strength here rather than at HIGHLIGHTER_OPACITY: the layer
+// carries the opacity, so strokes that overlap on it do not compound into a
+// darker patch the way per-annotation alpha did.
+export function renderHighlights(ctx: CanvasRenderingContext2D, annotations: Annotation[]): void {
+	const { canvas } = ctx;
+	ctx.clearRect(0, 0, canvas.width, canvas.height);
+	for (const annotation of annotations) {
+		if (isHighlight(annotation)) drawAnnotation(ctx, annotation, true);
+	}
 }
 
 // The live/interactive layer — the in-progress draft stroke or shape, the

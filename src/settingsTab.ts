@@ -1,5 +1,5 @@
 import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
-import { PRESET_COLORS } from './annotate';
+import { ALL_PRESET_COLORS } from './annotate';
 import { TEMPLATE_STYLES, TEMPLATE_STYLE_LABELS } from './templates';
 import { defaultSettings, normalizeSettings, type InklingSettings } from './settings';
 
@@ -166,9 +166,9 @@ export class InklingSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Colour categories')
-			.setDesc('What each highlighter colour means. These become the headings in an extracted note.');
+			.setDesc('What each colour means, for the pen and the highlighter alike. These become the headings in an extracted note.');
 
-		for (const { value, label } of PRESET_COLORS) {
+		for (const { value, label } of ALL_PRESET_COLORS) {
 			const key = value.toLowerCase();
 			new Setting(containerEl)
 				.setName(label)

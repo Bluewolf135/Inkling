@@ -113,14 +113,60 @@
 	touch-action: none;
 }
 
-/* Two stacked canvases per page (see AnnotationController's PageMount) — a
-   `base` layer for committed annotations, repainted only when that page's
+/* Up to three stacked canvases per page (see AnnotationController's
+   PageMount) — a `highlight` layer beneath everything, a `base` layer for
+   committed pen/shape/note annotations, repainted only when that page's
    content actually changes, and an `overlay` layer for the in-progress
-   draft/lasso/selection/eraser-cursor, repainted on every pointer move. The
-   base layer is purely a picture (pointer-events: none); only the overlay,
-   sitting on top, receives input. */
+   draft/lasso/selection/eraser-cursor, repainted on every pointer move.
+   Only the overlay, sitting on top, receives input; the other two are
+   purely pictures. */
 .inkling-annotation-base {
 	pointer-events: none;
+}
+
+/* The highlighter layer, and the one line that makes a highlighter look
+   like a highlighter.
+
+   `multiply` is not decoration here, it is the whole behaviour. Painted
+   the ordinary way — source-over at some alpha, which is what this used to
+   do per annotation — a highlight puts colour *between* the reader and the
+   words: black text under it came out grey, the page looked washed, and
+   two overlapping strokes stacked their alpha into a darker patch. Under a
+   multiply, white paper takes the colour and black text keeps its own,
+   because black times anything is black. The layer's opacity then controls
+   only how saturated the paper goes, and never touches the text at all.
+
+   Its own canvas rather than a blend mode on the base layer, because the
+   same arithmetic ruins everything else: multiplied dark ink disappears
+   into a dark page, and a note marker's white halo multiplies to nothing.
+
+   `isolation: isolate` is deliberately absent — the point is to blend with
+   the PDF canvas underneath, which is a sibling in the same stacking
+   context, so nothing between them may create one.
+
+   The opacity is deliberately the one number in this rule that is not
+   written here. It is HIGHLIGHTER_OPACITY (src/annotate/types.ts), set as
+   a custom property on the canvas by createHighlightLayer, because the
+   same constant is also the annotation's /CA in the saved file and the
+   threshold that tells a highlight from a pen stroke on the way back in.
+   Three places, one decision — and a copy of it in a stylesheet is a copy
+   nothing would ever fail on. With no property set the declaration is
+   invalid and opacity stays 1; the layer is only ever built by that one
+   function, which always sets it. */
+.inkling-annotation-highlight {
+	pointer-events: none;
+	mix-blend-mode: multiply;
+	opacity: var(--inkling-highlight-opacity);
+}
+
+/* Inverted pages (dark mode) flip the arithmetic with them. The page canvas
+   is filtered to invert(1), so `paper` is now near-black and the text near
+   white — and multiplying a pale tint into black leaves black, which is a
+   highlight nobody can see. `screen` is multiply's mirror: it lightens
+   where multiply darkens, so the inverted paper takes the tint and the
+   (now light) text stays light, exactly as it does the right way up. */
+.inkling-pdf-view.is-inverted .inkling-annotation-highlight {
+	mix-blend-mode: screen;
 }
 
 .inkling-annotation-overlay {

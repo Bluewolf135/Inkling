@@ -1,4 +1,4 @@
-import { PDFDocument } from 'pdf-lib';
+import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { readInklingAnnotations, writeInklingAnnotations } from '../../src/pdf/annotationSync';
 import type { Annotation } from '../../src/annotate/types';
@@ -140,5 +140,74 @@ describe('annotation round trip', () => {
 		expect(readInklingAnnotations(reloaded, 0)).toHaveLength(0);
 		expect(readInklingAnnotations(reloaded, 1)).toHaveLength(1);
 		expect(readInklingAnnotations(reloaded, 2)).toHaveLength(0);
+	});
+});
+
+describe('highlighter appearance in the file', () => {
+	const highlight: Annotation = {
+		id: 'ink-h',
+		kind: 'stroke',
+		tool: 'highlighter',
+		color: '#ffd43b',
+		width: 12,
+		points: [{ x: 10, y: 20 }, { x: 90, y: 20 }],
+	};
+
+	// The appearance stream is what every other PDF reader actually paints,
+	// so whatever makes a highlight look right on screen has to be stated
+	// here too or the saved file stops matching the editor.
+	//
+	// Read out of the object graph rather than by scanning the saved bytes:
+	// pdf-lib deflates stream contents on save, so the operators are not
+	// there to grep for.
+	async function appearanceOf(annotation: Annotation): Promise<{ ops: string; blend: string | undefined }> {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [annotation]);
+
+		const annots = doc.getPage(0).node.Annots();
+		const dict = annots?.lookup(0, PDFDict);
+		const ref = dict?.lookupMaybe(PDFName.of('AP'), PDFDict)?.get(PDFName.of('N'));
+		const stream = ref ? doc.context.lookup(ref) : undefined;
+		if (!(stream instanceof PDFRawStream)) throw new Error('no appearance stream was written');
+
+		const blend = stream.dict
+			.lookupMaybe(PDFName.of('Resources'), PDFDict)
+			?.lookupMaybe(PDFName.of('ExtGState'), PDFDict)
+			?.lookupMaybe(PDFName.of('GS0'), PDFDict)
+			?.lookupMaybe(PDFName.of('BM'), PDFName)
+			?.decodeText();
+
+		return { ops: new TextDecoder().decode(stream.getContents()), blend };
+	}
+
+	it('multiplies the highlight into the page rather than painting over it', async () => {
+		expect((await appearanceOf(highlight)).blend).toBe('Multiply');
+	});
+
+	it('leaves a pen stroke opaque and unblended', async () => {
+		expect((await appearanceOf({ ...highlight, id: 'ink-p', tool: 'pen', color: '#1e1e1e' })).blend).toBeUndefined();
+	});
+
+	it('gives a highlight flat ends, not the pen’s round cap', async () => {
+		// `0 J` is butt cap, `1 J` round. A round cap on a text-height bar
+		// bulges half that height past the first and last glyph.
+		expect((await appearanceOf(highlight)).ops).toContain('0 J');
+		expect((await appearanceOf({ ...highlight, id: 'ink-p', tool: 'pen' })).ops).toContain('1 J');
+	});
+
+	it('still round-trips as a highlighter after the opacity changed', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [highlight]);
+		expect(readInklingAnnotations(await reload(doc), 0)[0]).toMatchObject({ tool: 'highlighter' });
+	});
+
+	it('still reads highlights written before the opacity changed', async () => {
+		// Files already in vaults carry CA 0.4. The threshold has to keep
+		// admitting them, not just the value this version happens to write.
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [highlight]);
+		const dict = doc.getPage(0).node.Annots()?.lookup(0, PDFDict);
+		dict?.set(PDFName.of('CA'), PDFNumber.of(0.4));
+		expect(readInklingAnnotations(await reload(doc), 0)[0]).toMatchObject({ tool: 'highlighter' });
 	});
 });

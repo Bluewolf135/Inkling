@@ -3,7 +3,7 @@ import { getDocument, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dis
 // From types, not the '../annotate' barrel: the barrel re-exports the
 // toolbar, which imports the Obsidian API, and pulling that in here made
 // this module — the whole of PDF reading — impossible to test in Node.
-import { PRESET_COLORS } from '../annotate/types';
+import { ALL_PRESET_COLORS } from '../annotate/types';
 import { ID_PREFIX, INKLING_EXTRAS, QUOTE_KEY } from '../pdf/annotationFormat';
 import { groupIntoLines, quoteBetween, type PositionedBox } from '../pdf/textLines';
 import type { ExtractedAnnotation } from './extractFormat';
@@ -33,7 +33,7 @@ import type { ExtractedAnnotation } from './extractFormat';
 // these be renamed, so "Yellow = definition, Red = disagree" works.
 export function defaultColorLabels(): Record<string, string> {
 	const labels: Record<string, string> = {};
-	for (const { value, label } of PRESET_COLORS) labels[value.toLowerCase()] = label;
+	for (const { value, label } of ALL_PRESET_COLORS) labels[value.toLowerCase()] = label;
 	return labels;
 }
 

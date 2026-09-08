@@ -16,13 +16,14 @@ import { createId } from './id';
 import { attachPointerGestures, currentZoom, GestureHandlers, zoomAbout } from './pointer';
 import { recognizeShape } from './recognize';
 import { SIMPLIFY_EPSILON, simplifyPoints } from './simplify';
-import { handleRects, renderBase, renderOverlay } from './render';
+import { handleRects, isHighlight, renderBase, renderHighlights, renderOverlay } from './render';
 import { AnnotationStore } from './store';
 import { HistoryStack } from './history';
 import { ToolState } from './toolState';
 import {
 	Annotation,
 	DrawToolType,
+	HIGHLIGHTER_OPACITY,
 	NoteAnnotation,
 	Point,
 	Rect,
@@ -81,6 +82,22 @@ interface PageMount {
 	// somebody only ever scrolls past never needs it. See overlayContext.
 	overlayCanvas: HTMLCanvasElement;
 	overlay: CanvasRenderingContext2D | null;
+	// A third canvas, beneath the other two, holding only highlighter
+	// strokes. Separate because it is composited into the page with
+	// mix-blend-mode: multiply (see styles.css) and the other two must not
+	// be: multiplied dark ink vanishes into a dark or inverted page, and a
+	// note marker's white halo multiplies away to nothing.
+	//
+	// Created lazily, and for the same reason the overlay's context is: a
+	// canvas costs width x height x 4 bytes the moment it exists, and most
+	// pages of most books carry no highlight at all. A page only pays for
+	// this layer once something is actually highlighted on it.
+	highlightCanvas: HTMLCanvasElement | null;
+	highlight: CanvasRenderingContext2D | null;
+	// The size the layers are backed at, kept so a lazily-created highlight
+	// canvas can match the two that already exist.
+	width: number;
+	height: number;
 	// The zoomable wrapper the canvases live in — the element the zoom
 	// transform is applied to. Held so a zoom asked for from the toolbar
 	// or the keyboard, which has no pointer to work back from, can reach
@@ -245,7 +262,17 @@ export class AnnotationController {
 		if (!base) throw new Error('Inkling: could not acquire a 2D context for the annotation layer.');
 
 		const detach = attachPointerGestures(overlayCanvas, () => this.getHandlersFor(pageNumber));
-		this.pages.set(pageNumber, { base, overlayCanvas, overlay: null, content: host, detach });
+		this.pages.set(pageNumber, {
+			base,
+			overlayCanvas,
+			overlay: null,
+			highlightCanvas: null,
+			highlight: null,
+			width,
+			height,
+			content: host,
+			detach,
+		});
 		this.redrawBase(pageNumber);
 		this.redrawOverlay(pageNumber);
 	}
@@ -281,6 +308,12 @@ export class AnnotationController {
 		mount.base.canvas.height = height;
 		mount.overlayCanvas.width = width;
 		mount.overlayCanvas.height = height;
+		if (mount.highlightCanvas) {
+			mount.highlightCanvas.width = width;
+			mount.highlightCanvas.height = height;
+		}
+		mount.width = width;
+		mount.height = height;
 		this.store.setPageLive(pageNumber, annotations);
 		this.redrawOverlay(pageNumber);
 	}
@@ -331,6 +364,7 @@ export class AnnotationController {
 		mount.detach();
 		mount.base.canvas.remove();
 		mount.overlayCanvas.remove();
+		mount.highlightCanvas?.remove();
 		this.pages.delete(pageNumber);
 	}
 
@@ -1046,7 +1080,44 @@ export class AnnotationController {
 	private redrawBase(pageNumber: number): void {
 		const mount = this.pages.get(pageNumber);
 		if (!mount) return;
-		renderBase(mount.base, this.store.getPage(pageNumber));
+		const annotations = this.store.getPage(pageNumber);
+		renderBase(mount.base, annotations);
+
+		// The layer is created on the first highlight and kept from then on —
+		// erasing the last one has to repaint it empty, not leave the last
+		// highlight sitting there because there is now nothing to draw.
+		const context = mount.highlight ?? (annotations.some(isHighlight) ? this.createHighlightLayer(mount) : null);
+		if (context) renderHighlights(context, annotations);
+	}
+
+	// Inserts the multiply-blended highlight canvas underneath the ink layer.
+	// `insertBefore` rather than an append: both other canvases already exist
+	// by the time anything is highlighted, and a highlight painted over the
+	// ink would cover the pen strokes it is supposed to sit behind.
+	private createHighlightLayer(mount: PageMount): CanvasRenderingContext2D | null {
+		const canvas = mount.content.createEl('canvas', {
+			cls: 'inkling-annotation-layer inkling-annotation-highlight',
+		});
+		canvas.width = mount.width;
+		canvas.height = mount.height;
+		// How strongly the layer is multiplied into the page. Set from here
+		// rather than written into styles.css, so the one constant that is
+		// also the annotation's /CA and the threshold it is read back by has
+		// no fourth copy to fall out of step. The stylesheet consumes it as
+		// var(--inkling-highlight-opacity).
+		canvas.setCssProps({ '--inkling-highlight-opacity': String(HIGHLIGHTER_OPACITY) });
+		mount.content.insertBefore(canvas, mount.base.canvas);
+
+		const context = canvas.getContext('2d');
+		if (!context) {
+			// Not fatal the way the base layer's is: losing this one costs the
+			// highlights their blending, not the page its annotations.
+			canvas.remove();
+			return null;
+		}
+		mount.highlightCanvas = canvas;
+		mount.highlight = context;
+		return context;
 	}
 
 	private redrawOverlay(pageNumber: number): void {
