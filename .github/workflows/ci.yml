@@ -11,7 +11,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 24, not 20: jsdom 30 (a devDependency since the test harness
+          # started mounting a real note) pulls undici 8, whose webidl
+          # destructures markAsUncloneable from node:worker_threads — an API
+          # that does not exist before Node 22. On 20 it resolves to
+          # undefined and every jsdom test dies on the first cache access.
+          # Both packages declare the floor in `engines`; package.json now
+          # declares it too, so npm says so at install time rather than
+          # leaving it to a stack trace inside undici.
+          node-version: '24'
           cache: npm
       - run: npm ci
       - run: npm run lint

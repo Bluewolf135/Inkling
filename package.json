@@ -4,6 +4,9 @@
 	"description": "Handwritten and text-based annotation for Markdown notes and PDFs in Obsidian, built mobile-first for stylus input.",
 	"main": "main.js",
 	"type": "module",
+	"engines": {
+		"node": ">=22.22.2"
+	},
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
