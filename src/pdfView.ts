@@ -1,7 +1,7 @@
 import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { AnnotationController, buildToolbar, MAX_ZOOM, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
+import { AnnotationController, buildToolbar, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
 import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
@@ -9,6 +9,7 @@ import { writeBinarySafely } from './vaultWrite';
 import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
 import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
 import { BASELINE_DESCENT_RATIO, groupIntoLines, highlightBarHeight, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
+import { RENDER_SCALE, baseRenderScale, layoutRenderScale, zoomedRenderScale } from './pdf/renderScale';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { defaultSettings, type InklingSettings } from './settings';
 import { applyTemplateStyle, pageSizeFor, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
@@ -28,7 +29,6 @@ export const VIEW_TYPE_PDF = 'inkling-pdf-view';
 export const CORE_PDF_VIEW_TYPE = 'pdf';
 
 const PAGE_NUMBER_ATTR = 'pageNumber';
-const RENDER_SCALE = 1.5;
 
 // How many pages either side of the visible ones keep their canvases once
 // scrolled past; anything beyond is torn back down to its placeholder and
@@ -282,6 +282,24 @@ export class PdfAnnotateView extends FileView {
 	// pointer.ts) makes the original RENDER_SCALE render look blurry.
 	private pageCanvases = new Map<number, HTMLCanvasElement>();
 	private renderedScales = new Map<number, number>();
+	// What each page was backed at *unzoomed* — the scale that gives it one
+	// canvas pixel per physical device pixel at its laid-out size (see
+	// pdf/renderScale.ts). Distinct from renderedScales, which also moves
+	// when a page is sharpened for a pinch-zoom; this is the baseline that
+	// sharpening is measured against.
+	//
+	// Computed once per page and then kept, rather than recomputed on every
+	// render. A page's annotations live in the coordinate space of the scale
+	// it was rendered at, so quietly picking a different one later (after a
+	// pane resize, say) would put every stroke on that page in the wrong
+	// place — the same reason renderedScales is reused rather than reset.
+	private baseScales = new Map<number, number>();
+	// The scale each page is laid out at — fitted to the pane, the way the
+	// core PDF view fits its own (see pdf/renderScale.ts). Kept per page
+	// rather than recomputed, for the same reason baseScales is: a page's
+	// annotations live in the space it was rendered in, so its size must not
+	// move underneath them.
+	private layoutScales = new Map<number, number>();
 	// Pages currently mid-upgradeResolution — guards against a second pinch
 	// ending before the first page's re-render has finished.
 	private readonly upgradingPages = new Set<number>();
@@ -773,6 +791,8 @@ export class PdfAnnotateView extends FileView {
 		this.viewports.clear();
 		this.pageCanvases.clear();
 		this.renderedScales.clear();
+		this.baseScales.clear();
+		this.layoutScales.clear();
 		this.upgradingPages.clear();
 		this.textLines.clear();
 		this.pendingScrollToPage = null;
@@ -904,15 +924,17 @@ export class PdfAnnotateView extends FileView {
 		// space, so coming back at a different scale would put every stroke
 		// in the wrong place. It also means a page sharpened for zoom comes
 		// back sharp.
-		const scale = this.renderedScales.get(pageNumber) ?? RENDER_SCALE;
-		const viewport = page.getViewport({ scale });
-
-		// Laid out at the base scale regardless of how densely it's actually
-		// rendered — same split upgradeResolution relies on, where a sharper
-		// re-render raises only the canvas's backing-store resolution and
-		// never its CSS size, so nothing reflows.
-		const layoutViewport = scale === RENDER_SCALE ? viewport : page.getViewport({ scale: RENDER_SCALE });
+		// Two scales, deliberately: one for how big the page is drawn, one for
+		// how densely its canvas is backed. Keeping them apart is what lets
+		// upgradeResolution sharpen a pinch-zoomed page by raising only the
+		// backing store, with no reflow.
+		const pagePointWidth = page.getViewport({ scale: 1 }).width;
+		const layoutScale = this.layoutScaleFor(pageNumber, pagePointWidth);
+		const layoutViewport = page.getViewport({ scale: layoutScale });
 		sizePlaceholder(placeholder, layoutViewport.width, layoutViewport.height);
+
+		const scale = this.renderedScales.get(pageNumber) ?? this.baseScaleFor(pageNumber, layoutViewport.width, pagePointWidth);
+		const viewport = page.getViewport({ scale });
 
 		// A separate transformable layer inside the placeholder's fixed-size
 		// (and, per styles.css, clipped) box — pinch-zoom/pan (see pointer.ts)
@@ -950,7 +972,12 @@ export class PdfAnnotateView extends FileView {
 		if (token !== this.renderToken) return;
 		this.viewports.set(pageNumber, viewport);
 		this.pageCanvases.set(pageNumber, canvas);
-		this.renderedScales.set(pageNumber, RENDER_SCALE);
+		// The scale it was actually rendered at, which is not always the base
+		// one: a page recycled after being sharpened for zoom comes back at
+		// the scale it left at, and recording RENDER_SCALE here (as this used
+		// to) left renderedScales disagreeing with the viewport stored beside
+		// it about the space that page's annotations are in.
+		this.renderedScales.set(pageNumber, scale);
 		this.controller.mountPage(pageNumber, content, viewport.width, viewport.height);
 
 		// Only ever on a page's first render. A recycled page (see
@@ -979,6 +1006,57 @@ export class PdfAnnotateView extends FileView {
 			});
 	}
 
+	// The scale to back a page's canvas at, the first time it is rendered.
+	//
+	// This is the fix for "the PDF got blurrier the moment I opened it to
+	// annotate". The view used to render every page at a flat 1.5 and lay it
+	// out at 1.5 too, which is exactly one canvas pixel per CSS pixel — so on
+	// any display with a devicePixelRatio above 1 (a 150%-scaled Windows
+	// desktop, a retina Mac, a tablet) the browser upscaled that raster to
+	// fill the real pixels. Obsidian's own PDF view is pdf.js's viewer, which
+	// applies devicePixelRatio as a matter of course, so switching a leaf
+	// into this one visibly softened the page. src/markdown/inkBlock.ts had
+	// always done this correctly for ink blocks; only the PDF view had not.
+	//
+	// `clientWidth` rather than the layout width, so a page shrunk to fit a
+	// narrow pane is rendered for the size it is really displayed at instead
+	// of the size it would have liked to be — the memory saved there is what
+	// pays for the density.
+	private baseScaleFor(pageNumber: number, layoutWidth: number, pagePointWidth: number): number {
+		const existing = this.baseScales.get(pageNumber);
+		if (existing !== undefined) return existing;
+
+		const scale = baseRenderScale(layoutWidth, pagePointWidth, window.devicePixelRatio || 1);
+		this.baseScales.set(pageNumber, scale);
+		return scale;
+	}
+
+	// How big to draw this page: fitted to the width the scroll container
+	// actually has, rather than a flat multiple of the page's size in points.
+	// This is the half of the sharpness fix that mattered on an ordinary 1x
+	// desktop — the old fixed 1.5x drew a 540pt page 810px wide in a pane
+	// where the core PDF view drew it 1224px, so two thirds of the
+	// resolution was never asked for in the first place.
+	private layoutScaleFor(pageNumber: number, pagePointWidth: number): number {
+		const existing = this.layoutScales.get(pageNumber);
+		if (existing !== undefined) return existing;
+
+		const scale = layoutRenderScale(this.availablePageWidth(), pagePointWidth);
+		this.layoutScales.set(pageNumber, scale);
+		return scale;
+	}
+
+	// The CSS width a page placeholder has to fill. `clientWidth` includes
+	// the container's own padding, which the placeholders sit inside of, so
+	// the padding has to come back off — measured rather than assumed,
+	// because it is set in the stylesheet in theme units.
+	private availablePageWidth(): number {
+		const container = this.contentEl;
+		const style = window.getComputedStyle(container);
+		const padding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+		return Math.max(container.clientWidth - padding, 0);
+	}
+
 	// Fired once a pinch-zoom gesture on a page settles (see
 	// AnnotationController's onZoomSettled) — the original render is a
 	// fixed-resolution raster, so CSS-transform zoom past it just shows that
@@ -989,8 +1067,13 @@ export class PdfAnnotateView extends FileView {
 	private async upgradeResolution(pageNumber: number, zoomScale: number): Promise<void> {
 		if (!this.pdf || this.upgradingPages.has(pageNumber)) return;
 
-		const currentScale = this.renderedScales.get(pageNumber) ?? RENDER_SCALE;
-		const targetScale = Math.min(RENDER_SCALE * zoomScale, RENDER_SCALE * MAX_ZOOM);
+		const base = this.baseScales.get(pageNumber) ?? RENDER_SCALE;
+		const currentScale = this.renderedScales.get(pageNumber) ?? base;
+		// Measured from this page's own base rather than from a flat
+		// constant, so zooming in keeps the one-canvas-pixel-per-device-pixel
+		// relationship the unzoomed page already has instead of dropping back
+		// to it.
+		const targetScale = zoomedRenderScale(base, zoomScale);
 		// Not worth a re-render for a marginal gain — and never for one that
 		// would make things *blurrier* (e.g. the user zoomed back out).
 		if (targetScale <= currentScale * 1.15) return;
