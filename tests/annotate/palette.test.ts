@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ToolState } from '../../src/annotate/toolState';
 import {
+	ALL_PRESET_COLORS,
 	DEFAULT_COLOR,
 	DEFAULT_WIDTH,
 	HIGHLIGHTER_COLORS,
@@ -63,5 +64,40 @@ describe('ToolState with per-tool defaults', () => {
 		state.setTool('pen');
 		state.setTool('highlighter');
 		expect(state.getColor()).toBe('#a9e34b');
+	});
+});
+
+// The highlighter opened on #ffd43b, which is Open Color's yellow-4 — a gold
+// rather than a yellow, and warmer still once it is multiplied into the page
+// at 60%. Reported as reading orange. It now opens on yellow-3, and the
+// orange that sat further along the strip is retired to make room, since a
+// strip with two oranges and no yellow was the complaint.
+describe('the highlighter palette after the yellow swap', () => {
+	it('opens on a yellow rather than the gold it used to', () => {
+		expect(defaultStyleFor('highlighter').color).toBe('#ffe066');
+	});
+
+	it('no longer offers orange on the strip', () => {
+		expect(paletteFor('highlighter').some((c) => c.value === '#ffa94d')).toBe(false);
+	});
+
+	it('keeps the old default on the strip, because the vault is full of it', () => {
+		// Every highlight made before today is #ffd43b. Dropping it would
+		// leave no swatch that matches the marks already in the books.
+		expect(paletteFor('highlighter').some((c) => c.value === '#ffd43b')).toBe(true);
+	});
+
+	it('can still name a colour it no longer offers', () => {
+		// Extraction names a colour from ALL_PRESET_COLORS, and the settings
+		// tab builds its category labels from the same list. A colour retired
+		// from the strip that vanished from here would turn every existing
+		// annotation in it into a bare hex code in the extracted note.
+		expect(ALL_PRESET_COLORS.find((c) => c.value === '#ffa94d')?.label).toBe('Orange');
+	});
+
+	it('still offers as many tints as the pen has inks', () => {
+		// The two strips are the same hues a rung apart, so the toolbar does
+		// not change width when the tool changes.
+		expect(paletteFor('highlighter')).toHaveLength(PEN_COLORS.length);
 	});
 });

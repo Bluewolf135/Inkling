@@ -101,19 +101,35 @@ export const PEN_COLORS: readonly PresetColor[] = [
 // bright and one rung pale, so the strip does not change character when the
 // tool does.
 export const HIGHLIGHTER_COLORS: readonly PresetColor[] = [
-	{ value: '#ffd43b', label: 'Yellow' },
+	// Yellow-3, not the yellow-4 this opened on for its first months.
+	// Yellow-4 is a gold to begin with and the multiply warms it further —
+	// 0.4 + 0.6 x colour against white paper — so the tool people reach for
+	// first came out looking orange. Reported as exactly that.
+	{ value: '#ffe066', label: 'Yellow' },
 	{ value: '#a9e34b', label: 'Green' },
 	{ value: '#ffa8a8', label: 'Pink' },
 	{ value: '#66d9e8', label: 'Blue' },
-	{ value: '#ffa94d', label: 'Orange' },
+	// The old default, kept on the strip rather than retired with the
+	// orange: every highlight made before today is this colour, and dropping
+	// it would leave no swatch that matches the marks already in the books.
+	{ value: '#ffd43b', label: 'Gold' },
 	{ value: '#d0bfff', label: 'Purple' },
 ];
+
+// Retired from the strip, still nameable.
+//
+// A colour that leaves the palette must not leave this file. Extraction
+// names a colour from ALL_PRESET_COLORS and the settings tab builds its
+// category labels from the same list, so a hue simply deleted would turn
+// every annotation already drawn in it into a bare hex code in the extracted
+// note — a silent regression in files the user cannot re-make.
+const RETIRED_COLORS: readonly PresetColor[] = [{ value: '#ffa94d', label: 'Orange' }];
 
 // Every colour the plugin can label or offer anywhere, in one list. The
 // settings tab's category names key off this rather than off PEN_COLORS
 // alone, so a highlighter tint can carry a meaning ("Yellow = definition")
 // the same way an ink colour can.
-export const ALL_PRESET_COLORS: readonly PresetColor[] = [...PEN_COLORS, ...HIGHLIGHTER_COLORS];
+export const ALL_PRESET_COLORS: readonly PresetColor[] = [...PEN_COLORS, ...HIGHLIGHTER_COLORS, ...RETIRED_COLORS];
 
 // Which swatches the toolbar shows for a given tool. Only the highlighter
 // differs; a shape or a note is drawn in ink like the pen is.
