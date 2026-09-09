@@ -178,6 +178,40 @@ describe('a banner whose block has since been repaired', () => {
 
 		expect(banner()).not.toBeNull();
 	});
+
+	it('refuses the block again if it is damaged a second time', async () => {
+		// Conflicts keep happening in a live-replicating vault, so a block
+		// that healed once can be damaged again. Lifting the refusal on one
+		// reading of the file and never looking again is the same mistake the
+		// stale banner was, pointing the other way — and this direction fails
+		// open rather than closed.
+		await note.sync(repaired);
+		await note.sync(noteText(block('ink-repaired', [goodStroke('a'), badStroke('b')])));
+
+		expect(banner()).not.toBeNull();
+	});
+
+	it('will not write over a block that was damaged again', async () => {
+		await note.sync(repaired);
+		const damagedAgain = noteText(block('ink-repaired', [goodStroke('a'), badStroke('b')]));
+		await note.sync(damagedAgain);
+
+		note.block(0).reveal();
+		note.block(0).openForEditing();
+		note.block(0).drawStroke([
+			[100, 100],
+			[150, 120],
+			[200, 100],
+		]);
+		await note.flushWrites();
+
+		// The entry this build could not read is still in the file. Asserting
+		// on that rather than only on the note being unchanged: a block that
+		// refused the ink for some unrelated reason would pass the weaker
+		// check while proving nothing.
+		expect(note.fenceBody(0)).toContain('notatool');
+		expect(note.contents()).toBe(damagedAgain);
+	});
 });
 
 describe('a block too damaged to name itself', () => {

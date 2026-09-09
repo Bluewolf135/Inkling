@@ -578,7 +578,13 @@ class InkBlockView {
 
 	// A block that could not be read watches its own note, so that the
 	// decision made when it rendered is not the only one it ever makes.
-	// Registered only while damaged, so a healthy note carries no listeners.
+	//
+	// Registered only by a block that was damaged when it rendered, so a
+	// healthy note carries no listeners at all — but kept for that block's
+	// whole life, not only until it is repaired. Conflicts keep happening in
+	// a live-replicating vault, and a block that healed once can be damaged
+	// again; dropping the watch on the way out would leave it writable with
+	// no banner, which fails open where the stale banner failed closed.
 	private watchForRepair(): void {
 		const vault = this.plugin.app.vault;
 		const ref = vault.on('modify', (file) => {
@@ -589,7 +595,7 @@ class InkBlockView {
 	}
 
 	private async recheckDamage(): Promise<void> {
-		if (this.detached || !this.isDamaged()) return;
+		if (this.detached) return;
 		const file = this.plugin.app.vault.getAbstractFileByPath(this.ctx.sourcePath);
 		if (!(file instanceof TFile)) return;
 
@@ -599,13 +605,9 @@ class InkBlockView {
 		} catch {
 			return;
 		}
-		// Asked again rather than assumed from above: reading the file is
-		// asynchronous, and the block can have been recovered by hand — or
-		// detached — while it was in flight. Through a method returning a
-		// boolean, because comparing the field directly would be narrowed by
-		// the check before the await, and that narrowing is exactly the
-		// assumption an await invalidates.
-		if (this.detached || !this.isDamaged()) return;
+		// Reading the file is asynchronous, so the block can have been
+		// detached while it was in flight.
+		if (this.detached) return;
 
 		const lines = contents.split('\n');
 		// A block whose id was inside the JSON that failed to parse cannot be
@@ -617,8 +619,19 @@ class InkBlockView {
 
 		const body = lines.slice(range.lineStart + 1, range.lineEnd).join('\n');
 		const { data, damage } = parseInkBlock(body);
-		if (damage.kind !== 'none') return;
 
+		if (damage.kind !== 'none') {
+			// Damaged now, and the refusal has to come back. Nothing is
+			// re-seeded: what is on screen is what the user drew, and
+			// replacing it with the partial parse of a file we have just
+			// refused to write would take strokes off the screen on the
+			// strength of a version we do not trust.
+			if (this.isDamaged()) return;
+			this.applyDamage(damage);
+			return;
+		}
+
+		if (!this.isDamaged()) return;
 		this.clearDamage();
 		this.renderedSource = body.trim();
 		this.data = { ...data, id: this.blockId };
@@ -633,13 +646,28 @@ class InkBlockView {
 		return this.damage.kind !== 'none';
 	}
 
+	private applyDamage(damage: InkBlockDamage): void {
+		this.damage = damage;
+		this.readOnly = true;
+		this.buildBanner(damage);
+		// Told directly, not left to the toggle. The controller learns its
+		// read-only state inside setOpen, so a block whose tool strip is
+		// already open would keep taking ink until the next time someone
+		// closed and reopened it — which is the whole window this refusal
+		// exists to close.
+		this.controller.setReadOnly(true);
+	}
+
 	private clearDamage(): void {
 		this.damage = { kind: 'none' };
 		this.readOnly = false;
 		this.bannerEl?.remove();
 		this.bannerEl = null;
-		this.disposeRepairWatch?.();
-		this.disposeRepairWatch = null;
+		// The mirror of applyDamage, and the reason that one is not enough on
+		// its own: a repaired block whose strip was already open looked
+		// editable and silently refused every stroke, because the controller
+		// was never told the refusal had been lifted.
+		this.controller.setReadOnly(this.disposeToolbar === null);
 	}
 
 	private buildToolbarToggle(): void {
