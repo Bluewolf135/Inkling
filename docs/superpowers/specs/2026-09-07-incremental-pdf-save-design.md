@@ -394,6 +394,38 @@ rewrite from a fresh read.
 | Appendix grows unboundedly, including from erasing | File bloat | Compaction, which is the only garbage collector |
 | ~~Encrypted PDFs~~ | Not a risk | Already rejected at `PDFDocument.load`; see above |
 
+## Answers, from the spike of 2026-09-08
+
+Questions 1 to 4 were answered by a throwaway script over the twenty PDFs in
+the vault. The full table is in the roadmap; what matters to this document
+is that **question 2 came back the wrong way round**.
+
+The verification parse is not cheaper than the serialization it replaces. It
+is slightly dearer: 12,864 ms against 12,235 ms summed across the library,
+and on nine of twenty books verifying costs more than the full save. The
+cost tracks object count rather than bytes, so the largest book is not the
+worst case — a 16.6 MB book parses in 2,128 ms where a 37.1 MB one takes
+1,049 ms.
+
+That kills option 1 under "Verify before appending". A per-save cost of one
+to two seconds means the throttle cannot come out, and the throttle is what
+this design exists to remove. Option 2 is the only survivor, and it is the
+one flagged above as most likely to be wrong.
+
+The other three answers are favourable and none of them reshapes anything:
+`appendBinary` exists from 1.12.3 and must be feature-detected against a
+`minAppVersion` of 1.4.4; LiveSync's settings say an append should re-upload
+only the tail; and the classifier declines 10% of a real library, both
+hybrid `/XRefStm` files. Notably pdf-lib opened all twenty happily,
+including the two that must be declined — the blindness this design already
+predicted, now observed.
+
+**The item is therefore no longer a performance decision.** It buys a crash
+window of about a second instead of up to a minute, and it costs
+whole-document verification on most saves. Whether that trade is worth
+making is the author's call, and nothing below should be started until it
+is made.
+
 ## Open questions, in the order they should be answered
 
 1. Does `appendBinary` exist at `minAppVersion` 1.4.4, and on mobile?
