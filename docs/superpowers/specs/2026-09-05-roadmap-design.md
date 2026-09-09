@@ -405,7 +405,7 @@ today's behaviour exactly:
 | Pressure sensitivity | On |
 | Stroke smoothing | On |
 | Shape recognition | Hold to snap |
-| Dark-mode page inversion | Follow theme |
+| Dark-mode page inversion | Never (changed from Follow theme, 2026-09-09) |
 | Toolbar starts collapsed | Off |
 | Extraction note path | `<folder>/<name> — annotations.md` |
 | Colour category labels | The palette's own labels |

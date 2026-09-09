@@ -53,7 +53,11 @@ export function defaultSettings(): InklingSettings {
 		pressure: true,
 		smoothing: true,
 		shapeRecognition: 'hold',
-		darkInversion: 'follow-theme',
+		// Off, not 'follow-theme'. A scan opens looking like the paper it was
+		// scanned from; inverting it is a choice about one unreadable document,
+		// not something a dark theme should decide on the reader's behalf. The
+		// toolbar's contrast button flips it for the session either way.
+		darkInversion: 'off',
 		toolbarStartsCollapsed: false,
 		blockCaptions: false,
 		extractionNotePattern: '{folder}/{name} — annotations.md',

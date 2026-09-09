@@ -101,16 +101,18 @@ export class InklingSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Reading and editing').setHeading();
 
 		new Setting(containerEl)
-			.setName('Invert pages in dark mode')
-			.setDesc('Darken the PDF page itself. Your ink keeps its real colours either way.')
+			.setName('Invert PDF pages')
+			.setDesc(
+				'Darken the PDF page itself. Off by default: the toolbar’s contrast button flips one document without changing this. Your ink keeps its real colours either way.',
+			)
 			.addDropdown((dropdown) => {
 				dropdown
+					.addOption('off', 'Never')
 					.addOption('follow-theme', 'Follow theme')
 					.addOption('on', 'Always')
-					.addOption('off', 'Never')
 					.setValue(this.plugin.settings.darkInversion)
 					.onChange((value) => {
-						this.plugin.settings.darkInversion = pick(value, ['off', 'on', 'follow-theme'] as const, 'follow-theme');
+						this.plugin.settings.darkInversion = pick(value, ['off', 'on', 'follow-theme'] as const, 'off');
 						commit();
 					});
 			});

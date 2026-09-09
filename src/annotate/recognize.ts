@@ -26,10 +26,13 @@ const CLOSURE_RATIO = 0.15;
 // How much the distance from the centroid may vary, relative to its mean,
 // for a closed loop to be a circle rather than a box.
 //
-// Measured, not guessed: a perfect square runs about 0.12 (its corners
-// sit 1.41x further out than its edge midpoints) and a hand-drawn circle
-// about 0.02-0.04. The threshold sits between them, much closer to the
-// circle, because a box misread as a circle is the more visible mistake.
+// Measured against the *normalised* loop (see radialVariance), where the
+// figure is judged on shape alone and not on how wide it happens to be:
+// any ellipse runs 0.016 and any rectangle 0.115, whatever its aspect. The
+// threshold sits between them, nearer the ellipse, because a box misread as
+// a circle is the more visible mistake. A hand wobbling +-10px inside a
+// palm-sized loop moves an ellipse to about 0.04 and a box to about 0.125,
+// so the gap survives a real hand.
 const OVAL_RADIAL_VARIANCE = 0.07;
 
 // How far a closed loop’s path length may sit either side of its
@@ -76,12 +79,26 @@ function bounds(points: Point[]): { minX: number; minY: number; maxX: number; ma
 // How nearly a closed loop's samples all sit the same distance from its
 // centre. Low for a circle, high for a rectangle, whose corners are much
 // further out than its edge midpoints.
-function radialVariance(points: Point[]): number {
-	const centroid = points.reduce((sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }), {
+//
+// Measured on the loop squashed into a unit box first, which is the whole
+// trick. Raw, this asks "is it round?", and almost nothing anyone draws
+// freehand is: an ellipse only 1.3x wider than it is tall already scores
+// 0.089 and was classified a rectangle, so in practice a circle could not
+// be drawn at all - the reported symptom. Normalised, it asks the question
+// actually worth asking, "is it an ellipse or a box?", and every ellipse
+// answers alike whatever its proportions.
+function radialVariance(points: Point[], box: { minX: number; minY: number; maxX: number; maxY: number }): number {
+	// A degenerate axis would divide by zero; the caller has already
+	// rejected a loop that flat, so 1 here only guards the arithmetic.
+	const width = box.maxX - box.minX || 1;
+	const height = box.maxY - box.minY || 1;
+	const unit = points.map((point) => ({ x: (point.x - box.minX) / width, y: (point.y - box.minY) / height }));
+
+	const centroid = unit.reduce((sum, point) => ({ x: sum.x + point.x / unit.length, y: sum.y + point.y / unit.length }), {
 		x: 0,
 		y: 0,
 	});
-	const radii = points.map((point) => distance(point, centroid));
+	const radii = unit.map((point) => distance(point, centroid));
 	const mean = radii.reduce((sum, radius) => sum + radius, 0) / radii.length;
 	if (mean === 0) return Infinity;
 	const variance = radii.reduce((sum, radius) => sum + (radius - mean) ** 2, 0) / radii.length;
@@ -132,7 +149,7 @@ export function recognizeShape(points: Point[]): RecognizedShape | null {
 
 	const start = { x: box.minX, y: box.minY };
 	const end = { x: box.maxX, y: box.maxY };
-	return radialVariance(points) <= OVAL_RADIAL_VARIANCE
+	return radialVariance(points, box) <= OVAL_RADIAL_VARIANCE
 		? { tool: 'oval', start, end }
 		: { tool: 'rectangle', start, end };
 }

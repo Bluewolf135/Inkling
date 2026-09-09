@@ -42,8 +42,17 @@ describe('normalizeSettings', () => {
 	it('falls back for a value outside the allowed set', () => {
 		const settings = normalizeSettings({ defaultTemplate: 'graph-paper', darkInversion: 'maybe', pageSize: 'legal' });
 		expect(settings.defaultTemplate).toBe('blank');
-		expect(settings.darkInversion).toBe('follow-theme');
+		expect(settings.darkInversion).toBe('off');
 		expect(settings.pageSize).toBe('letter');
+	});
+
+	it('opens a PDF looking like the paper it came from', () => {
+		// This followed the theme, so a dark theme inverted every scan
+		// without being asked and there was no way to see one as printed
+		// short of changing a setting. Inverting is an answer to one
+		// unreadable document, so it belongs on the toolbar button, which
+		// flips it for the session either way.
+		expect(defaultSettings().darkInversion).toBe('off');
 	});
 
 	it('falls back for a value of the wrong type', () => {

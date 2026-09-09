@@ -24,6 +24,18 @@ function circle(radius: number, wobble = 0, seed = 7): Point[] {
 	return points;
 }
 
+// An oval that is not a circle — which is what a hand actually draws, and
+// what every circle helper in this file was carefully not producing.
+function ellipse(a: number, b: number, wobble = 0, seed = 5): Point[] {
+	const noise = jitter(seed);
+	const points: Point[] = [];
+	for (let step = 0; step <= 44; step++) {
+		const angle = (step / 44) * Math.PI * 2;
+		points.push({ x: 200 + Math.cos(angle) * a + noise() * wobble, y: 200 + Math.sin(angle) * b + noise() * wobble });
+	}
+	return points;
+}
+
 function box(size: number, wobble = 0, seed = 11): Point[] {
 	const noise = jitter(seed);
 	const corners: Point[] = [
@@ -130,5 +142,61 @@ describe('recognizeShape', () => {
 		// test at a jitter level a real hand produces.
 		expect(recognizeShape(box(150, 8))?.tool).toBe('rectangle');
 		expect(recognizeShape(circle(75, 8))?.tool).toBe('oval');
+	});
+
+	// Reported from use: shapes snapped to squares and lines, and a circle
+	// could not be drawn at all. Every circle above is a *perfect* one, which
+	// is why nothing here caught it — a hand draws an ellipse, and an ellipse
+	// only 1.3x wider than tall used to score 0.089 against a 0.07 threshold
+	// and come out a rectangle. The radial measure is taken on the loop
+	// squashed into a unit box now, so proportion no longer decides it.
+	describe('an oval that is not a circle', () => {
+		it('snaps to an oval at every aspect a hand produces', () => {
+			for (const [a, b] of [
+				[90, 70],
+				[100, 60],
+				[120, 40],
+				[40, 120],
+			]) {
+				expect(recognizeShape(ellipse(a ?? 0, b ?? 0, 6))?.tool, `${a}x${b}`).toBe('oval');
+			}
+		});
+
+		it('still calls a wide box a box', () => {
+			// The fix must not buy circles by giving up rectangles: a
+			// normalised square scores 0.115, well clear of the threshold.
+			const wide: Point[] = [];
+			const noise = jitter(11);
+			const corners = [
+				{ x: 100, y: 100 },
+				{ x: 400, y: 100 },
+				{ x: 400, y: 200 },
+				{ x: 100, y: 200 },
+				{ x: 100, y: 100 },
+			];
+			for (let index = 1; index < corners.length; index++) {
+				const from = corners[index - 1];
+				const to = corners[index];
+				if (!from || !to) continue;
+				for (let step = 0; step < 14; step++) {
+					const t = step / 14;
+					wide.push({ x: from.x + (to.x - from.x) * t + noise() * 6, y: from.y + (to.y - from.y) * t + noise() * 6 });
+				}
+			}
+			wide.push({ x: 100, y: 100 });
+			expect(recognizeShape(wide)?.tool).toBe('rectangle');
+		});
+
+		it('gives the oval the bounds the pen drew, not a square', () => {
+			// Normalising is only how the loop is *judged*. The shape that
+			// lands keeps the proportions of the stroke, or a wide oval drawn
+			// round a phrase would snap into a circle over one word.
+			const recognized = recognizeShape(ellipse(120, 40, 2));
+			expect(recognized).not.toBeNull();
+			if (!recognized) return;
+			const width = recognized.end.x - recognized.start.x;
+			const height = recognized.end.y - recognized.start.y;
+			expect(width / height).toBeCloseTo(3, 0);
+		});
 	});
 });
