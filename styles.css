@@ -953,20 +953,31 @@
 /* Not obviously a text field until it is being used. An input styled like
    one sitting under every block in a note would read as plugin chrome the
    note has to carry, which is the thing this setting is off by default to
-   avoid. */
-.inkling-ink-block-caption-input {
+   avoid.
+
+   The doubled class is load-bearing, not a typo. Obsidian's own
+   `input[type="text"]` rule scores (0,1,1) — an attribute selector plus a
+   type — and a single class scores (0,1,0), so the theme wins and every
+   caption renders as a full-width bordered box. Written once, this looked
+   correct in the stylesheet and wrong on screen, which no test could see.
+   Same fix as the mobile colour swatches, and the same lesson as the
+   [hidden] rules at the foot of this file: an author rule you did not write
+   can outrank the one you did. */
+.inkling-ink-block-caption-input.inkling-ink-block-caption-input {
 	border: none;
 	border-bottom: 1px solid transparent;
 	border-radius: 0;
 	background-color: transparent;
+	box-shadow: none;
 	padding: var(--size-2-1) 0;
+	height: auto;
 }
 
-.inkling-ink-block-caption-input:hover {
+.inkling-ink-block-caption-input.inkling-ink-block-caption-input:hover {
 	border-bottom-color: var(--background-modifier-border);
 }
 
-.inkling-ink-block-caption-input:focus {
+.inkling-ink-block-caption-input.inkling-ink-block-caption-input:focus {
 	border-bottom-color: var(--interactive-accent);
 	box-shadow: none;
 	color: var(--text-normal);
