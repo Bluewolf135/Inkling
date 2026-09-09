@@ -431,7 +431,11 @@ describe('a block caption', () => {
 	});
 
 	it('is trimmed on the way in', () => {
-		const source = serializeInkBlock({ ...emptyInkBlock(), caption: '  spaced  ' });
+		// Hand-written rather than round-tripped through serializeInkBlock,
+		// which trims on the way out: going through it tests the writer twice
+		// and the reader not at all. A note edited by hand is exactly where an
+		// untrimmed caption comes from.
+		const source = JSON.stringify({ version: 2, width: 800, height: 450, caption: '  spaced  ', annotations: [] });
 
 		expect(parseInkBlock(source).data.caption).toBe('spaced');
 	});
@@ -445,12 +449,30 @@ describe('a block caption', () => {
 		expect(damage.kind).toBe('none');
 	});
 
-	it('leaves the id readable without parsing the whole block', () => {
-		// The id shortcut matches a fixed opening — version, id, width — so a
-		// new field has to go after it or every block stops being findable
-		// by the cheap path.
-		const source = serializeInkBlock({ ...emptyInkBlock(), id: 'ink-captioned', caption: 'A diagram' });
+	it('leaves the id readable from the head of the block alone', () => {
+		// The id shortcut matches a fixed opening — version, id, width — and a
+		// field inserted into that run breaks it. Nothing would *fail*: the
+		// caller falls back to joining the block's whole body, which is the
+		// megabyte-per-save cost Phase F was spent removing, so the regression
+		// would be silent and only visible as latency.
+		//
+		// Against the first line alone, and against a block long enough that
+		// the first line is not valid JSON on its own. An empty block
+		// serializes to one short line that parses fine, so the fallback
+		// rescues it and the assertion proves nothing — which is what the
+		// first version of this test did.
+		const annotations = Array.from({ length: 40 }, (_, index) => ({
+			id: `a${index}`,
+			kind: 'stroke' as const,
+			tool: 'pen' as const,
+			color: '#1e1e1e',
+			width: 2,
+			points: [{ x: index, y: index }, { x: index + 1, y: index + 1 }],
+		}));
+		const source = serializeInkBlock({ ...emptyInkBlock(), id: 'ink-captioned', caption: 'A diagram', annotations });
+		const head = source.split('\n')[0] ?? '';
 
-		expect(readInkBlockId(source)).toBe('ink-captioned');
+		expect(() => JSON.parse(head)).toThrow();
+		expect(readInkBlockId(head)).toBe('ink-captioned');
 	});
 });
