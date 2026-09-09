@@ -62,6 +62,108 @@ function box(size: number, wobble = 0, seed = 11): Point[] {
 	return points;
 }
 
+// A circle as a hand actually draws one, which is not an ellipse plus
+// jitter. Three things the generators above leave out, all of which the
+// classifier has to survive:
+//
+//  - Low-frequency lumpiness. A hand's error is two or three broad bulges
+//    around the loop, not independent per-sample noise. Jitter averages out
+//    of a variance; lumps do not, and that is exactly why the previous fix
+//    passed its tests and still could not classify a real circle.
+//  - Uneven sampling. Pointer events arrive on a clock, so the pen leaves
+//    more samples where it slowed down.
+//  - An overshoot. The stroke carries past where it started rather than
+//    meeting it.
+function handCircle(seed: number, options: { radius?: number; lump?: number; tail?: number; aspect?: number } = {}): Point[] {
+	const { radius = 90, lump = 0.1, tail = 0.1, aspect = 1 } = options;
+	const noise = jitter(seed);
+	const phase = [noise() * 6, noise() * 6, noise() * 6];
+	const amp = [lump * (0.6 + noise()), lump * (0.5 + noise()) * 0.7, lump * (0.4 + noise()) * 0.5];
+	const points: Point[] = [];
+	for (let angle = 0; angle < Math.PI * 2 * (1 + tail); angle += 0.1 + 0.07 * (1 + Math.sin(angle * 1.7 + (phase[2] ?? 0)))) {
+		const r =
+			radius *
+			(1 +
+				(amp[0] ?? 0) * Math.sin(2 * angle + (phase[0] ?? 0)) +
+				(amp[1] ?? 0) * Math.sin(3 * angle + (phase[1] ?? 0)) +
+				(amp[2] ?? 0) * Math.sin(4 * angle + (phase[2] ?? 0)));
+		points.push({ x: 300 + Math.cos(angle) * r * aspect, y: 300 + Math.sin(angle) * r });
+	}
+	return points;
+}
+
+// A box as a hand actually draws one: corners rounded off, edges bowed,
+// sampled unevenly, closed with an overshoot. The rounded corners are the
+// part that matters — they are what pulls a box toward a circle, so this is
+// the generator that says whether circles were bought at their expense.
+function handBox(seed: number, options: { w?: number; h?: number; round?: number; bow?: number } = {}): Point[] {
+	const { w = 240, h = 200, round = 0.14, bow = 0.03 } = options;
+	const noise = jitter(seed);
+	const radius = Math.min(w, h) * round;
+	const x0 = 120;
+	const y0 = 140;
+	const x1 = x0 + w;
+	const y1 = y0 + h;
+	const sides: Array<[Point, Point, number, number]> = [
+		[{ x: x0 + radius, y: y0 }, { x: x1 - radius, y: y0 }, 0, -1],
+		[{ x: x1, y: y0 + radius }, { x: x1, y: y1 - radius }, 1, 0],
+		[{ x: x1 - radius, y: y1 }, { x: x0 + radius, y: y1 }, 0, 1],
+		[{ x: x0, y: y1 - radius }, { x: x0, y: y0 + radius }, -1, 0],
+	];
+	const corners: Array<[Point, number, number]> = [
+		[{ x: x1 - radius, y: y0 + radius }, -Math.PI / 2, 0],
+		[{ x: x1 - radius, y: y1 - radius }, 0, Math.PI / 2],
+		[{ x: x0 + radius, y: y1 - radius }, Math.PI / 2, Math.PI],
+		[{ x: x0 + radius, y: y0 + radius }, Math.PI, Math.PI * 1.5],
+	];
+
+	const points: Point[] = [];
+	for (let index = 0; index < 4; index++) {
+		const side = sides[index];
+		const corner = corners[index];
+		if (!side || !corner) continue;
+		const [from, to, nx, ny] = side;
+		const span = Math.hypot(to.x - from.x, to.y - from.y);
+		const depth = span * bow * (1 + noise());
+		const steps = Math.max(4, Math.round(span / 14));
+		for (let step = 0; step <= steps; step++) {
+			const t = step / steps;
+			const push = Math.sin(t * Math.PI) * depth;
+			points.push({ x: from.x + (to.x - from.x) * t + nx * push, y: from.y + (to.y - from.y) * t + ny * push });
+		}
+		const [centre, fromAngle, toAngle] = corner;
+		for (let step = 1; step < 5; step++) {
+			const a = fromAngle + (toAngle - fromAngle) * (step / 5);
+			points.push({ x: centre.x + Math.cos(a) * radius, y: centre.y + Math.sin(a) * radius });
+		}
+	}
+	// The overshoot: back over the first few samples of the first side.
+	for (let step = 0; step < Math.round(points.length * 0.06); step++) {
+		const repeated = points[step];
+		if (repeated) points.push(repeated);
+	}
+	return points;
+}
+
+// A closed loop through the given corners — the shapes there is no tool for,
+// which have to be refused rather than rounded to the nearer of the two.
+function polygon(corners: Point[], perSide: number, seed: number, wobble = 3): Point[] {
+	const noise = jitter(seed);
+	const points: Point[] = [];
+	for (let index = 0; index < corners.length; index++) {
+		const from = corners[index];
+		const to = corners[(index + 1) % corners.length];
+		if (!from || !to) continue;
+		for (let step = 0; step < perSide; step++) {
+			const t = step / perSide;
+			points.push({ x: from.x + (to.x - from.x) * t + noise() * wobble, y: from.y + (to.y - from.y) * t + noise() * wobble });
+		}
+	}
+	const first = points[0];
+	if (first) points.push({ ...first });
+	return points;
+}
+
 function drag(from: Point, to: Point, wobble = 0, seed = 3): Point[] {
 	const noise = jitter(seed);
 	const points: Point[] = [];
@@ -187,7 +289,7 @@ describe('recognizeShape', () => {
 			expect(recognizeShape(wide)?.tool).toBe('rectangle');
 		});
 
-		it('gives the oval the bounds the pen drew, not a square', () => {
+		it('gives the oval the bounds the pen drew, not a square (perfect ellipse)', () => {
 			// Normalising is only how the loop is *judged*. The shape that
 			// lands keeps the proportions of the stroke, or a wide oval drawn
 			// round a phrase would snap into a circle over one word.
@@ -197,6 +299,84 @@ describe('recognizeShape', () => {
 			const width = recognized.end.x - recognized.start.x;
 			const height = recognized.end.y - recognized.start.y;
 			expect(width / height).toBeCloseTo(3, 0);
+		});
+	});
+
+	// Reported from use a second time: circles still snapped to squares,
+	// against a suite that was passing. Everything above generates a
+	// mathematically exact figure and adds independent per-sample jitter,
+	// and jitter is not what a hand does — a hand is lumpy at low frequency,
+	// samples unevenly, and overshoots the close. Jitter averages out of a
+	// variance and lumpiness does not, so the old measure scored realistic
+	// circles at 0.055-0.134 and realistic boxes at 0.073-0.093: ranges that
+	// overlap, with no threshold to put between them.
+	//
+	// So these strokes are shaped like a hand's, and the classifier scores
+	// the loop against both shapes it can draw rather than against one
+	// abstract property of roundness. That is what has margin: every case
+	// below fits its own shape at least twice as closely as the other.
+	describe('strokes shaped like a hand’s', () => {
+		it('calls a lumpy, unevenly sampled, overshooting loop an oval', () => {
+			// The reported bug. Every one of these came out 'rectangle'.
+			for (const seed of [3, 17, 42, 91, 128]) {
+				expect(recognizeShape(handCircle(seed))?.tool, `seed ${seed}`).toBe('oval');
+			}
+		});
+
+		it('still calls one an oval when it is lumpier still', () => {
+			expect(recognizeShape(handCircle(23, { lump: 0.16 }))?.tool).toBe('oval');
+		});
+
+		it('calls a lumpy oval an oval at any aspect', () => {
+			expect(recognizeShape(handCircle(51, { aspect: 1.6 }))?.tool).toBe('oval');
+			expect(recognizeShape(handCircle(64, { aspect: 2.5 }))?.tool).toBe('oval');
+		});
+
+		it('is not thrown by an overshoot past the start', () => {
+			expect(recognizeShape(handCircle(77, { tail: 0.2 }))?.tool).toBe('oval');
+		});
+
+		it('gives up on a loop that carries a quarter turn past its own start', () => {
+			// Not this classifier's doing and not the reported bug: CLOSURE_RATIO
+			// measures the gap between the endpoints against the path length, and
+			// a stroke that runs a quarter turn long has endpoints too far apart
+			// to read as a loop at all, so it never reaches the shape test. Pinned
+			// because it is the edge of what snapping handles, and because it
+			// fails the safe way — the freehand stroke is simply kept.
+			expect(recognizeShape(handCircle(77, { tail: 0.24 }))).toBeNull();
+		});
+
+		it('has not bought circles at the expense of boxes', () => {
+			// The other half of the trade, and the half a looser threshold
+			// would have lost. Rounded corners are what pull a box toward a
+			// circle, so a box drawn with them is the case that matters.
+			for (const seed of [5, 31, 60]) {
+				expect(recognizeShape(handBox(seed))?.tool, `seed ${seed}`).toBe('rectangle');
+			}
+			expect(recognizeShape(handBox(12, { round: 0.26 }))?.tool, 'very rounded').toBe('rectangle');
+			expect(recognizeShape(handBox(19, { bow: 0.06 }))?.tool, 'bowed edges').toBe('rectangle');
+			expect(recognizeShape(handBox(44, { w: 360, h: 120 }))?.tool, 'wide').toBe('rectangle');
+			expect(recognizeShape(handBox(70, { w: 220, h: 210 }))?.tool, 'near-square').toBe('rectangle');
+		});
+
+		it('refuses a closed shape it has no tool for', () => {
+			// Scoring both candidates and taking the nearer would make a
+			// triangle whichever of the two it sat closer to. A shape that is
+			// close to neither is left as drawn instead: these all sit at
+			// 0.093 or worse against a 0.06 bound, because they are not a
+			// near-miss of anything.
+			expect(recognizeShape(polygon([{ x: 200, y: 100 }, { x: 320, y: 300 }, { x: 80, y: 300 }], 14, 8)), 'triangle').toBeNull();
+			expect(
+				recognizeShape(polygon([{ x: 200, y: 100 }, { x: 320, y: 200 }, { x: 200, y: 300 }, { x: 80, y: 200 }], 12, 4)),
+				'diamond',
+			).toBeNull();
+
+			const figureEight: Point[] = [];
+			for (let step = 0; step <= 60; step++) {
+				const t = (step / 60) * Math.PI * 2;
+				figureEight.push({ x: 200 + Math.sin(t) * 90, y: 200 + Math.sin(t * 2) * 60 });
+			}
+			expect(recognizeShape(figureEight), 'figure eight').toBeNull();
 		});
 	});
 });

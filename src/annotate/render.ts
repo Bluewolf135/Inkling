@@ -336,12 +336,27 @@ export function renderBase(ctx: CanvasRenderingContext2D, annotations: Annotatio
 // Drawn at full strength here rather than at HIGHLIGHTER_OPACITY: the layer
 // carries the opacity, so strokes that overlap on it do not compound into a
 // darker patch the way per-annotation alpha did.
-export function renderHighlights(ctx: CanvasRenderingContext2D, annotations: Annotation[]): void {
+// `draft` is the in-progress highlighter stroke, which is drawn on this
+// layer rather than on the overlay above it. The overlay carries neither the
+// multiply nor the layer opacity, so a draft drawn there was flat opaque
+// colour laid over the page: the highlighter covered the very words it was
+// highlighting for as long as the pen was down, then dropped behind them at
+// pointerup when the committed stroke landed here instead. Drawn here it is
+// the same pixels the committed stroke will be — including the way it
+// overlaps a highlight already on the line, which on this one layer stays a
+// single strength instead of compounding.
+//
+// It is passed rather than found in `annotations` because a draft is not in
+// the store yet, and it is drawn uncached for the reason drawAnnotation's
+// `cache` argument exists at all: draftFor builds a fresh annotation object
+// every frame.
+export function renderHighlights(ctx: CanvasRenderingContext2D, annotations: Annotation[], draft?: Annotation | null): void {
 	const { canvas } = ctx;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
 	for (const annotation of annotations) {
 		if (isHighlight(annotation)) drawAnnotation(ctx, annotation, true);
 	}
+	if (draft && isHighlight(draft)) drawAnnotation(ctx, draft, false);
 }
 
 // The live/interactive layer — the in-progress draft stroke or shape, the

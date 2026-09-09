@@ -78,6 +78,62 @@ describe('the highlight layer', () => {
 		expect(drawCallsOn('.inkling-annotation-base')).not.toContain('stroke');
 	});
 
+	it('draws the in-progress stroke on itself, not on the overlay above it', () => {
+		surface.controller.setTool('highlighter');
+		// Pen still down: this is the draft, mid-stroke.
+		surface.pointer('pointerdown', 10, 10);
+		surface.pointer('pointermove', 80, 12);
+		surface.pointer('pointermove', 140, 14);
+
+		// The overlay carries neither the multiply nor the layer opacity, so
+		// a draft drawn there is flat opaque colour over the words — the
+		// highlighter covered the text it was highlighting until pointerup,
+		// then dropped behind it.
+		expect(drawCallsOn(HIGHLIGHT)).toContain('stroke');
+		expect(drawCallsOn('.inkling-annotation-overlay')).not.toContain('stroke');
+	});
+
+	it('is created for a first highlight while it is still being drawn', () => {
+		surface.controller.setTool('highlighter');
+		surface.pointer('pointerdown', 10, 10);
+		surface.pointer('pointermove', 140, 14);
+
+		// Lazily created, but not so lazily that the very first highlight on
+		// a page is invisible for the length of its own stroke.
+		expect(surface.host.querySelector(HIGHLIGHT)).not.toBeNull();
+	});
+
+	it('paints the draft off again once the stroke commits', () => {
+		surface.controller.setTool('highlighter');
+		surface.drawStroke([[10, 10], [80, 12], [140, 14]]);
+
+		// One stroke on the last paint, not two: the committed annotation is
+		// now in the store, and the draft it was drawn from has to stop being
+		// drawn beside it.
+		const canvas = surface.host.querySelector<HTMLCanvasElement>(HIGHLIGHT);
+		const held = canvas as unknown as { __ctx: { calls: Array<{ op: string }> } };
+		const since = held.__ctx.calls.slice(held.__ctx.calls.map((c) => c.op).lastIndexOf('clearRect'));
+		expect(since.filter((c) => c.op === 'stroke')).toHaveLength(1);
+	});
+
+	it('is left alone by a draft from any other tool', () => {
+		surface.controller.setTool('highlighter');
+		surface.drawStroke([[10, 10], [140, 14]]);
+
+		const canvas = surface.host.querySelector<HTMLCanvasElement>(HIGHLIGHT);
+		const held = canvas as unknown as { __ctx: { calls: Array<{ op: string }> } };
+		const before = held.__ctx.calls.length;
+
+		// A pen stroke over the same line. Its draft belongs on the overlay,
+		// and repainting this layer per pointermove would make every pen
+		// sample redraw every highlight on the page for no visible change.
+		surface.controller.setTool('pen');
+		surface.pointer('pointerdown', 10, 10);
+		surface.pointer('pointermove', 80, 12);
+		surface.pointer('pointermove', 140, 14);
+		expect(held.__ctx.calls.length).toBe(before);
+	});
+
 	it('repaints empty when the last highlight is erased', () => {
 		surface.controller.setTool('highlighter');
 		surface.drawStroke([[10, 10], [140, 14]]);

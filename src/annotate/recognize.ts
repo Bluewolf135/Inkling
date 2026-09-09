@@ -23,17 +23,18 @@ const LINE_STRAIGHTNESS = 0.08;
 // having met, so the stroke is a closed loop.
 const CLOSURE_RATIO = 0.15;
 
-// How much the distance from the centroid may vary, relative to its mean,
-// for a closed loop to be a circle rather than a box.
+// How far a closed loop may sit from whichever shape it matches best,
+// averaged per sample and measured in units of its own bounding box, before
+// it counts as neither and is left alone.
 //
-// Measured against the *normalised* loop (see radialVariance), where the
-// figure is judged on shape alone and not on how wide it happens to be:
-// any ellipse runs 0.016 and any rectangle 0.115, whatever its aspect. The
-// threshold sits between them, nearer the ellipse, because a box misread as
-// a circle is the more visible mistake. A hand wobbling +-10px inside a
-// palm-sized loop moves an ellipse to about 0.04 and a box to about 0.125,
-// so the gap survives a real hand.
-const OVAL_RADIAL_VARIANCE = 0.07;
+// Every real figure measured while writing this — lumpy circles, ovals up
+// to 2.5x wide, boxes with rounded corners and bowed edges — fits its own
+// shape to within 0.031. Everything that should be refused (a triangle, a
+// diamond, a figure eight, a scribbled blob) sits at 0.093 or worse, since
+// it is not close to *either* shape. This sits between, nearer the figures,
+// because the cost of a false negative is that nothing happens and the cost
+// of a false positive is a word of handwriting replaced by a box.
+const MAX_SHAPE_RESIDUAL = 0.06;
 
 // How far a closed loop’s path length may sit either side of its
 // bounding box’s perimeter. A circle runs about 0.79 of it and a square
@@ -76,33 +77,67 @@ function bounds(points: Point[]): { minX: number; minY: number; maxX: number; ma
 	return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
 }
 
-// How nearly a closed loop's samples all sit the same distance from its
-// centre. Low for a circle, high for a rectangle, whose corners are much
-// further out than its edge midpoints.
+// How far a closed loop sits from each of the two shapes it could snap to,
+// as a mean distance per sample.
 //
-// Measured on the loop squashed into a unit box first, which is the whole
-// trick. Raw, this asks "is it round?", and almost nothing anyone draws
-// freehand is: an ellipse only 1.3x wider than it is tall already scores
-// 0.089 and was classified a rectangle, so in practice a circle could not
-// be drawn at all - the reported symptom. Normalised, it asks the question
-// actually worth asking, "is it an ellipse or a box?", and every ellipse
-// answers alike whatever its proportions.
-function radialVariance(points: Point[], box: { minX: number; minY: number; maxX: number; maxY: number }): number {
+// This asks the question the answer is actually needed for — "of the oval
+// and the rectangle I am about to draw, which is closer to what you drew?"
+// — rather than scoring some abstract property of the loop and reading a
+// shape off a threshold. Both candidates are fully determined before the
+// measurement, because a snapped shape takes the stroke's own bounding box
+// either way, so each can simply be scored against the samples.
+//
+// Two earlier measures failed here, both by scoring roundness on its own.
+// A radial variance taken on the raw loop asked "is it round?", which
+// nothing drawn freehand is: an ellipse 1.3x wider than tall scored 0.089
+// against a 0.07 threshold and came out a rectangle. Taking that same
+// variance on the normalised loop fixed the ellipses and still failed,
+// because a hand's error is not the per-sample jitter the tests modelled —
+// it is low-frequency lumpiness, two or three broad bulges around the loop,
+// which does not average out of a variance the way jitter does. Measured
+// against realistic strokes, circles ran 0.055-0.134 and boxes 0.073-0.093:
+// overlapping ranges, no threshold to put between them, and a "very rounded
+// box" at 0.073 indistinguishable from a hand circle at 0.077.
+//
+// Scoring both candidates instead separates them by a factor of two or more
+// in every case, and for a reason worth stating: lumpiness pushes a loop
+// away from *both* candidates roughly evenly, so it costs the winner and
+// the loser alike and leaves the comparison standing. A single-property
+// measure has no such protection — the noise all lands on the one number
+// the decision is read from.
+//
+// Judged on the loop squashed into a unit box, so proportion never decides
+// it: a wide oval and a round one score alike, as do a wide box and a
+// square. Only how the loop is *judged* is normalised — the shape that
+// lands keeps the bounds the pen drew.
+function shapeResiduals(
+	points: Point[],
+	box: { minX: number; minY: number; maxX: number; maxY: number },
+): { oval: number; rectangle: number } {
 	// A degenerate axis would divide by zero; the caller has already
 	// rejected a loop that flat, so 1 here only guards the arithmetic.
 	const width = box.maxX - box.minX || 1;
 	const height = box.maxY - box.minY || 1;
-	const unit = points.map((point) => ({ x: (point.x - box.minX) / width, y: (point.y - box.minY) / height }));
 
-	const centroid = unit.reduce((sum, point) => ({ x: sum.x + point.x / unit.length, y: sum.y + point.y / unit.length }), {
-		x: 0,
-		y: 0,
-	});
-	const radii = unit.map((point) => distance(point, centroid));
-	const mean = radii.reduce((sum, radius) => sum + radius, 0) / radii.length;
-	if (mean === 0) return Infinity;
-	const variance = radii.reduce((sum, radius) => sum + (radius - mean) ** 2, 0) / radii.length;
-	return Math.sqrt(variance) / mean;
+	let oval = 0;
+	let rectangle = 0;
+	for (const point of points) {
+		// Offsets from the centre of the unit box, so both candidates are
+		// centred on the origin and the arithmetic below stays symmetric.
+		const x = Math.abs((point.x - box.minX) / width - 0.5);
+		const y = Math.abs((point.y - box.minY) / height - 0.5);
+
+		// The inscribed circle: how far this sample is off its edge.
+		oval += Math.abs(Math.hypot(x, y) - 0.5);
+
+		// The box's own outline. Inside, the nearest edge is whichever axis
+		// the sample sits furthest along; outside — where an overshooting
+		// stroke puts it — it is the straight-line distance back in.
+		rectangle +=
+			x > 0.5 || y > 0.5 ? Math.hypot(Math.max(x - 0.5, 0), Math.max(y - 0.5, 0)) : 0.5 - Math.max(x, y);
+	}
+
+	return { oval: oval / points.length, rectangle: rectangle / points.length };
 }
 
 export function recognizeShape(points: Point[]): RecognizedShape | null {
@@ -147,9 +182,16 @@ export function recognizeShape(points: Point[]): RecognizedShape | null {
 	const ratio = length / perimeter;
 	if (ratio < MIN_PERIMETER_RATIO || ratio > MAX_PERIMETER_RATIO) return null;
 
+	const fit = shapeResiduals(points, box);
+
+	// Close to neither: a triangle, a diamond, a figure eight, a blob. The
+	// perimeter check above catches a loop that wanders, but not one that
+	// goes cleanly round a shape this cannot draw — and turning a triangle
+	// into whichever of the two it happens to sit nearer is a worse answer
+	// than leaving it as drawn.
+	if (Math.min(fit.oval, fit.rectangle) > MAX_SHAPE_RESIDUAL) return null;
+
 	const start = { x: box.minX, y: box.minY };
 	const end = { x: box.maxX, y: box.maxY };
-	return radialVariance(points, box) <= OVAL_RADIAL_VARIANCE
-		? { tool: 'oval', start, end }
-		: { tool: 'rectangle', start, end };
+	return fit.oval < fit.rectangle ? { tool: 'oval', start, end } : { tool: 'rectangle', start, end };
 }

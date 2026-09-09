@@ -99,21 +99,56 @@ export const PEN_COLORS: readonly PresetColor[] = [
 //
 // The two palettes are the same six hues from the same family, one rung
 // bright and one rung pale, so the strip does not change character when the
-// tool does.
+// tool does. The yellow is the one exception, for the reason below.
 export const HIGHLIGHTER_COLORS: readonly PresetColor[] = [
-	{ value: '#ffd43b', label: 'Yellow' },
+	// The only swatch here that is not from Open Color, because Open Color
+	// has no yellow that survives the multiply as one — and because getting
+	// this right took two numbers, not one.
+	//
+	// What the page shows is 0.4 + 0.6 x colour. That arithmetic barely
+	// moves hue: yellow-4 (#ffd43b, what this opened on) composites to hue
+	// 47 and yellow-3 (#ffe066, tried next) to 48, both golds, which is what
+	// "it looks orange" was reporting twice. But hue alone was not the whole
+	// fault either. #faf14a, tried third, reached hue 57 by raising green —
+	// and raising green toward red is moving the colour *toward white*, so
+	// its chroma fell to 106 against the gold's 118 and it was reported
+	// duller than the colour it replaced. A pale yellow at high lightness
+	// reads olive, not bright.
+	//
+	// Blue is the channel that decides chroma here, and it is the one both
+	// earlier attempts left alone. Composited blue is 102 + 0.6 x blue, so
+	// zero is the floor and 153 the most chroma this multiply can carry.
+	// This sits on it: rgb(255, 255, 102), hue 60, chroma 153 — a pure
+	// yellow at the top of the range rather than a compromise inside it,
+	// which is also what highlighter ink itself looks like on paper.
+	{ value: '#ffff00', label: 'Yellow' },
 	{ value: '#a9e34b', label: 'Green' },
 	{ value: '#ffa8a8', label: 'Pink' },
 	{ value: '#66d9e8', label: 'Blue' },
+	// Kept, unlike in the first attempt at this, which retired the orange on
+	// the grounds that the strip held two of them. That was true of a strip
+	// whose "yellow" was a gold; against a yellow at hue 57 an orange at 31
+	// is a different colour, and retiring it would cost the palette a hue to
+	// fix a clash that is no longer there.
 	{ value: '#ffa94d', label: 'Orange' },
 	{ value: '#d0bfff', label: 'Purple' },
 ];
+
+// Retired from the strip, still nameable.
+//
+// A colour that leaves the palette must not leave this file. Extraction
+// names a colour from ALL_PRESET_COLORS and the settings tab builds its
+// category labels from the same list, so a hue simply deleted would turn
+// every annotation already drawn in it into a bare hex code in the extracted
+// note — a silent regression in files the user cannot re-make, since the
+// highlights are already in the books.
+const RETIRED_COLORS: readonly PresetColor[] = [{ value: '#ffd43b', label: 'Gold' }];
 
 // Every colour the plugin can label or offer anywhere, in one list. The
 // settings tab's category names key off this rather than off PEN_COLORS
 // alone, so a highlighter tint can carry a meaning ("Yellow = definition")
 // the same way an ink colour can.
-export const ALL_PRESET_COLORS: readonly PresetColor[] = [...PEN_COLORS, ...HIGHLIGHTER_COLORS];
+export const ALL_PRESET_COLORS: readonly PresetColor[] = [...PEN_COLORS, ...HIGHLIGHTER_COLORS, ...RETIRED_COLORS];
 
 // Which swatches the toolbar shows for a given tool. Only the highlighter
 // differs; a shape or a note is drawn in ink like the pen is.

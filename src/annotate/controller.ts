@@ -94,6 +94,13 @@ interface PageMount {
 	// this layer once something is actually highlighted on it.
 	highlightCanvas: HTMLCanvasElement | null;
 	highlight: CanvasRenderingContext2D | null;
+	// Whether the last paint of that layer included an in-progress draft.
+	// Kept so the layer is repainted exactly twice per highlighter gesture's
+	// worth of extra work — once when the draft first appears and once when
+	// it goes — rather than on every pointermove of every *other* tool,
+	// which would make each pen sample repaint every highlight on the page
+	// for no change at all.
+	highlightDraft: boolean;
 	// The size the layers are backed at, kept so a lazily-created highlight
 	// canvas can match the two that already exist.
 	width: number;
@@ -268,6 +275,7 @@ export class AnnotationController {
 			overlay: null,
 			highlightCanvas: null,
 			highlight: null,
+			highlightDraft: false,
 			width,
 			height,
 			content: host,
@@ -1127,6 +1135,13 @@ export class AnnotationController {
 		const dragMode = this.drag?.pageNumber === pageNumber ? this.drag.mode : null;
 		const lassoPath = dragMode?.kind === 'lasso' ? dragMode.points : null;
 		const draft = this.draftFor(dragMode);
+		// A highlighter's draft is not drawn here. It goes to the multiplied
+		// layer underneath, so that what is on screen mid-stroke is what the
+		// stroke will look like once it commits; see redrawHighlightDraft.
+		const highlightDraft = draft && isHighlight(draft) ? draft : null;
+		this.redrawHighlightDraft(mount, pageNumber, highlightDraft);
+		const overlayDraft = highlightDraft ? null : draft;
+
 		const eraserCursor =
 			this.eraserCursor?.pageNumber === pageNumber ? { point: this.eraserCursor.point, radius: this.eraserRadius() } : null;
 		const selected =
@@ -1138,11 +1153,29 @@ export class AnnotationController {
 		// unallocated. This is the whole point of deferring it — a page being
 		// read rather than drawn on reaches here on every mount and would
 		// otherwise pay for a full-size canvas to clear it and stop.
-		const empty = !draft && !lassoPath && !eraserCursor && (!selected || selected.length === 0);
+		const empty = !overlayDraft && !lassoPath && !eraserCursor && (!selected || selected.length === 0);
 		if (empty && !mount.overlay) return;
 
 		const overlay = this.overlayContext(mount);
-		renderOverlay(overlay, { selected, draft, lassoPath, eraserCursor });
+		renderOverlay(overlay, { selected, draft: overlayDraft, lassoPath, eraserCursor });
+	}
+
+	// Paints the highlight layer with the live highlighter stroke on it, or
+	// paints the draft back off it once the gesture ends.
+	//
+	// The layer is created here as well as in redrawBase, because the first
+	// highlight on a page has to be visible while it is being drawn, not
+	// only from the moment it commits — and until this, the first stroke had
+	// no layer to be drawn on at all.
+	private redrawHighlightDraft(mount: PageMount, pageNumber: number, draft: Annotation | null): void {
+		// Nothing to draw, and nothing was drawn last time: the layer is
+		// already correct, and this is the path every pointermove of every
+		// other tool takes.
+		if (!draft && !mount.highlightDraft) return;
+		mount.highlightDraft = draft !== null;
+
+		const context = mount.highlight ?? this.createHighlightLayer(mount);
+		if (context) renderHighlights(context, this.store.getPage(pageNumber), draft);
 	}
 
 	// The overlay's drawing context, acquired the first time something
