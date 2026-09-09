@@ -472,7 +472,9 @@ describe('a block caption', () => {
 		const source = serializeInkBlock({ ...emptyInkBlock(), id: 'ink-captioned', caption: 'A diagram', annotations });
 		const head = source.split('\n')[0] ?? '';
 
-		expect(() => JSON.parse(head)).toThrow();
+		expect(() => {
+			JSON.parse(head);
+		}).toThrow();
 		expect(readInkBlockId(head)).toBe('ink-captioned');
 	});
 });
