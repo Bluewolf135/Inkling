@@ -575,9 +575,10 @@
 	flex-direction: column;
 	gap: var(--size-4-2);
 	width: min(280px, 80vw);
-	/* Nudged clear of the marker itself, so the popover never covers the
-	   spot it is a note about. */
-	margin: var(--size-4-2) 0 0 var(--size-4-2);
+	/* The nudge clear of the marker lives in pdfView.ts (NOTE_POPOVER_MARGIN)
+	   rather than here. As a margin it was invisible to the arithmetic that
+	   keeps this popover inside its clipping parent, which measured the box
+	   and not the space around it. */
 	padding: var(--size-4-3);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);

@@ -11,6 +11,7 @@ import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation
 import { BASELINE_DESCENT_RATIO, groupIntoLines, highlightBarHeight, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
 import { RENDER_SCALE, baseRenderScale, layoutRenderScale, zoomedRenderScale } from './pdf/renderScale';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
+import { placeWithin } from './pdf/popoverPlacement';
 import { defaultSettings, type InklingSettings } from './settings';
 import { applyTemplateStyle, pageSizeFor, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
 
@@ -46,6 +47,15 @@ const PAGE_RETAIN_MARGIN = 3;
 // successive strokes into one save matters more here than for most
 // autosave features (see the plan's Write granularity note).
 const WRITE_DEBOUNCE_MS = 1500;
+
+// How far a note's editor sits from the point it annotates, and from the
+// page's edges when it has to be pulled back inside them.
+//
+// One number for both, and expressed here rather than as a CSS margin, so
+// that the arithmetic which keeps the popover inside its clipping parent
+// accounts for the same offset that nudges it clear of the marker. As a
+// margin it was invisible to that arithmetic.
+const NOTE_POPOVER_MARGIN = 8;
 
 // One press of a zoom key. Matches the step the toolbar buttons use, so
 // the two agree about what "zoom in once" means.
@@ -1466,10 +1476,6 @@ export class PdfAnnotateView extends FileView {
 			// screen (see annotate/pointer.ts).
 			const canvas = this.pageCanvases.get(pageNumber);
 			const scale = canvas && canvas.width > 0 ? placeholder.clientWidth / canvas.width : 1;
-			popover.setCssProps({
-				'--inkling-note-x': `${point.x * scale}px`,
-				'--inkling-note-y': `${point.y * scale}px`,
-			});
 
 			const field = popover.createEl('textarea', { cls: 'inkling-note-text' });
 			field.value = existing;
@@ -1493,6 +1499,23 @@ export class PdfAnnotateView extends FileView {
 			const save = buttons.createEl('button', { cls: 'inkling-note-button mod-cta', text: 'Save' });
 			save.type = 'button';
 			save.addEventListener('click', () => finish(field.value));
+
+			// Positioned only now, because the placeholder clips its children
+			// and clamping needs a measured size — which the popover does not
+			// have until its textarea and buttons are in it. Placed near the
+			// right edge before this, a note's editor lost 251 of its 280
+			// pixels to the clip, Save button included, and could not be
+			// saved at all.
+			const placed = placeWithin(
+				{ x: point.x * scale + NOTE_POPOVER_MARGIN, y: point.y * scale + NOTE_POPOVER_MARGIN },
+				{ width: popover.offsetWidth, height: popover.offsetHeight },
+				{ width: placeholder.clientWidth, height: placeholder.clientHeight },
+				NOTE_POPOVER_MARGIN,
+			);
+			popover.setCssProps({
+				'--inkling-note-x': `${placed.x}px`,
+				'--inkling-note-y': `${placed.y}px`,
+			});
 
 			field.addEventListener('keydown', (event: KeyboardEvent) => {
 				// Stopped here rather than left to bubble: the view-wide key
