@@ -652,6 +652,16 @@
 	box-shadow: none;
 	border: none;
 	background: transparent;
+	/* An entry is a <button>, and Obsidian styles every button as a centred
+	   flex container. That one inherited declaration silently defeated three
+	   of the ones below: justify-content centred the text so `text-align`
+	   never applied, the depth indent shifted a centred box instead of a left
+	   edge, and `text-overflow: ellipsis` has nothing to clip on a flex line.
+	   A 900-page book's table of contents came out centred like a poem, with
+	   its hierarchy invisible.
+	   Declaring `display` is the whole fix — this rule already outranks
+	   Obsidian's bare `button`, it simply never said anything about layout. */
+	display: block;
 	/* Indented by how deep the entry sat in the outline tree, so a
 	   flattened list still reads as the hierarchy it came from. */
 	padding: var(--size-2-1) var(--size-4-2);
@@ -660,6 +670,7 @@
 	font-family: inherit;
 	font-size: var(--font-ui-small);
 	text-align: left;
+	width: 100%;
 	/* An outline entry is a title, and titles run long. One line with an
 	   ellipsis keeps the list scannable; the tooltip is not needed because
 	   the row is the title. */
