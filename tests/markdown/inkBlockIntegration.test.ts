@@ -318,3 +318,53 @@ describe('a drawing held back by a failed save', () => {
 		expect(note.strokeCountIn(0)).toBe(2);
 	});
 });
+
+describe('a save that lands after the file moved on', () => {
+	// Tearing a block down flushes its pending write, and a block is often
+	// torn down *because* the note changed — a sync landing inside the
+	// debounce is exactly that. The flush used to overwrite whatever the
+	// fence held by then, so the other device's strokes went silently.
+	function blockWithStrokes(id: string, count: number): string {
+		const annotations = Array.from({ length: count }, (_, index) => ({
+			id: `theirs-${index}`,
+			kind: 'stroke' as const,
+			tool: 'pen' as const,
+			color: '#1e1e1e',
+			width: 2,
+			points: [
+				{ x: index, y: 0 },
+				{ x: index + 10, y: 10 },
+			],
+		}));
+		return inkBlockMarkdown({ ...emptyInkBlock(), id, annotations });
+	}
+
+	it('keeps the strokes from both devices', async () => {
+		note = mountNote({ path: 'merge.md', blocks: [{ id: 'ink-merge' }], openInEditor: true });
+		note.block(0).openForEditing();
+		note.block(0).drawStroke(STROKE);
+
+		// Sync lands a version of the block carrying a stroke drawn elsewhere,
+		// while this view still has an unwritten one of its own.
+		note.setContents(`# Notes\n\n${blockWithStrokes('ink-merge', 1)}\n`);
+		note.unmount();
+		await note.flushWrites();
+
+		expect(note.strokeCountIn(0)).toBe(2);
+	});
+
+	it('does not write over a block it cannot read', async () => {
+		note = mountNote({ path: 'unreadable.md', blocks: [{ id: 'ink-unreadable-merge' }], openInEditor: true });
+		note.block(0).openForEditing();
+		note.block(0).drawStroke(STROKE);
+
+		// Nothing to merge into. Refusing is the same call the damage banner
+		// makes, and the drawing is held rather than written over the wreck.
+		const broken = ['# Notes', '', '```inkling', '{"version":2,"id":"ink-unreadable-merge","width":800,"height":450,"annotations":[{oops', '```', ''].join(String.fromCharCode(10));
+		note.setContents(broken);
+		note.unmount();
+		await note.flushWrites();
+
+		expect(note.contents()).toBe(broken);
+	});
+});

@@ -468,7 +468,10 @@ function flatStroke(points: readonly Point[]): { points: number[]; pressure?: (n
 //
 // Every other field is carried through untouched, so a quote or a note
 // captured with the annotation survives a format it says nothing about.
-function storedAnnotation(annotation: Annotation): Record<string, unknown> {
+// Exported so a merge can ask whether two annotations would be *written*
+// the same way, which is the only notion of equality that matters once
+// coordinates are rounded on the way out. See markdown/mergeInkBlocks.
+export function storedAnnotation(annotation: Annotation): Record<string, unknown> {
 	if (annotation.kind === 'stroke') {
 		const { points, ...rest } = annotation;
 		return { ...rest, ...flatStroke(points) };

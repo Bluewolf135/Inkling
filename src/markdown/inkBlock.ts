@@ -23,6 +23,7 @@ import {
 	type InkBlockDamage,
 } from './inkBlockFormat';
 import { InkRescueStore, browserRescueStorage } from './inkRecovery';
+import { mergeInkBlocks } from './mergeInkBlocks';
 
 // Batches rapid successive strokes into one write, the same reasoning as
 // the PDF view's own debounce: every save rewrites a region of the user's
@@ -361,6 +362,9 @@ class InkBlockView {
 	private damage: InkBlockDamage = { kind: 'none' };
 	private bannerEl: HTMLElement | null = null;
 	private disposeRepairWatch: (() => void) | null = null;
+	// Said once per view, like the locate-failure notice: a refusal repeats
+	// on every retry, and a notice per attempt is noise about one problem.
+	private reportedStaleWrite = false;
 	// The pending frame in watchVisibility, so detaching before it runs
 	// cannot leave a callback pointing at a torn-down block.
 	private watchHandle: number | null = null;
@@ -1034,8 +1038,6 @@ class InkBlockView {
 		if (this.seeded) {
 			this.data = { ...this.data, annotations: this.toStored(this.controller.getPageAnnotations(BLOCK_PAGE)) };
 		}
-		const serialized = serializeInkBlock(this.data);
-
 		// Held from here on, not only on failure. Every path below can end
 		// without writing — a note that closed mid-debounce, a fence that has
 		// moved, a vault error — and each of those used to leave the drawing
@@ -1066,6 +1068,12 @@ class InkBlockView {
 				return;
 			}
 
+			const serialized = this.bodyToWrite(lines, range);
+			if (serialized === null) {
+				this.refuseStaleWrite();
+				return;
+			}
+
 			editor.replaceRange(
 				`${serialized}\n`,
 				{ line: range.lineStart + 1, ch: 0 },
@@ -1088,19 +1096,31 @@ class InkBlockView {
 
 		try {
 			let wrote = false;
+			let refused = false;
+			let written = '';
 			await this.plugin.app.vault.process(file, (contents) => {
 				const lines = contents.split('\n');
 				const range = this.locate(lines);
 				if (!range) return contents;
-				lines.splice(range.lineStart + 1, range.lineEnd - range.lineStart - 1, serialized);
+				const body = this.bodyToWrite(lines, range);
+				if (body === null) {
+					refused = true;
+					return contents;
+				}
+				written = body;
+				lines.splice(range.lineStart + 1, range.lineEnd - range.lineStart - 1, body);
 				wrote = true;
 				return lines.join('\n');
 			});
+			if (refused) {
+				this.refuseStaleWrite();
+				return;
+			}
 			if (!wrote) {
 				this.handleLocateFailure();
 				return;
 			}
-			this.renderedSource = serialized;
+			this.renderedSource = written;
 			this.locateFailures = 0;
 			unsavedInk.forget(this.ctx.sourcePath, this.blockId);
 			restoreScroll();
@@ -1150,6 +1170,50 @@ class InkBlockView {
 	// Searching for a uniquely-matching fence answers the question directly
 	// and refuses when the answer is ambiguous, which a failed save turns
 	// into ink kept rather than ink misplaced.
+	// What to put in the fence, decided against what the fence says *now*.
+	//
+	// A save used to overwrite whatever was there. That is correct while this
+	// view is the only thing editing the block, and wrong the moment it is
+	// not: a block flushes its pending write when it is torn down, and it is
+	// torn down precisely because the note changed — a sync landing inside
+	// the debounce is exactly that case. The other device's strokes went
+	// silently.
+	//
+	// The comparison costs a join and a string equality on lines already in
+	// hand, and the answer is "unchanged" for every save but the rare one, so
+	// nothing below it runs in the ordinary case.
+	//
+	// Returns null to refuse: the fence holds something this build cannot
+	// read, and merging into a block we could not parse is exactly the guess
+	// the refusal elsewhere exists to prevent.
+	private bodyToWrite(lines: readonly string[], range: { lineStart: number; lineEnd: number }): string | null {
+		const current = lines.slice(range.lineStart + 1, range.lineEnd).join('\n').trim();
+		if (current === this.renderedSource) return serializeInkBlock(this.data);
+
+		const { data: theirs, damage } = parseInkBlock(current);
+		if (damage.kind !== 'none') return null;
+
+		// The base is what this view last read, which is what makes this a
+		// three-way merge rather than a guess about who is newer.
+		const base = parseInkBlock(this.renderedSource).data;
+		return serializeInkBlock(mergeInkBlocks(base, this.data, theirs));
+	}
+
+	// The fence moved on and holds something unreadable, so there is nothing
+	// to merge into. The drawing is already held; persisting it means the
+	// session can end without losing it, and the block's own damage banner
+	// takes over from here.
+	private refuseStaleWrite(): void {
+		unsavedInk.persist(this.ctx.sourcePath, this.blockId);
+		if (this.reportedStaleWrite) return;
+		this.reportedStaleWrite = true;
+		console.error(
+			`Inkling: ink block ${this.blockId} in ${this.ctx.sourcePath} changed elsewhere and cannot be read, ` +
+				'so this save was refused rather than written over it. The drawing is held on this device.',
+		);
+		new Notice('Inkling: this ink block changed elsewhere and could not be read, so it was not saved over.');
+	}
+
 	private locate(lines: readonly string[]): { lineStart: number; lineEnd: number } | null {
 		const byId = findInkBlockById(lines, this.blockId);
 		if (byId) return byId;
