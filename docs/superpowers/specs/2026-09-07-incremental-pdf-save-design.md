@@ -407,10 +407,29 @@ cost tracks object count rather than bytes, so the largest book is not the
 worst case — a 16.6 MB book parses in 2,128 ms where a 37.1 MB one takes
 1,049 ms.
 
-That kills option 1 under "Verify before appending". A per-save cost of one
-to two seconds means the throttle cannot come out, and the throttle is what
-this design exists to remove. Option 2 is the only survivor, and it is the
-one flagged above as most likely to be wrong.
+**Corrected 2026-09-09, and the correction reverses the conclusion.** The
+paragraph that stood here said this killed option 1: a per-save cost of one
+to two seconds meant the throttle could not come out. That reasoning assumed
+the cost was user-visible. It is not.
+
+Serialization already runs in a worker — `annotationWriterClient.ts` builds
+one per editing session and only falls back to the main thread when the
+worker cannot be started — and the verification parse would run there too,
+on the long-lived document the worker already holds. None of it blocks the
+pen.
+
+And the throttle was never about CPU. `saveCadence.ts` says so in its own
+first paragraph: every write re-serializes the whole document *and
+re-uploads the whole binary through a replicating vault*. Disk and network,
+both O(document), both of which an append makes O(change).
+
+So **option 1 survives**: verify the concatenated buffer fully on every save,
+in the worker, and still take the disk write and the sync upload down to the
+size of the change. The throttle comes down to what worker CPU will bear —
+one to two seconds of it per save on the largest book — rather than to what
+40 MB of I/O will bear. Whole-document verification does not have to be
+given up to get the win, which is what the previous version of this section
+wrongly concluded.
 
 The other three answers are favourable and none of them reshapes anything:
 `appendBinary` exists from 1.12.3 and must be feature-detected against a
@@ -420,11 +439,19 @@ hybrid `/XRefStm` files. Notably pdf-lib opened all twenty happily,
 including the two that must be declined — the blindness this design already
 predicted, now observed.
 
-**The item is therefore no longer a performance decision.** It buys a crash
-window of about a second instead of up to a minute, and it costs
-whole-document verification on most saves. Whether that trade is worth
-making is the author's call, and nothing below should be started until it
-is made.
+**The item is a performance decision after all, and a favourable one.** It
+buys a crash window of about a second instead of up to a minute, and takes
+the per-save disk write and sync upload from the size of the book to the
+size of the change — without giving up whole-document verification, because
+the parse that provides it is off the main thread.
+
+What it still costs is the work and its risk, neither of which the spike
+touched: two cross-reference writers, of which the xref-stream one is the
+bulk; a corrupt-file failure mode that pdf-lib cannot detect, so it has to
+be validated against pdf.js and an external reader; a staleness check that
+is load-bearing rather than defensive, because an append onto a file sync
+moved underneath us corrupts it where a full rewrite would only lose an
+edit; and compaction as the only garbage collector.
 
 ## Open questions, in the order they should be answered
 
