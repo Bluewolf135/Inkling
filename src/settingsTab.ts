@@ -126,6 +126,19 @@ export class InklingSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Ink block captions')
+			.setDesc(
+				'Adds a line under each ink block for a short description, so a page of handwriting reads as something in search results ' +
+					'and to a screen reader. A block that already has a caption always shows it, whether or not this is on.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.blockCaptions).onChange((value) => {
+					this.plugin.settings.blockCaptions = value;
+					commit();
+				}),
+			);
+
+		new Setting(containerEl)
 			.setName('Save frequency')
 			.setDesc(
 				'Automatic scales how often a PDF is written to its size, so a large textbook is not rewritten every few seconds. ' +

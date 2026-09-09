@@ -43,6 +43,21 @@ export interface InkBlockData {
 	id?: string;
 	width: number;
 	height: number;
+	// One line saying what the drawing is.
+	//
+	// A block is invisible to a reader: a page of handwritten physics is, to
+	// anyone not looking at it, a JSON blob. The fence body is already
+	// indexed by Obsidian's search, so this does not make a block findable
+	// that was not — what it does is make the hit legible, give a screen
+	// reader something to read, and give the eye something to catch when
+	// scrolling past.
+	//
+	// Absent rather than empty when there is none, and never written in that
+	// case: this landed without a format version bump, so an older build
+	// reading the block simply ignores it, and writing an empty string into
+	// every block in a vault to say "no caption" would be a no-op edit
+	// re-uploaded through a replicating vault for nothing.
+	caption?: string;
 	annotations: Annotation[];
 }
 
@@ -250,6 +265,11 @@ export function parseInkBlock(source: string): ParseResult {
 	const width = isFiniteNumber(raw.width) && raw.width > 0 ? raw.width : DEFAULT_BLOCK_WIDTH;
 	const height = isFiniteNumber(raw.height) && raw.height > 0 ? raw.height : DEFAULT_BLOCK_HEIGHT;
 	const version = isFiniteNumber(raw.version) ? raw.version : INK_BLOCK_VERSION;
+	// Not a reason to refuse the block. A caption is a convenience rather
+	// than something the drawing is made of, so one that arrives as a number
+	// is dropped where a stroke that arrived as a number would not be.
+	const rawCaption = typeof raw.caption === 'string' ? raw.caption.trim() : '';
+	const caption = rawCaption ? rawCaption : undefined;
 
 	const annotations: Annotation[] = [];
 	let dropped = 0;
@@ -291,7 +311,11 @@ export function parseInkBlock(source: string): ParseResult {
 	// optimisation to that shortcut costing a block the ability to be found.
 	const id = readInkBlockId(trimmed) ?? undefined;
 
-	return { data: { version, id, width, height, annotations }, malformed: damage.kind !== 'none', damage };
+	return {
+		data: { version, id, width, height, ...(caption ? { caption } : {}), annotations },
+		malformed: damage.kind !== 'none',
+		damage,
+	};
 }
 
 // The exact opening this module writes: a version, then an id holding
@@ -537,6 +561,10 @@ export function serializeInkBlock(data: InkBlockData): string {
 		...(data.id ? { id: data.id } : {}),
 		width: data.width,
 		height: data.height,
+		// After the width, which is where the id shortcut stops looking, and
+		// before the annotations, which are most of the bytes — so a caption
+		// stays readable at a glance in the note's own source.
+		...(data.caption?.trim() ? { caption: data.caption.trim() } : {}),
 		annotations: data.annotations.map(storedAnnotation),
 	}));
 }

@@ -376,6 +376,7 @@ class InkBlockView {
 		private readonly containerEl: HTMLElement,
 		source: string,
 		toolState: ToolState,
+		private readonly captionsEnabled: () => boolean,
 	) {
 		const { data, damage } = parseInkBlock(source);
 		// A block written before ids existed picks one up the first time it
@@ -456,6 +457,12 @@ class InkBlockView {
 			this.watchForRepair();
 		}
 
+		// After the damage check above, which is what decides whether this
+		// block may ever be written: a block that must never be saved over
+		// must not offer a field whose only purpose is to save something over
+		// it.
+		this.buildCaption();
+
 		// Deliberately after mountPage/seedPage above, so the rescued ink is
 		// on screen before the save that persists it is attempted.
 		if (rescued && !this.readOnly) this.scheduleWrite();
@@ -477,6 +484,49 @@ class InkBlockView {
 		// resize it and then silently forgets would be worse than not having
 		// one.
 		if (!this.readOnly) this.buildResizeHandle();
+	}
+
+	// One line under the block saying what the drawing is.
+	//
+	// The setting governs whether a caption can be *written*, never whether
+	// one already written is *shown*. A caption written on a device where the
+	// setting is on syncs to one where it is off, and hiding text someone
+	// wrote is worse than showing it.
+	private buildCaption(): void {
+		if (!this.captionsEnabled() || this.readOnly) {
+			const text = this.data.caption?.trim();
+			if (!text) return;
+			// Text, never markup. A caption comes out of the user's own note,
+			// which syncs between devices and can be hand-edited, so it is
+			// exactly as untrusted as the stroke data beside it.
+			this.containerEl.createDiv({ cls: 'inkling-ink-block-caption', text });
+			return;
+		}
+
+		const input = this.containerEl.createEl('input', { cls: 'inkling-ink-block-caption-input' });
+		input.type = 'text';
+		input.value = this.data.caption ?? '';
+		input.placeholder = 'Describe this block';
+		input.setAttribute('aria-label', 'Caption for this ink block');
+		// change rather than input: a save rewrites the fence and re-renders
+		// the block, which would take the field out from under the cursor
+		// after every keystroke. change fires when the field is done with.
+		input.addEventListener('change', () => this.commitCaption(input.value));
+		input.addEventListener('blur', () => this.commitCaption(input.value));
+		input.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter') input.blur();
+		});
+	}
+
+	private commitCaption(value: string): void {
+		const trimmed = value.trim();
+		const next = trimmed ? trimmed : undefined;
+		// Nothing to write when nothing changed. blur fires on every pass
+		// through the field, and a no-op edit to a block is still a rewritten
+		// note re-uploaded through a replicating vault.
+		if (next === this.data.caption) return;
+		this.data = { ...this.data, caption: next };
+		this.scheduleWrite();
 	}
 
 	private buildBanner(damage: InkBlockDamage): void {
@@ -1195,14 +1245,14 @@ class InkBlockChild extends MarkdownRenderChild {
 	}
 }
 
-export function registerInkBlock(plugin: Plugin, toolState: ToolState): void {
+export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsEnabled: () => boolean): void {
 	// Once per load. Entries belong to blocks that may never be opened again,
 	// so nothing else will ever expire them, and localStorage is small enough
 	// that a fortnight of abandoned drawings is worth sweeping out.
 	unsavedInk.purgeExpired();
 
 	plugin.registerMarkdownCodeBlockProcessor(INK_BLOCK_LANGUAGE, (source, el, ctx) => {
-		ctx.addChild(new InkBlockChild(el, () => new InkBlockView(plugin, ctx, el, source, toolState)));
+		ctx.addChild(new InkBlockChild(el, () => new InkBlockView(plugin, ctx, el, source, toolState, captionsEnabled)));
 	});
 
 	plugin.addCommand({

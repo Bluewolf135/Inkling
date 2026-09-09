@@ -932,6 +932,46 @@
 	line-height: var(--line-height-tight);
 }
 
+/* ---------------------------------------------------------------------
+   Ink block caption (see src/markdown/inkBlock.ts)
+   --------------------------------------------------------------------- */
+
+/* Sized and coloured like a figure caption rather than like note text: it
+   describes the block above it and should not compete with the writing
+   around it for the reader's eye. */
+.inkling-ink-block-caption,
+.inkling-ink-block-caption-input {
+	display: block;
+	width: 100%;
+	margin-top: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: var(--line-height-tight);
+	text-align: center;
+}
+
+/* Not obviously a text field until it is being used. An input styled like
+   one sitting under every block in a note would read as plugin chrome the
+   note has to carry, which is the thing this setting is off by default to
+   avoid. */
+.inkling-ink-block-caption-input {
+	border: none;
+	border-bottom: 1px solid transparent;
+	border-radius: 0;
+	background-color: transparent;
+	padding: var(--size-2-1) 0;
+}
+
+.inkling-ink-block-caption-input:hover {
+	border-bottom-color: var(--background-modifier-border);
+}
+
+.inkling-ink-block-caption-input:focus {
+	border-bottom-color: var(--interactive-accent);
+	box-shadow: none;
+	color: var(--text-normal);
+}
+
 /* The banner wraps onto a second line once it carries an action, so the text
    has to be allowed to take the width and the button to keep its own. */
 .inkling-ink-block-banner {

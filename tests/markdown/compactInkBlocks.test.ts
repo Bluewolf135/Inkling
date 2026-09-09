@@ -135,3 +135,23 @@ describe('compactInkBlocks id repair', () => {
 		expect(result.content).toContain('"id":"');
 	});
 });
+
+describe('a captioned block', () => {
+	it('keeps its caption through compaction', () => {
+		// Compaction rewrites every block in a note at once, so a field it did
+		// not know about would be dropped from all of them silently — the
+		// shape of two data-loss bugs this file has already had.
+		const body = serializeInkBlock({
+			version: 1,
+			id: 'ink-captioned',
+			width: 800,
+			height: 450,
+			caption: "Newton's second law",
+			annotations: [stroke('a', densePoints(40))],
+		});
+
+		const { content } = compactInkBlocks(note(body));
+
+		expect(content).toContain("Newton's second law");
+	});
+});

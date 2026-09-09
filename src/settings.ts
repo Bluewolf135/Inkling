@@ -26,6 +26,13 @@ export interface InklingSettings {
 	shapeRecognition: ShapeRecognition;
 	darkInversion: DarkInversion;
 	toolbarStartsCollapsed: boolean;
+	// Whether an ink block offers a caption to write.
+	//
+	// Off by default and deliberately so: a block that already has one always
+	// shows it, whatever this says — hiding text someone wrote would be worse
+	// than showing it — so this governs only whether the affordance to add
+	// one appears. Off means every existing block renders exactly as before.
+	blockCaptions: boolean;
 	extractionNotePattern: string;
 	// Colour category names, keyed by lowercase hex — so "Yellow =
 	// definition, Red = disagree" works without touching code.
@@ -48,6 +55,7 @@ export function defaultSettings(): InklingSettings {
 		shapeRecognition: 'hold',
 		darkInversion: 'follow-theme',
 		toolbarStartsCollapsed: false,
+		blockCaptions: false,
 		extractionNotePattern: '{folder}/{name} — annotations.md',
 		colorLabels: defaultColorLabels(),
 	};
@@ -99,6 +107,7 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 		shapeRecognition: pick(source.shapeRecognition, ['off', 'hold'] as const, defaults.shapeRecognition),
 		darkInversion: pick(source.darkInversion, ['off', 'on', 'follow-theme'] as const, defaults.darkInversion),
 		toolbarStartsCollapsed: bool(source.toolbarStartsCollapsed, defaults.toolbarStartsCollapsed),
+		blockCaptions: bool(source.blockCaptions, defaults.blockCaptions),
 		extractionNotePattern: usablePattern,
 		colorLabels: labels,
 	};

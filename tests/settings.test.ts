@@ -102,3 +102,20 @@ describe('normalizeSettings', () => {
 		expect(second.colorLabels['#e03131']).toBe('Red');
 	});
 });
+
+describe('block captions', () => {
+	it('are off until asked for', () => {
+		// A setting that changes how the plugin works the moment it is added
+		// is a setting that broke something. Every block in the vault renders
+		// exactly as it did before this existed.
+		expect(defaultSettings().blockCaptions).toBe(false);
+	});
+
+	it('fall back to off when the stored value is not a boolean', () => {
+		expect(normalizeSettings({ blockCaptions: 'yes' }).blockCaptions).toBe(false);
+	});
+
+	it('are kept when they were turned on', () => {
+		expect(normalizeSettings({ blockCaptions: true }).blockCaptions).toBe(true);
+	});
+});

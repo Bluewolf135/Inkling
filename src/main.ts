@@ -64,7 +64,7 @@ export default class InklingPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf, this.toolState, () => this.settings));
 		registerNoteCreation(this, () => ({ template: this.settings.defaultTemplate, pageSize: this.settings.pageSize }));
-		registerInkBlock(this, this.toolState);
+		registerInkBlock(this, this.toolState, () => this.settings.blockCaptions);
 
 		// Obsidian's own core PDF view stays the default for opening a .pdf —
 		// full native chrome (page number, zoom, outline) and no pdf-lib

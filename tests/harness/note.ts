@@ -134,6 +134,11 @@ export interface MountNoteOptions {
 	tool?: ToolType;
 	blockWidth?: number;
 	blockHeight?: number;
+	/**
+	 * The plugin setting that decides whether a block offers a caption to
+	 * write. Off by default, which is how the plugin ships.
+	 */
+	blockCaptions?: boolean;
 }
 
 function defaultContents(blocks: { id?: string }[], width: number, height: number): string {
@@ -265,7 +270,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 
 	const toolState = new ToolState();
 	toolState.setTool(options.tool ?? 'pen');
-	registerInkBlock(plugin as unknown as Plugin, toolState);
+	registerInkBlock(plugin as unknown as Plugin, toolState, () => options.blockCaptions ?? false);
 	// Read back through a closure. The only assignment TypeScript can see in
 	// straight-line code is the `null` above — the one that matters happens
 	// inside a callback handed to production code — so reading it directly

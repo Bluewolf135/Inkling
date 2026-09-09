@@ -410,3 +410,47 @@ describe('parseInkBlock damage', () => {
 		expect(parseInkBlock(withAnnotations([good('a')], INK_BLOCK_VERSION + 1)).malformed).toBe(true);
 	});
 });
+
+// An ink block is invisible to a reader: a page of handwritten physics is,
+// to anyone not looking at it, a JSON blob. A caption is the one line of
+// text that says what the drawing is — for search results, for a screen
+// reader, and for the reader's own eye scrolling past.
+describe('a block caption', () => {
+	it('survives a round trip', () => {
+		const source = serializeInkBlock({ ...emptyInkBlock(), caption: "Newton's second law" });
+
+		expect(parseInkBlock(source).data.caption).toBe("Newton's second law");
+	});
+
+	it('is not written at all when there is none', () => {
+		expect(serializeInkBlock(emptyInkBlock())).not.toContain('caption');
+	});
+
+	it('is not written when it holds only whitespace', () => {
+		expect(serializeInkBlock({ ...emptyInkBlock(), caption: '   ' })).not.toContain('caption');
+	});
+
+	it('is trimmed on the way in', () => {
+		const source = serializeInkBlock({ ...emptyInkBlock(), caption: '  spaced  ' });
+
+		expect(parseInkBlock(source).data.caption).toBe('spaced');
+	});
+
+	it('is ignored, not fatal, when it is not a string', () => {
+		const { data, damage } = parseInkBlock(JSON.stringify({ version: 2, width: 800, height: 450, caption: 42, annotations: [] }));
+
+		expect(data.caption).toBeUndefined();
+		// A caption is a convenience, not content the block is made of. A
+		// block is not worth refusing to save over because one went wrong.
+		expect(damage.kind).toBe('none');
+	});
+
+	it('leaves the id readable without parsing the whole block', () => {
+		// The id shortcut matches a fixed opening — version, id, width — so a
+		// new field has to go after it or every block stops being findable
+		// by the cheap path.
+		const source = serializeInkBlock({ ...emptyInkBlock(), id: 'ink-captioned', caption: 'A diagram' });
+
+		expect(readInkBlockId(source)).toBe('ink-captioned');
+	});
+});
