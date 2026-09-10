@@ -50,6 +50,17 @@ export default defineConfig(
 			// have — the rule is about theming the user's app, which is not
 			// what this DOM is.
 			'obsidianmd/no-static-styles-assignment': 'off',
+			// And the same reasoning again. The rule is about what may ship to
+			// a mobile device; tests run in Node and never do. Reading a real
+			// library off disk is the whole point of
+			// tests/pdf/vaultLibrary.test.ts, and there is no Vault to read it
+			// through from a test runner.
+			'obsidianmd/no-nodejs-modules': 'off',
+		},
+		languageOptions: {
+			globals: {
+				...globals.node,
+			},
 		},
 	},
 );

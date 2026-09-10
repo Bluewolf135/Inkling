@@ -1,5 +1,5 @@
 import { PDFDocument, PDFRef } from 'pdf-lib';
-import { objectHeaderAt, scanLastXref, type XrefStyle } from './xrefScan';
+import { crossReferenceTableExtent, objectHeaderAt, scanLastXref, type XrefStyle } from './xrefScan';
 
 // Whether this exact file can be safely appended to, decided once when it is
 // opened and never revisited.
@@ -69,34 +69,21 @@ function latin1(bytes: Uint8Array, from: number, length: number): string {
 // a file that has already been updated the last section is small and the
 // older ones were somebody else's to get right.
 function tableEntriesAreHonest(bytes: Uint8Array, offset: number): string | null {
-	let cursor = offset;
-
-	const keyword = /^\s*xref\s*?(?:\r\n|\r|\n)/.exec(latin1(bytes, cursor, 32));
-	if (!keyword) return 'cross-reference table does not start with the xref keyword';
-	cursor += keyword[0].length;
+	// The same structural walk scanLastXref uses to find the trailer, so the
+	// two cannot disagree about where a table's entries are.
+	const extent = crossReferenceTableExtent(bytes, offset);
+	if (!extent) return 'cross-reference table is malformed';
 
 	let checked = 0;
-	// Bounded: a section with more subsections than this is not a document
-	// anyone is annotating, and an unbounded loop over malformed bytes is how
-	// a classifier turns into a hang.
-	for (let subsection = 0; subsection < 4096; subsection++) {
-		const header = /^(\d+)\s+(\d+)\s*?(?:\r\n|\r|\n)/.exec(latin1(bytes, cursor, 48));
-		if (!header?.[1] || !header[2]) break;
-
-		const firstObject = Number(header[1]);
-		const count = Number(header[2]);
-		if (!Number.isSafeInteger(count) || count < 0 || count > 5_000_000) return 'cross-reference subsection length is implausible';
-		cursor += header[0].length;
-
-		for (let index = 0; index < count; index++) {
+	for (const subsection of extent.subsections) {
+		for (let index = 0; index < subsection.count; index++) {
 			// Every entry is exactly 20 bytes: 10 of offset, a space, 5 of
 			// generation, a space, one of f/n, and a two-byte terminator.
-			const parsed = /^(\d{10}) (\d{5}) ([fn])/.exec(latin1(bytes, cursor, 20));
-			if (!parsed?.[1] || !parsed[2] || !parsed[3]) return 'cross-reference entry is malformed';
-			cursor += 20;
-
+			const parsed = /^(\d{10}) (\d{5}) ([fn])/.exec(latin1(bytes, subsection.entriesAt + index * 20, 20));
+			if (!parsed?.[1] || !parsed[3]) return 'cross-reference entry is malformed';
 			if (parsed[3] === 'f') continue;
-			const objectNumber = firstObject + index;
+
+			const objectNumber = subsection.firstObject + index;
 			// Object 0 is always the head of the free list; an in-use entry
 			// for it is a broken table, not a document.
 			if (objectNumber === 0) return 'cross-reference table marks object 0 as in use';

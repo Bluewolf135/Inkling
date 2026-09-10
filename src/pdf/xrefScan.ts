@@ -39,7 +39,64 @@ const TAIL_SCAN_BYTES = 2048;
 // A dictionary at the end of a file is small — a few hundred bytes at most.
 // Reading a bounded window rather than to EOF keeps a malformed file from
 // turning a scan into a copy of the whole book.
+//
+// Note what this is *not* used for: finding the `trailer` keyword after a
+// classic table. A table has twenty bytes per object, so a real book's runs to
+// hundreds of kilobytes — four of the twenty books in the vault were declined
+// by a scan that looked for `trailer` inside a window like this one, and every
+// one of those files was fine. crossReferenceTableExtent walks the subsections
+// instead and lands on the keyword exactly.
 const DICT_SCAN_BYTES = 8192;
+
+// One subsection of a classic cross-reference table: `<first> <count>`
+// followed by exactly `count` twenty-byte entries.
+export interface XrefSubsection {
+	firstObject: number;
+	count: number;
+	// Byte offset of the first of this subsection's entries.
+	entriesAt: number;
+}
+
+// Guards against a malformed header turning a scan into a hang. Neither bound
+// is a document anyone is annotating.
+const MAX_SUBSECTIONS = 65536;
+const MAX_ENTRIES_PER_SUBSECTION = 5_000_000;
+
+// Walks a classic cross-reference table from its `xref` keyword to its end,
+// reporting where each subsection's entries start and where the table
+// finishes — which is where `trailer` must be.
+//
+// Structural rather than a text search, because a table is far too long for
+// one: twenty bytes an object means a 40,000-object book has an 800 KB table,
+// and the keyword after it is nowhere near the start.
+export function crossReferenceTableExtent(
+	bytes: Uint8Array,
+	offset: number,
+): { subsections: XrefSubsection[]; end: number } | null {
+	const keyword = /^\s*xref\s*?(?:\r\n|\r|\n)/.exec(latin1(bytes, offset, offset + 32));
+	if (!keyword) return null;
+
+	let cursor = offset + keyword[0].length;
+	const subsections: XrefSubsection[] = [];
+
+	for (let index = 0; index < MAX_SUBSECTIONS; index++) {
+		const header = /^(\d+)\s+(\d+)\s*?(?:\r\n|\r|\n)/.exec(latin1(bytes, cursor, cursor + 48));
+		if (!header?.[1] || !header[2]) break;
+
+		const count = Number(header[2]);
+		if (!Number.isSafeInteger(count) || count < 0 || count > MAX_ENTRIES_PER_SUBSECTION) return null;
+
+		const entriesAt = cursor + header[0].length;
+		const end = entriesAt + count * 20;
+		if (end > bytes.length) return null;
+
+		subsections.push({ firstObject: Number(header[1]), count, entriesAt });
+		cursor = end;
+	}
+
+	if (subsections.length === 0) return null;
+	return { subsections, end: cursor };
+}
 
 // Read as Latin-1 so every byte maps to exactly one character and an offset
 // in the string is an offset in the file. A PDF's structure is ASCII; only
@@ -126,13 +183,17 @@ export function scanLastXref(bytes: Uint8Array): XrefScan | XrefUnknown {
 	const head = latin1(bytes, offset, offset + 32);
 	if (/^\s*xref\b/.test(head)) {
 		// A classic section is `xref`, its subsections, then `trailer` and a
-		// dictionary. Scanning forward for the keyword is safe here because
-		// the entries between are fixed-width digits and cannot contain it.
-		const window = latin1(bytes, offset, offset + DICT_SCAN_BYTES);
-		const trailerAt = window.indexOf('trailer');
-		if (trailerAt < 0) return { style: 'unknown', reason: 'cross-reference table has no trailer' };
+		// dictionary. Where the entries end has to be computed rather than
+		// searched for: they are twenty bytes an object, so a real book's
+		// table is hundreds of kilobytes long and the keyword after it is
+		// nowhere near the start.
+		const extent = crossReferenceTableExtent(bytes, offset);
+		if (!extent) return { style: 'unknown', reason: 'cross-reference table is malformed' };
 
-		const trailerText = dictionaryTextAt(bytes, offset + trailerAt + 'trailer'.length);
+		const keyword = /^\s*trailer\b/.exec(latin1(bytes, extent.end, extent.end + 32));
+		if (!keyword) return { style: 'unknown', reason: 'cross-reference table is not followed by a trailer' };
+
+		const trailerText = dictionaryTextAt(bytes, extent.end + keyword[0].length);
 		if (!trailerText) return { style: 'unknown', reason: 'cross-reference table trailer is not a dictionary' };
 		return { style: 'table', offset, trailerText };
 	}
