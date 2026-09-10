@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { looksLikePdf, writeBinarySafely, type BinaryWriteTarget } from '../src/vaultWrite';
+import {
+	appendBinarySafely,
+	canAppendBinary,
+	looksLikePdf,
+	writeBinarySafely,
+	type BinaryAppendTarget,
+	type BinaryWriteTarget,
+} from '../src/vaultWrite';
 
 function pdfBytes(length = 1024): ArrayBuffer {
 	const bytes = new Uint8Array(length);
@@ -80,5 +87,93 @@ describe('writeBinarySafely', () => {
 		// would leave the pages dirty forever.
 		const vault = fakeVault({ reportedSize: () => null });
 		await expect(writeBinarySafely(vault, file, pdfBytes())).resolves.toBeUndefined();
+	});
+});
+
+// A vault that actually holds a file's length, because every guard in the
+// append path is about whether that length is what we think it is.
+function fakeAppendVault(options: { size: number; withAppend?: boolean; sizeAfter?: (before: number, added: number) => number }) {
+	let size = options.size;
+	const appended: ArrayBuffer[] = [];
+	const vault: BinaryAppendTarget<{ path: string }> & { appended: ArrayBuffer[] } = {
+		appended,
+		adapter: {
+			stat: vi.fn(async () => ({ type: 'file' as const, ctime: 0, mtime: 0, size })),
+		},
+	};
+	if (options.withAppend !== false) {
+		vault.appendBinary = vi.fn(async (_file: { path: string }, data: ArrayBuffer) => {
+			appended.push(data);
+			size = options.sizeAfter ? options.sizeAfter(size, data.byteLength) : size + data.byteLength;
+		});
+	}
+	return vault;
+}
+
+function appendix(text = '\n9 0 obj\n<< >>\nendobj\nxref\ntrailer\nstartxref\n9\n%%EOF\n'): ArrayBuffer {
+	return new TextEncoder().encode(text).buffer;
+}
+
+describe('canAppendBinary', () => {
+	it('detects the API when it is there', () => {
+		expect(canAppendBinary(fakeAppendVault({ size: 100 }))).toBe(true);
+	});
+
+	it('reports its absence rather than throwing', () => {
+		// minAppVersion is 1.4.4 and appendBinary is @since 1.12.3, so this is
+		// a real case for anyone but the author.
+		expect(canAppendBinary(fakeAppendVault({ size: 100, withAppend: false }))).toBe(false);
+	});
+});
+
+describe('appendBinarySafely', () => {
+	it('appends when the file is exactly the length the update was built on', async () => {
+		const vault = fakeAppendVault({ size: 1024 });
+		await appendBinarySafely(vault, file, appendix(), 1024);
+		expect(vault.appended).toHaveLength(1);
+	});
+
+	it('refuses when the file changed size since it was read', async () => {
+		// The one place incremental save is *more* dangerous than what it
+		// replaces. An append onto a file sync moved underneath us produces a
+		// corrupt PDF, where a full rewrite would merely lose the other edit —
+		// so this check is load-bearing, not defensive.
+		const vault = fakeAppendVault({ size: 2048 });
+		await expect(appendBinarySafely(vault, file, appendix(), 1024)).rejects.toThrow(/changed underneath us/);
+		expect(vault.appended).toHaveLength(0);
+	});
+
+	it('refuses an appendix that does not end at a PDF end-of-file marker', async () => {
+		// looksLikePdf cannot apply to something that does not start with
+		// %PDF-, so this is what replaces it: an appendix that does not end in
+		// %%EOF is not an update section, whatever else it is.
+		const vault = fakeAppendVault({ size: 1024 });
+		await expect(appendBinarySafely(vault, file, appendix('nothing useful\n'), 1024)).rejects.toThrow(/%%EOF/);
+		expect(vault.appended).toHaveLength(0);
+	});
+
+	it('refuses an appendix that merely mentions %%EOF somewhere in the middle', async () => {
+		const vault = fakeAppendVault({ size: 1024 });
+		await expect(appendBinarySafely(vault, file, appendix('%%EOF\nand then some more\n'), 1024)).rejects.toThrow(/%%EOF/);
+		expect(vault.appended).toHaveLength(0);
+	});
+
+	it('refuses an empty appendix', async () => {
+		const vault = fakeAppendVault({ size: 1024 });
+		await expect(appendBinarySafely(vault, file, new ArrayBuffer(0), 1024)).rejects.toThrow();
+		expect(vault.appended).toHaveLength(0);
+	});
+
+	it('reports an append that was cut short', async () => {
+		// Same failure the replacement path guards against — the app killed
+		// mid-write, which mobile OSes do aggressively — and the same way of
+		// noticing, except the expected size is base plus appendix.
+		const vault = fakeAppendVault({ size: 1024, sizeAfter: (before, added) => before + Math.floor(added / 2) });
+		await expect(appendBinarySafely(vault, file, appendix(), 1024)).rejects.toThrow(/did not complete/);
+	});
+
+	it('refuses outright when the API is missing', async () => {
+		const vault = fakeAppendVault({ size: 1024, withAppend: false });
+		await expect(appendBinarySafely(vault, file, appendix(), 1024)).rejects.toThrow(/appendBinary/);
 	});
 });

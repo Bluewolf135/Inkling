@@ -83,3 +83,85 @@ export async function writeBinarySafely<F extends { path: string }>(
 		);
 	}
 }
+
+// ---- Appending ----
+
+// The append path's own version of the two guards above, because neither
+// survives unchanged.
+//
+// `looksLikePdf` cannot apply to an appendix: an update section does not start
+// with `%PDF-`. What replaces it is the other end — an appendix that does not
+// finish at `%%EOF` is not an update section, whatever else it is.
+//
+// And the after-write size check has to be told the base length, because for
+// an append the expected size is *original + appended* rather than the number
+// of bytes handed over.
+//
+// The check with no counterpart in the replacement path is the one *before*
+// the write. **An append onto a file that changed since we read it produces a
+// corrupt PDF**, where a full rewrite would merely lose the other change.
+// That is the single place incremental save is more dangerous than what it
+// replaces, and it is a live risk in a Self-hosted LiveSync vault. On a
+// mismatch the correct action is not to retry — it is to fall back to a full
+// rewrite from a fresh read, which is what the caller does.
+const EOF_MARKER = [0x25, 0x25, 0x45, 0x4f, 0x46]; // "%%EOF"
+
+// How much may follow `%%EOF` in an appendix. A line terminator, or a couple,
+// and nothing more — enough slack for a trailing newline without admitting a
+// buffer that merely contains the marker somewhere in the middle.
+const EOF_TRAILING_SLACK = 4;
+
+export interface BinaryAppendTarget<F> {
+	appendBinary?(file: F, data: ArrayBuffer): Promise<void>;
+	adapter: Pick<DataAdapter, 'stat'>;
+}
+
+// Vault.appendBinary is `@since 1.12.3` and manifest.json's minAppVersion is
+// 1.4.4, so its absence is a case that has to be handled rather than assumed
+// away. Not having it is not a failure: it means this vault takes the
+// full-rewrite path, exactly as it does today.
+export function canAppendBinary(vault: unknown): boolean {
+	return typeof (vault as { appendBinary?: unknown } | null)?.appendBinary === 'function';
+}
+
+export function looksLikeUpdateSection(bytes: ArrayBuffer): boolean {
+	if (bytes.byteLength < EOF_MARKER.length) return false;
+	const from = Math.max(0, bytes.byteLength - EOF_MARKER.length - EOF_TRAILING_SLACK);
+	const tail = new Uint8Array(bytes, from);
+	for (let start = tail.length - EOF_MARKER.length; start >= 0; start--) {
+		if (EOF_MARKER.every((byte, index) => tail[start + index] === byte)) return true;
+	}
+	return false;
+}
+
+export async function appendBinarySafely<F extends { path: string }>(
+	vault: BinaryAppendTarget<F>,
+	file: F,
+	appendix: ArrayBuffer,
+	baseLength: number,
+): Promise<void> {
+	if (!canAppendBinary(vault)) {
+		throw new Error(`Inkling: this version of Obsidian has no Vault.appendBinary, so ${file.path} cannot be updated in place.`);
+	}
+	if (!looksLikeUpdateSection(appendix)) {
+		throw new Error(`Inkling: refusing to append ${appendix.byteLength} bytes to ${file.path} — that does not end at %%EOF.`);
+	}
+
+	// Before, and this is the load-bearing one. stat rather than a re-read: a
+	// length that still matches is what says the update we built is still an
+	// update to *this* file.
+	const before = await vault.adapter.stat(file.path);
+	if (before && before.size !== baseLength) {
+		throw new Error(
+			`Inkling: ${file.path} is ${before.size} bytes where the update was built against ${baseLength} — it changed underneath us.`,
+		);
+	}
+
+	await vault.appendBinary?.(file, appendix);
+
+	const expected = baseLength + appendix.byteLength;
+	const after = await vault.adapter.stat(file.path);
+	if (after && after.size !== expected) {
+		throw new Error(`Inkling: ${file.path} is ${after.size} bytes after appending to ${expected} — the write did not complete.`);
+	}
+}
