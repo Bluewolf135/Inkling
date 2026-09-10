@@ -20,6 +20,21 @@ export interface IncrementalCapability {
 	// Where the file's last cross-reference section starts, which becomes the
 	// /Prev of the first section we append.
 	xrefOffset: number;
+	// The /Size the file's own last cross-reference section declares: one
+	// greater than the largest object number used anywhere in it.
+	//
+	// **pdf-lib does not know this number, and cannot be asked for it.** Its
+	// parser handles a cross-reference stream through PDFXRefStreamParser and
+	// never assigns that object into the context, so
+	// `context.largestObjectNumber` comes back short by at least one on every
+	// file that uses one — a 9-object file reported 6. Allocating new objects
+	// from that counter hands the next annotation an object number the
+	// original file already uses for its cross-reference stream, and the
+	// appended definition silently replaces it. pdf-lib reads the result
+	// anyway; pdf.js says "Invalid Root reference".
+	//
+	// /Size is the authoritative answer and is exactly what it is for.
+	declaredSize: number;
 }
 
 export interface IncrementalDecline {
@@ -114,7 +129,6 @@ function tableEntriesAreHonest(bytes: Uint8Array, offset: number): string | null
 // decoding anything.
 function streamDictionaryIsHonest(dictText: string, doc: PDFDocument): string | null {
 	if (!/\/W\s*\[\s*\d+\s+\d+\s+\d+\s*\]/.test(dictText)) return 'cross-reference stream has no /W field widths';
-	if (!/\/Size\s+\d+/.test(dictText)) return 'cross-reference stream has no /Size';
 	if (!/\/Length\s+\d+/.test(dictText)) return 'cross-reference stream has no /Length';
 
 	const root = /\/Root\s+(\d+)\s+(\d+)\s+R/.exec(dictText);
@@ -147,7 +161,14 @@ export function classifyIncrementalSave(bytes: Uint8Array, doc: PDFDocument): In
 			scan.style === 'table' ? tableEntriesAreHonest(bytes, scan.offset) : streamDictionaryIsHonest(scan.trailerText, doc);
 		if (fault) return decline(fault);
 
-		return { supported: true, style: scan.style, xrefOffset: scan.offset };
+		// Required of both styles, and load-bearing rather than cosmetic: see
+		// declaredSize above for what goes wrong without it.
+		const size = /\/Size\s+(\d+)/.exec(scan.trailerText);
+		if (!size?.[1]) return decline('the last cross-reference section declares no /Size');
+		const declaredSize = Number(size[1]);
+		if (!Number.isSafeInteger(declaredSize) || declaredSize < 1) return decline('the last cross-reference section declares an implausible /Size');
+
+		return { supported: true, style: scan.style, xrefOffset: scan.offset, declaredSize };
 	} catch (error) {
 		return decline(`classification threw: ${String(error)}`);
 	}

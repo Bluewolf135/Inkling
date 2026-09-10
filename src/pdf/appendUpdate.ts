@@ -4,6 +4,7 @@ import {
 	PDFArray,
 	PDFContext,
 	PDFCrossRefSection,
+	PDFCrossRefStream,
 	PDFHexString,
 	PDFNumber,
 	PDFObject,
@@ -113,6 +114,32 @@ export function documentId(context: PDFContext, previous: [PDFObject, PDFObject]
 	return [randomId(), randomId()];
 }
 
+// Raises the context's object counter to cover object numbers the original
+// file uses but pdf-lib never registered.
+//
+// **This must run before the first object of the session is allocated**, and
+// the reason is a fault pdf-lib gives no sign of. Its parser handles a
+// cross-reference stream through PDFXRefStreamParser and never assigns that
+// object into the context, so `largestObjectNumber` comes back short on every
+// file that has one — measured at 6 on a file whose own /Size says 9. The
+// next `context.nextRef()` then hands an annotation the object number the
+// file already uses for its cross-reference stream, and the appended
+// definition silently replaces it.
+//
+// pdf-lib reads the result perfectly, because it resolves the last definition
+// of each object and never consults a cross-reference section at all. pdf.js,
+// which follows the chain, fails with "Invalid Root reference". That is the
+// spec's warning about pdf-lib not being a witness, met in practice.
+//
+// /Size is one greater than the largest object number used in the file, which
+// is exactly the number needed. Raising the counter can leave a gap where the
+// file numbers objects sparsely; a gap costs one extra cross-reference
+// subsection and nothing else.
+export function reserveObjectNumbers(context: PDFContext, declaredSize: number): void {
+	if (!Number.isSafeInteger(declaredSize)) return;
+	context.largestObjectNumber = Math.max(context.largestObjectNumber, declaredSize - 1);
+}
+
 interface PlacedObject {
 	ref: PDFRef;
 	bytes: Uint8Array;
@@ -196,7 +223,49 @@ function buildClassicUpdate(options: UpdateOptions): Uint8Array {
 	]);
 }
 
+function buildStreamUpdate(options: UpdateOptions): Uint8Array {
+	const { context, changes, baseLength } = options;
+
+	const lead = NEWLINE();
+	const { placed, end } = placeObjects(context, changes, baseLength + lead.length);
+
+	// The cross-reference stream is itself an indirect object and needs an
+	// object number of its own. Taken from nextRef() rather than invented, so
+	// it cannot collide with anything anywhere in the file:
+	// largestObjectNumber is maintained across every assign during the linear
+	// parse, including objects a cross-reference table marked free. Taking a
+	// fresh one every save also means two appends never claim the same
+	// number.
+	const xrefRef = context.nextRef();
+	const size = context.largestObjectNumber + 1;
+
+	// PDFCrossRefStream.of, not .create: create() seeds the section with the
+	// free entry for object 0, which belongs to the file's *first*
+	// cross-reference section. An update section describes only what it
+	// changed.
+	const xrefStream = PDFCrossRefStream.of(context.obj(trailerFields(options, size)), []);
+
+	for (const entry of orderedEntries(placed, changes, [{ ref: xrefRef, bytes: new Uint8Array(0), offset: end }])) {
+		if (entry.offset === null) xrefStream.addDeletedEntry(entry.ref, 0);
+		else xrefStream.addUncompressedEntry(entry.ref, entry.offset);
+	}
+
+	// Serialized last, and only once: /W, /Index and /Length are computed
+	// from the entries by updateDict(), which copyBytesInto calls, so every
+	// entry has to be in before a single byte is produced.
+	//
+	// No separate `trailer <<…>>` section here, and that is the format rather
+	// than an oversight: a cross-reference stream carries the trailer fields
+	// in its own dictionary, so all that follows it is startxref and %%EOF.
+	return concatChunks([
+		lead,
+		...placed.map((item) => item.bytes),
+		serializeIndirectObject(xrefRef, xrefStream),
+		bytesOf(PDFTrailer.forLastCrossRefSectionOffset(end)),
+		NEWLINE(),
+	]);
+}
+
 export function buildIncrementalUpdate(options: UpdateOptions): Uint8Array {
-	if (options.style === 'table') return buildClassicUpdate(options);
-	throw new Error('Inkling: the cross-reference stream writer is not built yet.');
+	return options.style === 'table' ? buildClassicUpdate(options) : buildStreamUpdate(options);
 }
