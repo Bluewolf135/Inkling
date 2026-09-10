@@ -1,7 +1,14 @@
 import type { PDFDocument } from 'pdf-lib';
 import type { Annotation } from '../annotate/types';
 import type { StructureProfile } from './compatibility';
-import { openDocument, writeDocument } from './annotationWriterCore';
+import {
+	abandonIncremental,
+	commitAppend,
+	openDocument,
+	toArrayBuffer,
+	writeDocument,
+	type IncrementalSession,
+} from './annotationWriterCore';
 import type { WorkerResponseMessage } from './annotationWriterProtocol';
 
 // Reads annotationWriter.worker.ts's bundled output as source text (see
@@ -32,7 +39,17 @@ export interface OpenResult {
 	displayBytes: ArrayBuffer;
 	profile: StructureProfile;
 	risky: string[];
+	// Whether this file can be appended to rather than rewritten. The view
+	// scales its save cadence on it, and pairs it with a feature check for
+	// Vault.appendBinary — which this side of the wire cannot see.
+	incremental: boolean;
 }
+
+// What a save produced. The two go to different Vault calls, so the view is
+// told which it got rather than left to guess.
+export type WriteOutcome =
+	| { mode: 'full'; bytes: ArrayBuffer }
+	| { mode: 'append'; appendix: ArrayBuffer; baseLength: number };
 
 export interface WritePage {
 	pageNumber: number;
@@ -78,6 +95,8 @@ export class AnnotationWriterClient {
 	// Main-thread mode's equivalent of the worker's own long-lived document:
 	// parsed by open(), reused by every later write() (see openDocument).
 	private mainDoc: PDFDocument | null = null;
+	// Its append state, held for exactly as long as the document is.
+	private mainSession: IncrementalSession | null = null;
 	private terminated = false;
 
 	async open(bytes: ArrayBuffer): Promise<OpenResult> {
@@ -86,11 +105,13 @@ export class AnnotationWriterClient {
 		if ((await this.ensureMode()) === 'main') {
 			const opened = await openDocument(bytes);
 			this.mainDoc = opened.doc;
+			this.mainSession = opened.session;
 			return {
 				savedAnnotations: opened.savedAnnotations,
 				displayBytes: opened.displayBytes,
 				profile: opened.profile,
 				risky: opened.risky,
+				incremental: opened.incremental,
 			};
 		}
 
@@ -100,17 +121,51 @@ export class AnnotationWriterClient {
 		return promise;
 	}
 
-	async write(pages: WritePage[]): Promise<ArrayBuffer> {
+	async write(pages: WritePage[]): Promise<WriteOutcome> {
 		if (this.terminated) throw new Error('Inkling: annotation writer is no longer usable.');
 
 		if ((await this.ensureMode()) === 'main') {
-			if (!this.mainDoc) throw new Error('Inkling: no document open in the annotation writer.');
-			return writeDocument(this.mainDoc, pages);
+			if (!this.mainDoc || !this.mainSession) throw new Error('Inkling: no document open in the annotation writer.');
+			const outcome = await writeDocument(this.mainDoc, this.mainSession, pages);
+			return outcome.mode === 'full'
+				? { mode: 'full', bytes: toArrayBuffer(outcome.bytes) }
+				: { mode: 'append', appendix: toArrayBuffer(outcome.appendix), baseLength: outcome.baseLength };
 		}
 
 		const requestId = this.nextRequestId++;
-		const promise = this.awaitResponse<ArrayBuffer>(requestId);
+		const promise = this.awaitResponse<WriteOutcome>(requestId);
 		this.worker?.postMessage({ type: 'write', requestId, pages });
+		return promise;
+	}
+
+	// Told only after the write has actually landed. Nothing else may advance
+	// the session's idea of what is on disk — a session that advanced
+	// optimistically would build the next append onto bytes that were never
+	// written, and land it at the wrong offset entirely.
+	async commit(): Promise<void> {
+		if (this.terminated) return;
+		if ((await this.ensureMode()) === 'main') {
+			if (this.mainSession) commitAppend(this.mainSession);
+			return;
+		}
+		const requestId = this.nextRequestId++;
+		const promise = this.awaitResponse<void>(requestId);
+		this.worker?.postMessage({ type: 'commit', requestId });
+		return promise;
+	}
+
+	// After a write that failed, or one whose outcome we cannot vouch for. The
+	// session gives up appending for good and every later save is a full
+	// rewrite, which is always correct.
+	async abandon(reason: string): Promise<void> {
+		if (this.terminated) return;
+		if ((await this.ensureMode()) === 'main') {
+			if (this.mainSession) abandonIncremental(this.mainSession, reason);
+			return;
+		}
+		const requestId = this.nextRequestId++;
+		const promise = this.awaitResponse<void>(requestId);
+		this.worker?.postMessage({ type: 'abandon', requestId, reason });
 		return promise;
 	}
 
@@ -118,6 +173,7 @@ export class AnnotationWriterClient {
 		this.terminated = true;
 		this.disposeWorker();
 		this.mainDoc = null;
+		this.mainSession = null;
 		this.failPending(new Error('Inkling: annotation writer terminated.'));
 	}
 
@@ -232,9 +288,14 @@ export class AnnotationWriterClient {
 				displayBytes: message.displayBytes,
 				profile: message.profile,
 				risky: message.risky,
+				incremental: message.incremental,
 			} as never);
+		} else if (message.type === 'written') {
+			entry.resolve(message.outcome as never);
 		} else {
-			entry.resolve(message.bytes as never);
+			// An acknowledgement carries nothing; the caller only waits on it
+			// so a commit cannot race the next save.
+			entry.resolve(undefined as never);
 		}
 	}
 }

@@ -64,6 +64,21 @@ describe('saveIncrementally', () => {
 		expect(reloaded.getPage(0).node.Annots()?.size()).toBe(1);
 	});
 
+	it('writes the size of the edit rather than the size of the book', async () => {
+		// The claim the whole item rests on. Measured against a full re-save
+		// of the same document, which is exactly what this replaces.
+		const { bytes, doc } = await fixture();
+		const session = beginIncrementalSession(bytes, doc);
+		const outcome = await saveIncrementally(doc, session, (touch) =>
+			writeInklingAnnotations(doc, 0, [strokeAt('ink-a', 10)], touch),
+		);
+		if (outcome.mode !== 'append') throw new Error('expected an append');
+
+		const fullSaveSize = (await doc.save()).length;
+		expect(outcome.appendix.length).toBeLessThan(fullSaveSize / 4);
+		expect(outcome.appendix.length).toBeLessThan(bytes.length / 4);
+	});
+
 	it('chains a second append onto the first', async () => {
 		// The property a session depends on: /Prev has to follow our own
 		// previous section, not the original file's, from the second save on.

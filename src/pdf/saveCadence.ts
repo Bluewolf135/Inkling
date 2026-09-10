@@ -14,8 +14,17 @@
 // The trailing debounce (WRITE_DEBOUNCE_MS in src/pdfView.ts) is unchanged:
 // a natural pause still saves promptly at any file size. This only governs
 // the case where the user never pauses.
-export function maxWriteIntervalMs(fileSizeBytes: number): number {
+// **The incremental path changes what this is measuring.** When a file is on
+// the fast path an autosave appends only the objects that changed: the disk
+// write and the sync upload are the size of the edit, not the size of the
+// book, and the only thing still scaling with the document is the
+// verification parse — which runs in the writer worker and never blocks the
+// pen. So the ceiling stops tracking file size and becomes the shortest one
+// we use, which with the trailing debounce puts the worst a crash can cost at
+// about a second of handwriting rather than up to a minute.
+export function maxWriteIntervalMs(fileSizeBytes: number, incremental = false): number {
 	const MB = 1024 * 1024;
+	if (incremental) return 10_000;
 	// A size we can't read is treated as small: erring toward saving more
 	// often risks bandwidth, erring the other way risks the user's ink.
 	if (!Number.isFinite(fileSizeBytes) || fileSizeBytes < 5 * MB) return 10_000;

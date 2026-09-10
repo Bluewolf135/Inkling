@@ -3,6 +3,18 @@ import { describe, expect, it, vi } from 'vitest';
 import { openDocument, toArrayBuffer, writeDocument } from '../../src/pdf/annotationWriterCore';
 import type { Annotation } from '../../src/annotate/types';
 
+// Whatever the writer decided, as a whole file. Both outcomes have to reload
+// into the same document; which one came back is the writer's business, not
+// this suite's.
+function wholeFile(opened: Awaited<ReturnType<typeof openDocument>>, outcome: Awaited<ReturnType<typeof writeDocument>>): ArrayBuffer {
+	if (outcome.mode === 'full') return toArrayBuffer(outcome.bytes);
+	const base = opened.session.baseBytes;
+	const out = new Uint8Array(base.length + outcome.appendix.length);
+	out.set(base, 0);
+	out.set(outcome.appendix, base.length);
+	return toArrayBuffer(out);
+}
+
 const stroke: Annotation = {
 	id: 'ink-a',
 	kind: 'stroke',
@@ -23,9 +35,9 @@ async function sampleBytes(): Promise<ArrayBuffer> {
 describe('writeDocument', () => {
 	it('writes annotations and returns bytes that reload', async () => {
 		const opened = await openDocument(await sampleBytes());
-		const bytes = await writeDocument(opened.doc, [{ pageNumber: 1, annotations: [stroke] }]);
+		const outcome = await writeDocument(opened.doc, opened.session, [{ pageNumber: 1, annotations: [stroke] }]);
 
-		const reloaded = await PDFDocument.load(bytes, { updateMetadata: false });
+		const reloaded = await PDFDocument.load(wholeFile(opened, outcome), { updateMetadata: false });
 		expect(reloaded.getPageCount()).toBe(1);
 		expect(reloaded.getKeywords()).toBe('inkling:template=lined');
 	});
@@ -39,8 +51,8 @@ describe('writeDocument', () => {
 		// page (which "Add page" genuinely does) has to pass. Fingerprint the
 		// original instead and every legitimate page insert is refused.
 		opened.doc.addPage([612, 792]);
-		const bytes = await writeDocument(opened.doc, [{ pageNumber: 1, annotations: [stroke] }]);
-		expect((await PDFDocument.load(bytes, { updateMetadata: false })).getPageCount()).toBe(2);
+		const outcome = await writeDocument(opened.doc, opened.session, [{ pageNumber: 1, annotations: [stroke] }]);
+		expect((await PDFDocument.load(wholeFile(opened, outcome), { updateMetadata: false })).getPageCount()).toBe(2);
 	});
 
 	it('rejects instead of returning bytes when the reparse disagrees', async () => {
@@ -58,7 +70,13 @@ describe('writeDocument', () => {
 			return parsed;
 		});
 		try {
-			await expect(writeDocument(opened.doc, [{ pageNumber: 1, annotations: [stroke] }])).rejects.toThrow(/page count/);
+			await expect(writeDocument(opened.doc, opened.session, [{ pageNumber: 1, annotations: [stroke] }])).rejects.toThrow(
+				/page count/,
+			);
+			// Caught twice over on the incremental path: the append's
+			// in-memory verification declines to a full rewrite, and the full
+			// rewrite's own reparse — mocked the same way — refuses outright.
+			expect(opened.session.disabled).toMatch(/did not verify/);
 		} finally {
 			spy.mockRestore();
 		}
@@ -76,9 +94,26 @@ describe('writeDocument', () => {
 			return parsed;
 		});
 		try {
-			await expect(writeDocument(opened.doc, [{ pageNumber: 1, annotations: [stroke] }])).rejects.toThrow(/keywords/);
+			await expect(writeDocument(opened.doc, opened.session, [{ pageNumber: 1, annotations: [stroke] }])).rejects.toThrow(
+				/keywords/,
+			);
 		} finally {
 			spy.mockRestore();
 		}
+	});
+
+	it('appends rather than rewriting a file it can classify', async () => {
+		const opened = await openDocument(await sampleBytes());
+		const outcome = await writeDocument(opened.doc, opened.session, [{ pageNumber: 1, annotations: [stroke] }]);
+		expect(outcome.mode).toBe('append');
+		if (outcome.mode !== 'append') return;
+
+		// What an append is *for*, stated in a way this one-page fixture can
+		// actually carry: the original is not rewritten. Its size claim
+		// cannot be made here — this sample is smaller than a single update
+		// section, so an appendix legitimately exceeds it — and is pinned in
+		// tests/pdf/incrementalSave.test.ts against a fixture with the
+		// proportions of a real book.
+		expect(outcome.baseLength).toBe(opened.session.baseBytes.length);
 	});
 });

@@ -5,7 +5,7 @@ import { AnnotationController, buildToolbar, paletteFor, ToolState, type Annotat
 import { createId } from './annotate/id';
 import { AnnotationWriterClient } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
-import { writeBinarySafely } from './vaultWrite';
+import { appendBinarySafely, canAppendBinary, writeBinarySafely } from './vaultWrite';
 import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
 import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
 import { BASELINE_DESCENT_RATIO, groupIntoLines, highlightBarHeight, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
@@ -612,10 +612,12 @@ export class PdfAnnotateView extends FileView {
 		// only *our* annotations stripped out so its default annotation-
 		// baking render still shows annotations from other PDF software
 		// (Xodo, etc.) without doubling up with our own live overlay.
-		// "Frequent" is stated as a zero size, which the size-scaled mapping
-		// already answers with its shortest interval — one place decides how
-		// often a file is written, rather than two that can disagree.
-		this.maxWriteInterval = maxWriteIntervalMs(this.getSettings().saveCadence === 'frequent' ? 0 : file.stat.size);
+		// Set again below, once the file has been classified: whether it can
+		// be appended to rather than rewritten is what the ceiling now turns
+		// on, and that is not known until the writer has parsed it. The
+		// shortest interval until then, so a load that fails before
+		// classification does not inherit a stale one from the previous file.
+		this.maxWriteInterval = maxWriteIntervalMs(0);
 		this.consecutiveWriteFailures = 0;
 		const bytes = await this.app.vault.readBinary(file);
 
@@ -640,6 +642,11 @@ export class PdfAnnotateView extends FileView {
 		// nothing for the gate to protect and no profile to check against.
 		let profile: StructureProfile | null = null;
 		let risky: string[] = [];
+		// Both halves have to hold. The writer decides whether the *file* can
+		// be appended to; only here can we see whether this Obsidian has
+		// Vault.appendBinary at all — it is `@since 1.12.3` against a
+		// minAppVersion of 1.4.4.
+		let incremental = false;
 		try {
 			writer = new AnnotationWriterClient();
 			const opened = await writer.open(bytes);
@@ -647,6 +654,7 @@ export class PdfAnnotateView extends FileView {
 			displayBytes = opened.displayBytes;
 			profile = opened.profile;
 			risky = opened.risky;
+			incremental = opened.incremental && canAppendBinary(this.app.vault);
 		} catch (error) {
 			console.error('Inkling: could not read existing annotations from this file.', error);
 			new Notice("Inkling: could not read this PDF's existing annotations — any already on it won't show up this time.");
@@ -664,6 +672,14 @@ export class PdfAnnotateView extends FileView {
 		}
 		this.writer = writer;
 		this.savedAnnotations = savedAnnotations;
+
+		// "Frequent" is stated as a zero size, which the size-scaled mapping
+		// already answers with its shortest interval — one place decides how
+		// often a file is written, rather than two that can disagree.
+		this.maxWriteInterval = maxWriteIntervalMs(
+			this.getSettings().saveCadence === 'frequent' ? 0 : file.stat.size,
+			incremental,
+		);
 
 		let pdf: PDFDocumentProxy;
 		try {
@@ -1264,8 +1280,25 @@ export class PdfAnnotateView extends FileView {
 			// The actual pdf-lib mutate+save happens off the main thread in
 			// annotationWriter.worker.ts — see its comment and this view's
 			// `writer` field for why that matters for a densely annotated file.
-			const updatedBytes = await this.writer.write(pages);
-			await writeBinarySafely(this.app.vault, file, updatedBytes);
+			const outcome = await this.writer.write(pages);
+			if (outcome.mode === 'append') {
+				try {
+					await appendBinarySafely(this.app.vault, file, outcome.appendix, outcome.baseLength);
+				} catch (error) {
+					// An append that did not land — most likely because sync
+					// moved the file underneath us — must never be retried as
+					// an append: the next one would be built on a base that is
+					// not what is on disk, and would land at the wrong offset
+					// entirely. The session gives the fast path up and the
+					// work stays dirty for a full rewrite to carry.
+					await this.writer.abandon(String(error));
+					throw error;
+				}
+			} else {
+				await writeBinarySafely(this.app.vault, file, outcome.bytes);
+			}
+			// Only now may the writer advance its idea of what is on disk.
+			await this.writer.commit();
 			this.consecutiveWriteFailures = 0;
 		} catch (error) {
 			console.error('Inkling: failed to save annotations.', error);

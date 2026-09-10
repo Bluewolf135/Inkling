@@ -2,7 +2,15 @@ import { PDFDocument } from 'pdf-lib';
 import type { Annotation } from '../annotate/types';
 import { pruneOrphanedInklingAnnotations, readInklingAnnotations, stripInklingAnnotations, writeInklingAnnotations } from './annotationSync';
 import { profileFromPdfLib, riskyFeatures, type StructureProfile } from './compatibility';
-import { compareFingerprints, fingerprintDocument } from './fingerprint';
+import { recordChanges } from './changeSet';
+import {
+	abandonIncremental,
+	beginIncrementalSession,
+	commitAppend,
+	saveIncrementally,
+	type IncrementalSession,
+	type SaveOutcome,
+} from './incrementalSave';
 
 // The actual pdf-lib work, with no worker plumbing around it, so the exact
 // same code can run either off the main thread (annotationWriter.worker.ts,
@@ -26,6 +34,12 @@ export interface OpenedDocument {
 	// Document features pdf-lib is known to round-trip badly, named for a
 	// notice. Empty for almost every real book.
 	risky: string[];
+	// The append state for this file, held for the life of the editing
+	// session and handed back to writeDocument on every save. See
+	// incrementalSave.ts for why it cannot be rebuilt per save.
+	session: IncrementalSession;
+	// Whether this file took the fast path, for the view's save cadence.
+	incremental: boolean;
 }
 
 export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -49,7 +63,14 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 	// asked for by opening a book. The return value is ignored: there is
 	// nothing to do differently either way now that the document in memory
 	// is already correct.
-	pruneOrphanedInklingAnnotations(doc);
+	//
+	// Run under the recorder rather than bare. On the incremental path the
+	// objects it frees need free entries in the first section we append —
+	// otherwise the prune corrects the document in memory and leaves the file
+	// exactly as bloated as it was.
+	const pruned = recordChanges(doc.context, () => {
+		pruneOrphanedInklingAnnotations(doc);
+	});
 
 	// A second, independent parse of the same bytes — only worth it (and its
 	// own save()) when this file actually has Inkling annotations to strip
@@ -65,43 +86,50 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		displayBytes = bytes.slice(0);
 	}
 
-	return { doc, savedAnnotations, displayBytes, profile: profileFromPdfLib(doc), risky: riskyFeatures(doc) };
+	// A view over the caller's buffer, not a copy. `bytes` came in over
+	// postMessage and nothing else retains it once this returns — displayBytes
+	// above is either its own slice or a fresh save — so a second copy would
+	// be 40 MB of a large book held for nothing. This is the reference that
+	// has to stay in step with what is on disk.
+	//
+	// A file the classifier declines is not logged here. incrementalSave's own
+	// declineOnce says so at the first save that actually happens — once per
+	// file per session, never per save, and never surfaced to the user — and
+	// saying it twice would be noise in a console the user may be reading for
+	// something else.
+	const session = beginIncrementalSession(new Uint8Array(bytes), doc, pruned.freed);
+
+	return {
+		doc,
+		savedAnnotations,
+		displayBytes,
+		profile: profileFromPdfLib(doc),
+		risky: riskyFeatures(doc),
+		session,
+		incremental: session.classification.supported,
+	};
 }
 
+// One save, which may be an append or a full rewrite — and the caller is told
+// which rather than being allowed to assume.
+//
+// Verification has moved inside saveIncrementally, ahead of the write,
+// because an append cannot be undone: Obsidian's API has no truncate, so
+// bytes on the end of the file stay there. The same fingerprint comparison
+// runs either way; what changed is only *when*.
 export async function writeDocument(
 	doc: PDFDocument,
+	session: IncrementalSession,
 	pages: { pageNumber: number; annotations: Annotation[] }[],
-): Promise<ArrayBuffer> {
-	for (const { pageNumber, annotations } of pages) {
-		writeInklingAnnotations(doc, pageNumber - 1, annotations);
-	}
-
-	// Fingerprinted *after* the mutation, because the mutated document is the
-	// intended result — the thing the produced bytes are supposed to equal.
-	// Our own annotations are excluded from the fingerprint, so having just
-	// rewritten them doesn't register as a change.
-	const intended = fingerprintDocument(doc);
-	const bytes = await doc.save();
-
-	// The check that makes a silent pdf-lib fault loud. Reparsing the bytes
-	// we are about to hand back costs a full parse per save, which is real
-	// work — it is why this lives in the writer worker and why the save
-	// cadence is scaled to file size (see pdf/saveCadence.ts). The
-	// alternative is a book quietly losing structure with nobody noticing for
-	// months.
-	//
-	// updateMetadata: false because this parse is read-only; letting it stamp
-	// a new ModDate would make the verification copy differ from the bytes
-	// actually being written.
-	const written = await PDFDocument.load(bytes, { updateMetadata: false });
-	const difference = compareFingerprints(intended, fingerprintDocument(written));
-	if (difference) {
-		// Thrown, never returned alongside the bytes: there must be no path
-		// where a caller gets something back and has to decide whether to
-		// trust it. The view's existing catch leaves the file untouched and
-		// re-marks the pages dirty.
-		throw new Error(`Inkling: refusing to save, the PDF changed unexpectedly (${difference}).`);
-	}
-
-	return toArrayBuffer(bytes);
+): Promise<SaveOutcome> {
+	return saveIncrementally(doc, session, (touch) => {
+		for (const { pageNumber, annotations } of pages) {
+			writeInklingAnnotations(doc, pageNumber - 1, annotations, touch);
+		}
+	});
 }
+
+// Re-exported so the worker and the main-thread fallback import every piece
+// of their work from one module.
+export { abandonIncremental, commitAppend };
+export type { IncrementalSession, SaveOutcome };

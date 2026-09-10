@@ -18,7 +18,25 @@ export interface WriteRequestMessage {
 	pages: { pageNumber: number; annotations: Annotation[] }[];
 }
 
-export type WorkerRequestMessage = OpenRequestMessage | WriteRequestMessage;
+// The acknowledgement the append session needs. The worker's idea of what is
+// on disk may only advance once the write has actually landed — a worker that
+// advanced it optimistically would build the *next* append onto bytes that
+// were never written, which is the corrupt-file case reached by our own hand.
+export interface CommitRequestMessage {
+	type: 'commit';
+	requestId: number;
+}
+
+// After a write that failed, or one whose outcome the view cannot vouch for.
+// The session stops appending for good and every later save is a full
+// rewrite, which is always correct.
+export interface AbandonRequestMessage {
+	type: 'abandon';
+	requestId: number;
+	reason: string;
+}
+
+export type WorkerRequestMessage = OpenRequestMessage | WriteRequestMessage | CommitRequestMessage | AbandonRequestMessage;
 
 interface OpenedOk {
 	type: 'opened';
@@ -36,17 +54,28 @@ interface OpenedOk {
 	// src/pdf/compatibility.ts.
 	profile: StructureProfile;
 	risky: string[];
+	// Whether this file can be appended to rather than rewritten, which is
+	// what the view's save cadence turns on.
+	incremental: boolean;
 }
 
+// Discriminated, because the two outcomes go to different Vault calls and
+// there must be no path where the view has to guess which it got.
 interface WrittenOk {
 	type: 'written';
 	requestId: number;
 	ok: true;
-	bytes: ArrayBuffer;
+	outcome: { mode: 'full'; bytes: ArrayBuffer } | { mode: 'append'; appendix: ArrayBuffer; baseLength: number };
+}
+
+interface AcknowledgedOk {
+	type: 'acknowledged';
+	requestId: number;
+	ok: true;
 }
 
 interface RequestFailed {
-	type: 'opened' | 'written';
+	type: 'opened' | 'written' | 'acknowledged';
 	requestId: number;
 	ok: false;
 	error: string;
@@ -61,4 +90,4 @@ export interface ReadyMessage {
 	type: 'ready';
 }
 
-export type WorkerResponseMessage = OpenedOk | WrittenOk | RequestFailed | ReadyMessage;
+export type WorkerResponseMessage = OpenedOk | WrittenOk | AcknowledgedOk | RequestFailed | ReadyMessage;
