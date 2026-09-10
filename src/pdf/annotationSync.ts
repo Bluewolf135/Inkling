@@ -2,6 +2,7 @@ import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage,
 import { boundingBox } from '../annotate/geometry';
 import { hasPressure, outlinePath, smoothedPath } from '../annotate/stroke';
 import { ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY } from './annotationFormat';
+import type { TouchFn } from './changeSet';
 import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, polygonOps, rectangleOps } from './contentStream';
 import {
 	Annotation,
@@ -370,18 +371,58 @@ function removeInklingAnnotations(pdfDoc: PDFDocument, page: PDFPage): boolean {
 	return toRemove.length > 0;
 }
 
+// Reports every indirect object a page mutation writes into, which no hook
+// on PDFContext can see because pdf-lib mutates parsed objects in place.
+//
+// Three slots matter, and all three are mutated by pdf-lib's own
+// PDFPageLeaf.normalize(), which runs on the first addAnnot against a
+// *parsed* page (PDFObjectParser builds page leaves with autoNormalizeCTM
+// on, so this is every page in every real book):
+//
+//   /Annots     — pushed onto by addAnnot; a separate object when indirect.
+//   /Resources  — normalize sets /Font, /XObject and /ExtGState into it, and
+//                 in a real book it is usually indirect and sometimes shared
+//                 with other pages through inheritance.
+//   /Contents   — normalize wraps a single stream in an array and pushes the
+//                 shared push/pop-graphics-state streams into it.
+//
+// Called before and after the mutation, and the union taken, because
+// normalize can replace an indirect slot with a direct one: the object that
+// used to be there still needs rewriting, and so does the page dict that now
+// holds it inline.
+function touchPageContainers(page: PDFPage, touch: TouchFn): void {
+	touch(page.ref);
+	for (const key of ['Annots', 'Resources', 'Contents']) {
+		const slot = page.node.get(PDFName.of(key));
+		if (slot instanceof PDFRef) touch(slot);
+	}
+}
+
 // Fully resyncs one page's Inkling-authored annotations to match
 // `annotations` (in PDF space — see src/pdfView.ts for the canvas<->PDF
 // conversion) — removes all of our previous ones and re-adds the current
 // set. Foreign annotations (no matching `/NM` prefix) are never touched.
-export function writeInklingAnnotations(pdfDoc: PDFDocument, pageIndex: number, annotations: Annotation[]): void {
+//
+// `touch` is how the incremental save path learns which objects this
+// rewrote; see src/pdf/changeSet.ts. It defaults to a no-op, so the full
+// rewrite path calls this exactly as it always did.
+export function writeInklingAnnotations(
+	pdfDoc: PDFDocument,
+	pageIndex: number,
+	annotations: Annotation[],
+	touch: TouchFn = () => undefined,
+): void {
 	const page = pdfDoc.getPage(pageIndex);
+	touchPageContainers(page, touch);
 	removeInklingAnnotations(pdfDoc, page);
 	for (const annotation of annotations) {
 		if (annotation.kind === 'stroke') writeStroke(pdfDoc, page, annotation);
 		else if (annotation.kind === 'note') writeNote(pdfDoc, page, annotation);
 		else writeShape(pdfDoc, page, annotation);
 	}
+	// Again afterwards: normalize() may have replaced an indirect slot with a
+	// direct one, or created the /Annots array that did not exist before.
+	touchPageContainers(page, touch);
 }
 
 // Builds a display-only copy for pdf.js to render from: our own Inkling
