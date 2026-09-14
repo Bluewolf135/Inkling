@@ -384,6 +384,13 @@ export class AnnotationController {
 		this.eraserCursor = null;
 		this.zoomByPage.clear();
 		if (this.ownsHistory) this.history.clear();
+		// The PDF view reuses this controller for every document it shows,
+		// and seeds a page from the file only when the file has annotations
+		// for it. Anything left here would survive onto a page the file says
+		// is blank — which is how "Add page" came up showing the ink of the
+		// page that used to have its number, and saved it there on the next
+		// stroke.
+		this.store.forgetAll();
 	}
 
 	// End of life for the controller itself, as distinct from unmounting its

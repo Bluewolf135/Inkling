@@ -85,6 +85,14 @@ export class AnnotationStore {
 		return entry.pageNumber;
 	}
 
+	// Drops every page, for a surface about to show a different document.
+	// Not an edit — no history entry, no onCommit — and unlike clearPage it
+	// says nothing about what should be in any file: pages are addressed by
+	// number, and a number means a different page in the next document.
+	forgetAll(): void {
+		this.pages.clear();
+	}
+
 	clearPage(pageNumber: number): void {
 		const before = this.getPage(pageNumber);
 		if (before.length === 0) return;
