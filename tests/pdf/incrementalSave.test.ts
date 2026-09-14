@@ -249,6 +249,38 @@ describe('saveIncrementally', () => {
 		expect(session.carriedFreed.size).toBe(0);
 	});
 
+	it('appends the new stroke, not the whole page, on a page that already has hundreds', async () => {
+		// The case real scratch paper hit: 462 strokes on one page, and every
+		// save appended all of them again — 565 KB for one stroke, past the
+		// compaction budget, so nearly every save became a full rewrite.
+		//
+		// Three hundred strokes at roughly a kilobyte each is ~300 KB if the
+		// page is rewritten. Kept, the append is the new stroke (~1 KB), the
+		// page dictionary, and an /Annots array of 301 references (~3 KB).
+		const source = await PDFDocument.create();
+		const font = await source.embedFont(StandardFonts.Helvetica);
+		for (let index = 0; index < 40; index++) {
+			source.addPage([612, 792]).drawText(`Chapter ${index}. `.repeat(120), { x: 40, y: 700, size: 9, font });
+		}
+		const existing = Array.from({ length: 300 }, (_, index) => strokeAt(`ink-${index}`, index));
+		writeInklingAnnotations(source, 0, existing);
+		const bytes = await source.save({ useObjectStreams: false });
+		const doc = await PDFDocument.load(toArrayBuffer(bytes), { updateMetadata: false });
+
+		const session = beginIncrementalSession(bytes, doc);
+		const outcome = await saveIncrementally(doc, session, (touch) =>
+			writeInklingAnnotations(doc, 0, [...existing, strokeAt('ink-new', 400)], touch),
+		);
+
+		if (outcome.mode !== 'append') throw new Error(`expected an append, got ${outcome.mode}`);
+		expect(outcome.appendix.length).toBeLessThan(16_000);
+
+		const { getDocument } = await import('pdfjs-dist');
+		const pdf = await getDocument({ data: concat(bytes, outcome.appendix) }).promise;
+		expect((await (await pdf.getPage(1)).getAnnotations()).length).toBe(301);
+		await pdf.destroy();
+	});
+
 	it('works the same way on a file that uses cross-reference streams', async () => {
 		const { bytes, doc } = await fixture(true);
 		const session = beginIncrementalSession(bytes, doc);

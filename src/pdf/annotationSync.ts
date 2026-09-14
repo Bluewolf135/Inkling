@@ -328,8 +328,9 @@ function writeNote(pdfDoc: PDFDocument, page: PDFPage, note: NoteAnnotation): vo
 // from a page's /Annots array (page.node.removeAnnot, below) does *not* do
 // this by itself: the objects stay registered in the PDFContext and keep
 // getting serialized into every future save regardless. Since
-// writeInklingAnnotations (below) fully rewrites a page's Inkling
-// annotations as brand-new objects on every single autosave, skipping this
+// writeInklingAnnotations (below) once rewrote every Inkling annotation on
+// a page as brand-new objects on every autosave (it now rewrites only what
+// changed, and this frees exactly what that leaves behind), skipping this
 // step meant every edit left the *previous* generation of dicts/streams
 // behind as permanent dead weight that never got reclaimed — the file only
 // ever grew, compounding with every stroke across a session, eventually
@@ -350,25 +351,119 @@ function deleteAnnotationObjects(pdfDoc: PDFDocument, ref: PDFRef): void {
 	pdfDoc.context.delete(ref);
 }
 
-function removeInklingAnnotations(pdfDoc: PDFDocument, page: PDFPage): boolean {
+// This page's Inkling annotation refs, in /Annots order.
+function inklingAnnotationRefs(pdfDoc: PDFDocument, page: PDFPage): PDFRef[] {
 	const annots = page.node.Annots();
-	if (!annots) return false;
+	if (!annots) return [];
 
-	const toRemove: PDFRef[] = [];
+	const refs: PDFRef[] = [];
 	for (const entry of annots.asArray()) {
 		if (!(entry instanceof PDFRef)) continue;
 		try {
 			const dict = pdfDoc.context.lookupMaybe(entry, PDFDict);
-			if (dict && isInklingAnnotationDict(dict)) toRemove.push(entry);
+			if (dict && isInklingAnnotationDict(dict)) refs.push(entry);
 		} catch {
 			// Malformed annotation dict — leave it alone rather than crash.
 		}
 	}
+	return refs;
+}
+
+function removeInklingAnnotations(pdfDoc: PDFDocument, page: PDFPage): boolean {
+	const toRemove = inklingAnnotationRefs(pdfDoc, page);
 	for (const ref of toRemove) {
 		page.node.removeAnnot(ref);
 		deleteAnnotationObjects(pdfDoc, ref);
 	}
 	return toRemove.length > 0;
+}
+
+// ---- Deciding what a save has to rewrite ----
+
+// How far apart two coordinates can be and still be the same mark, in PDF
+// units — a thousandth of a point, 1/72000 of an inch.
+//
+// Not zero, because an unchanged stroke does not come back as the same
+// numbers. The view converts a page's annotations into screen space when it
+// seeds them and back into PDF space when it saves, and that pair of float
+// transforms can move a coordinate in its last few bits. Exact comparison
+// would call every such stroke edited and rewrite the whole page — the thing
+// this exists to stop. Nothing a person draws moves by a thousandth of a point.
+const COORDINATE_TOLERANCE = 1e-3;
+
+function near(a: number, b: number): boolean {
+	return Math.abs(a - b) <= COORDINATE_TOLERANCE;
+}
+
+function nearPoint(a: Point, b: Point): boolean {
+	return near(a.x, b.x) && near(a.y, b.y);
+}
+
+// Pressure as writeStroke stores it — one byte a sample, and only for a pen
+// stroke that has any — so a pressure read back as n/255 compares equal to
+// the one it was written from.
+function storedPressures(stroke: StrokeAnnotation): number[] | null {
+	if (stroke.tool !== 'pen' || !hasPressure(stroke.points)) return null;
+	return stroke.points.map((p) => Math.round(Math.min(Math.max(p.p ?? 1, 0), 1) * 255));
+}
+
+function sameText(a: string | undefined, b: string | undefined): boolean {
+	return (a?.trim() || undefined) === (b?.trim() || undefined);
+}
+
+// Whether writing `incoming` would put the same annotation in the file that
+// `existing` — read back out of it — already describes.
+//
+// Compared only on what the file stores, and on all of it: every field the
+// writers above serialize, and nothing they do not. A difference in something
+// the file cannot hold is not an edit the file can lose; a field left out of
+// this comparison is an edit that would be kept as the old object and
+// silently dropped. Any doubt answers "changed" — a needless rewrite costs
+// bytes, a wrong "unchanged" costs the user's ink.
+function sameAsWritten(existing: Annotation, incoming: Annotation): boolean {
+	if (existing.kind !== incoming.kind) return false;
+	if (existing.color.toLowerCase() !== incoming.color.toLowerCase()) return false;
+	if (!sameText(existing.note, incoming.note) || !sameText(existing.quote, incoming.quote)) return false;
+
+	if (existing.kind === 'note' && incoming.kind === 'note') {
+		// No width: a note's /BS is never written, so there is nothing to
+		// compare it against.
+		return nearPoint(existing.at, incoming.at);
+	}
+	if (!near(existing.width, incoming.width)) return false;
+
+	if (existing.kind === 'stroke' && incoming.kind === 'stroke') {
+		if (existing.tool !== incoming.tool || existing.points.length !== incoming.points.length) return false;
+		if (!existing.points.every((point, index) => nearPoint(point, incoming.points[index] ?? { x: NaN, y: NaN }))) return false;
+		return JSON.stringify(storedPressures(existing)) === JSON.stringify(storedPressures(incoming));
+	}
+
+	if (existing.kind === 'shape' && incoming.kind === 'shape') {
+		if (existing.tool !== incoming.tool) return false;
+		if (incoming.tool === 'line' || incoming.tool === 'arrow') {
+			return nearPoint(existing.start, incoming.start) && nearPoint(existing.end, incoming.end);
+		}
+		// A rectangle or oval is stored as its box, so one dragged out
+		// bottom-right to top-left reads back with its corners swapped.
+		const a = boundingBox(existing);
+		const b = boundingBox(incoming);
+		return near(a.minX, b.minX) && near(a.minY, b.minY) && near(a.maxX, b.maxX) && near(a.maxY, b.maxY);
+	}
+	return false;
+}
+
+// The annotation this ref's dict describes, or null when it cannot be read
+// — which sameAsWritten never matches, so an unreadable one is rewritten.
+function readRef(pdfDoc: PDFDocument, ref: PDFRef): Annotation | null {
+	try {
+		const dict = pdfDoc.context.lookupMaybe(ref, PDFDict);
+		const id = dict?.lookupMaybe(PDFName.of('NM'), PDFString)?.decodeText();
+		if (!dict || !id) return null;
+		const annotation = readOne(id, dict);
+		return annotation ? readSharedFields(dict, annotation) : null;
+	} catch {
+		return null;
+	}
 }
 
 // Reports every indirect object a page mutation writes into, which no hook
@@ -398,10 +493,20 @@ function touchPageContainers(page: PDFPage, touch: TouchFn): void {
 	}
 }
 
-// Fully resyncs one page's Inkling-authored annotations to match
-// `annotations` (in PDF space — see src/pdfView.ts for the canvas<->PDF
-// conversion) — removes all of our previous ones and re-adds the current
-// set. Foreign annotations (no matching `/NM` prefix) are never touched.
+// Resyncs one page's Inkling-authored annotations to match `annotations` (in
+// PDF space — see src/pdfView.ts for the canvas<->PDF conversion), in the
+// order given. Foreign annotations (no matching `/NM` prefix) are never
+// touched.
+//
+// Only what changed is written. An annotation already on the page under the
+// same id, describing the same mark, keeps its existing objects: they are
+// relinked, never re-registered, so they never enter the change set and an
+// append carries none of them. Everything else is written fresh, and anything
+// no longer wanted — erased, or replaced by an edited version — is freed.
+//
+// This is what makes an append the size of the edit. Rewriting the whole page
+// made one stroke on a page of 460 a 565 KB append, past the compaction
+// budget, and nearly every save fell back to rewriting the file.
 //
 // `touch` is how the incremental save path learns which objects this
 // rewrote; see src/pdf/changeSet.ts. It defaults to a no-op, so the full
@@ -413,12 +518,42 @@ export function writeInklingAnnotations(
 	touch: TouchFn = () => undefined,
 ): void {
 	const page = pdfDoc.getPage(pageIndex);
+	const existing = inklingAnnotationRefs(pdfDoc, page);
+
+	// Each existing ref can be claimed once, by the first incoming annotation
+	// with its id that still matches it.
+	const claimable = new Map<string, { ref: PDFRef; annotation: Annotation | null }>();
+	for (const ref of existing) {
+		const annotation = readRef(pdfDoc, ref);
+		if (annotation && !claimable.has(annotation.id)) claimable.set(annotation.id, { ref, annotation });
+	}
+	const plan = annotations.map((annotation): PDFRef | Annotation => {
+		const match = claimable.get(annotation.id);
+		if (!match?.annotation || !sameAsWritten(match.annotation, annotation)) return annotation;
+		claimable.delete(annotation.id);
+		return match.ref;
+	});
+
+	// Nothing added, nothing dropped, nothing edited, nothing reordered: the
+	// page is already right, and touching even its /Annots would put the page
+	// into an append for no change at all.
+	if (plan.length === existing.length && plan.every((item, index) => item === existing[index])) return;
+
+	const kept = new Set(plan.filter((item): item is PDFRef => item instanceof PDFRef));
+
 	touchPageContainers(page, touch);
-	removeInklingAnnotations(pdfDoc, page);
-	for (const annotation of annotations) {
-		if (annotation.kind === 'stroke') writeStroke(pdfDoc, page, annotation);
-		else if (annotation.kind === 'note') writeNote(pdfDoc, page, annotation);
-		else writeShape(pdfDoc, page, annotation);
+	// Every one of ours comes off, so the relink below can put them back in
+	// the order given — /Annots order is paint order. Only the ones not
+	// coming back are freed.
+	for (const ref of existing) {
+		page.node.removeAnnot(ref);
+		if (!kept.has(ref)) deleteAnnotationObjects(pdfDoc, ref);
+	}
+	for (const item of plan) {
+		if (item instanceof PDFRef) page.node.addAnnot(item);
+		else if (item.kind === 'stroke') writeStroke(pdfDoc, page, item);
+		else if (item.kind === 'note') writeNote(pdfDoc, page, item);
+		else writeShape(pdfDoc, page, item);
 	}
 	// Again afterwards: normalize() may have replaced an indirect slot with a
 	// direct one, or created the /Annots array that did not exist before.

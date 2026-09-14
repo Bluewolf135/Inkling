@@ -1,6 +1,7 @@
-import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream } from 'pdf-lib';
+import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, PDFRef } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { readInklingAnnotations, writeInklingAnnotations } from '../../src/pdf/annotationSync';
+import { recordChanges } from '../../src/pdf/changeSet';
 import type { Annotation } from '../../src/annotate/types';
 
 // Fixtures are generated here rather than committed as binaries, so the repo
@@ -140,6 +141,116 @@ describe('annotation round trip', () => {
 		expect(readInklingAnnotations(reloaded, 0)).toHaveLength(0);
 		expect(readInklingAnnotations(reloaded, 1)).toHaveLength(1);
 		expect(readInklingAnnotations(reloaded, 2)).toHaveLength(0);
+	});
+});
+
+describe('rewriting a page only where it changed', () => {
+	// An append carries whatever a save wrote. Rewriting every annotation on
+	// the page made a one-stroke save on a page of 460 strokes a 565 KB
+	// append, which blew the compaction budget and turned nearly every save
+	// back into a full rewrite. So a save has to leave an annotation it did
+	// not change exactly where it was: same object, not written again.
+	function stroke(id: string, x: number, color = '#000000'): Annotation {
+		return { id, kind: 'stroke', tool: 'pen', color, width: 3, points: [{ x, y: 10 }, { x: x + 20, y: 30 }] };
+	}
+
+	function refsOnPage(doc: PDFDocument, pageIndex = 0): PDFRef[] {
+		return (doc.getPage(pageIndex).node.Annots()?.asArray() ?? []).filter((entry): entry is PDFRef => entry instanceof PDFRef);
+	}
+
+	it('keeps an unchanged annotation’s object when another is added', async () => {
+		const doc = await reload(await blankDoc());
+		writeInklingAnnotations(doc, 0, [stroke('ink-a', 10)]);
+		const [original] = refsOnPage(doc);
+
+		const changes = recordChanges(doc.context, (touch) =>
+			writeInklingAnnotations(doc, 0, [stroke('ink-a', 10), stroke('ink-b', 100)], touch),
+		);
+
+		expect(refsOnPage(doc)[0]).toBe(original);
+		expect(changes.written.has(original!)).toBe(false);
+		expect(changes.freed.has(original!)).toBe(false);
+		expect(readInklingAnnotations(await reload(doc), 0).map((a) => a.id)).toEqual(['ink-a', 'ink-b']);
+	});
+
+	it('records no change at all for a page saved exactly as it was', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [stroke('ink-a', 10), stroke('ink-b', 100)]);
+
+		const changes = recordChanges(doc.context, (touch) =>
+			writeInklingAnnotations(doc, 0, [stroke('ink-a', 10), stroke('ink-b', 100)], touch),
+		);
+
+		expect(changes.written.size).toBe(0);
+		expect(changes.freed.size).toBe(0);
+	});
+
+	it('rewrites an annotation whose content changed under the same id', async () => {
+		// Recolouring keeps the id. Matching on id alone would keep the old
+		// object and silently lose the edit.
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [stroke('ink-a', 10)]);
+		const [original] = refsOnPage(doc);
+
+		const changes = recordChanges(doc.context, (touch) =>
+			writeInklingAnnotations(doc, 0, [stroke('ink-a', 10, '#e03131')], touch),
+		);
+
+		expect(changes.freed.has(original!)).toBe(true);
+		expect(readInklingAnnotations(await reload(doc), 0)[0]).toMatchObject({ id: 'ink-a', color: '#e03131' });
+	});
+
+	it('frees the objects of an annotation that was erased and keeps the rest', async () => {
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [stroke('ink-a', 10), stroke('ink-b', 100)]);
+		const [kept, erased] = refsOnPage(doc);
+
+		const changes = recordChanges(doc.context, (touch) => writeInklingAnnotations(doc, 0, [stroke('ink-a', 10)], touch));
+
+		expect(changes.freed.has(erased!)).toBe(true);
+		expect(changes.freed.has(kept!)).toBe(false);
+		expect(refsOnPage(doc)).toEqual([kept]);
+	});
+
+	it('keeps the drawing order it was given', async () => {
+		// /Annots order is paint order: a stroke later in the list draws over
+		// an earlier one.
+		const doc = await blankDoc();
+		writeInklingAnnotations(doc, 0, [stroke('ink-a', 10), stroke('ink-b', 100)]);
+
+		writeInklingAnnotations(doc, 0, [stroke('ink-b', 100), stroke('ink-a', 10)]);
+
+		expect(readInklingAnnotations(await reload(doc), 0).map((a) => a.id)).toEqual(['ink-b', 'ink-a']);
+	});
+
+	it('treats a stroke that came back through the screen as unchanged', async () => {
+		// The view seeds strokes into screen space and converts them back on
+		// save, which does not always return the exact number the file held —
+		// and pressure is stored as a byte, so it reads back as n/255 rather
+		// than what was drawn. Neither is an edit.
+		const doc = await blankDoc();
+		const drawn: Annotation = {
+			id: 'ink-p',
+			kind: 'stroke',
+			tool: 'pen',
+			color: '#1e1e1e',
+			width: 2.5,
+			points: [{ x: 100.1, y: 200.2, p: 0.5 }, { x: 150.3, y: 260.4, p: 0.7 }],
+		};
+		writeInklingAnnotations(doc, 0, [drawn]);
+		const reloaded = await reload(doc);
+		const [read] = readInklingAnnotations(reloaded, 0);
+		if (read?.kind !== 'stroke') throw new Error('expected the stroke back');
+		const throughScreen: Annotation = {
+			...read,
+			width: read.width * (1 + 1e-15),
+			points: read.points.map((p) => ({ ...p, x: p.x + 1e-12, y: p.y - 1e-12 })),
+		};
+
+		const changes = recordChanges(reloaded.context, (touch) => writeInklingAnnotations(reloaded, 0, [throughScreen], touch));
+
+		expect(changes.written.size).toBe(0);
+		expect(changes.freed.size).toBe(0);
 	});
 });
 
