@@ -121,21 +121,56 @@ ships, and the implementation must detect its absence at load and fall
 back to storing the block uncompressed rather than failing to save. The
 format records the codec in `version`.
 
+`CompressionStream('deflate')` specifically, not `'deflate-raw'`. The zlib
+wrapper costs six bytes a block and carries an Adler-32 trailer that
+`DecompressionStream` validates, so a block corrupted in transit or on
+disk fails loudly instead of inflating into plausible nonsense. That is
+the whole of this design's integrity checking; no separate checksum is
+stored.
+
+Those sizes are a floor, not a prediction of the file. 257 KB is the whole
+set gzipped as one stream; compressing per block forgoes a shared
+dictionary, and base64 adds a third on top, so the file on disk should be
+expected nearer 350–380 KB. Still a quarter of today's 1,385 KB, and it
+changes no decision here, but the real figure should be measured rather
+than quoted from the table above.
+
 Why the structure stays in text: a damaged file can be inspected and
 partly rescued by hand, a caption can be fixed in a text editor, and a
 three-way sync merge can operate per block. The coordinates are 99% of
 the bytes and none of the meaning.
 
-### Damage is scoped as tightly as possible
+### How a file classifies on read
 
-- A file whose JSON does not parse makes every block in it read-only,
-  with a banner. This is strictly worse than today, where damage is
-  per block, and it is the main cost of this design.
-- A single block whose `strokes` will not decompress or parse is
-  isolated: that block is read-only, the rest of the file is normal.
-- Read-only means never written over, exactly as now. Any drawing that
-  cannot be saved goes to the rescue store (`markdown/inkRecovery.ts`)
-  and is written as soon as the file is readable again.
+**Readable.** Its JSON parses and its `version` is one this build knows.
+
+**From the future.** Its JSON parses but its `version` is newer than this
+build understands. The file is valid, not broken: a newer Inkling wrote
+it. Its blocks render read-only with a banner naming that reason, and the
+file is never written over, never quarantined and never salvaged. The
+in-note format already draws this distinction — `fromFuture` in
+`markdown/inkBlockFormat.ts` — and the ink file follows it.
+
+**Damaged.** Its JSON does not parse at all, or parses into something that
+is not a block map. Only this enters the repair path below.
+
+Within a readable file, a single block whose `strokes` will not decode,
+fails its Adler-32 check, or does not parse back into annotations is
+isolated: that block is read-only, the rest of the file is normal.
+
+One case sits between readable and damaged and must not be confused with
+either. A device where `CompressionStream` turns out to be missing — the
+risk this design names above — reads a perfectly valid version-1 file
+whose blocks it cannot inflate. That is **unsupported, not damaged**: the
+file is treated exactly as one from the future, read-only and never
+written over, never quarantined and never salvaged. Salvaging it would
+rewrite a good file into one with its strokes thrown away, which is the
+worst outcome this section exists to prevent. The banner says the device
+cannot read compressed ink rather than that the file is broken.
+
+Read-only means never written over, exactly as now. Any drawing that
+cannot be saved goes to the rescue store (`markdown/inkRecovery.ts`) and
+is written as soon as the file is writable again.
 
 ## Where new files go
 
@@ -219,6 +254,107 @@ fires after the file is gone. So a true "this is still linked" prompt is
 possible only for deletions Inkling itself initiates, and everything above
 is prompt-plus-undo rather than prevention.
 
+## Repairing a damaged file
+
+A damaged file is not a file to refuse and leave alone. It is quarantined,
+salvaged and rewritten, automatically, with one notice and an undo. The
+reasoning is principle 1: a file nobody can read is already the bad
+outcome, and most of the strokes in it are still recoverable.
+
+### The invariant
+
+**Never repair a file that was not quarantined first.** If the copy-aside
+fails for any reason — no space, a read-only vault, a name collision that
+cannot be resolved — nothing is written, the file's blocks go read-only,
+and the notice names the step that failed. Every other guarantee in this
+section rests on the original bytes existing somewhere before anything
+replaces them.
+
+### A damaged read never displaces a good one
+
+`inkFileStore` keeps the last parse that succeeded. A later read that does
+not parse — a reload, or the external-change watch firing on a sync that
+landed badly — does not adopt, does not mark anything read-only and does
+not interrupt drawing. The session goes on serving what it already holds,
+and a save made in the meantime still lands.
+
+It keeps the parsed blocks, not the raw text. The text is never wanted
+again: the merge below works on parsed blocks, and retaining it would add
+the whole file's size to memory per open note for nothing.
+
+### Salvage
+
+The file is unusually recoverable, because `strokes` is base64 and so
+contains no `{`, `}`, `"` or `\`. A scanner can lift intact
+`"<id>": { … }` regions out of a file that has been truncated, or has sync
+conflict markers spliced into it, and parse each region on its own.
+Scanning rather than parsing top to bottom means damage in the middle does
+not cost the blocks after it. Only `caption` needs care, being the one
+field that can hold a brace or an escaped quote.
+
+**The scanner is hand-written and single-pass, tracking string and escape
+state. It does not use a regular expression.** A pattern with `.*` in it
+backtracks quadratically across a few hundred KB of base64, which turns a
+recoverable file into a hung app.
+
+A file carrying conflict markers holds the same `id` twice, and both
+copies are usually intact. Salvage returns duplicates as a list rather
+than picking a side, and the store merges them through the existing
+`markdown/mergeInkBlocks.ts`, which matches annotations by id and keeps
+both sides' strokes. A conflicted file therefore resolves to the union of
+what was drawn, which is what principle 1 asks for.
+
+### What repair does
+
+1. Copy the damaged text aside, unaltered, to
+   `<name>.ink.damaged-<timestamp>.txt` beside the file. An ordinary vault
+   file, so it syncs to the other device — which is where a good copy may
+   still be sitting — and so this needs none of the dot-folder assumptions
+   `src/vaultWrite.ts` records as unverified. `.txt` because the contents
+   are bytes as found, not necessarily JSON; the `.damaged-` infix keeps
+   the fence scan from mistaking it for ink.
+2. Salvage the text.
+3. Merge per id: a block the session already holds wins where salvage
+   found nothing, salvage wins where the session holds nothing, and
+   `mergeInkBlocks` decides where both have one.
+4. Write the result.
+5. Raise one notice, per file, per session — not per block, or the
+   Newton's Laws note would raise thirty-eight. It says how many drawings
+   came back and how many did not, names the quarantine file, and offers
+   **Undo the repair**, which copies the quarantine back over.
+
+Blocks salvage could not recover show the same missing state as a block
+the file does not hold, with Restore reaching memory, the trash and the
+rescue store as above.
+
+Quarantine files are never removed automatically. The rescue store expires
+entries after a fortnight because a stale drawing reappearing is an
+ambush; a quarantine file is the opposite, and can be the only surviving
+copy of what was lost. The unreferenced-blocks command reports them.
+
+### Guarding the write
+
+Nothing above catches a file this plugin wrote wrongly but validly — the
+modern form of one block's drawing landing in another block's fence. That
+needs guards on the way out, in the shape `src/vaultWrite.ts` already uses
+for PDFs.
+
+**Before.** A serialization holding no blocks never goes over a file that
+held blocks. A block serialized with an empty stroke payload never goes
+over one whose view holds annotations. Either refuses the write and routes
+the drawing to the rescue store, exactly as a failed save does today.
+
+**After.** `adapter.stat` compares the file's size on disk against what was
+written, which is what notices a write cut short — the failure a
+backgrounded app on mobile is killed into. A full re-read and parse runs
+only on the first write after an open or a repair.
+
+**Not after every write.** Re-reading and parsing a few hundred KB once a
+second while the pen is still moving is the cost Phases E and F were spent
+removing. The size check is cheap enough to run every time; the parse is
+not, and the first write after an open is where a file that was already
+wrong would show it.
+
 ## Two devices at once
 
 The ink file syncs like any other file. Because blocks are separate keys,
@@ -250,10 +386,14 @@ originals, with the originals kept.
 New, small, and each testable without Obsidian:
 
 - `markdown/inkFile.ts` — parse and serialize the ink file, including
-  per-block compression and the damage classification above.
+  per-block compression and the three-way classification above.
+- `markdown/inkFileSalvage.ts` — the scanner: raw text in, blocks
+  recovered by id (duplicates as a list) and the ids it could not recover
+  out. Pure, no Obsidian, driven entirely by fixtures.
 - `markdown/inkFileStore.ts` — one live instance per ink file: reads it,
   holds it, applies per-block updates, queues writes, watches for external
-  change. The thing every block in a note shares.
+  change, and runs quarantine-salvage-repair when a read does not parse.
+  The thing every block in a note shares.
 - `markdown/inkFence.ts` — parse and serialize the three-line fence,
   including preservation of unknown keys.
 - `markdown/inkFileLinks.ts` — vault-wide fence scan, used by the rename
@@ -274,10 +414,18 @@ Unit, no Obsidian required:
   caption, and unknown keys preserved.
 - Compression round-trip and size, asserted against a real block from the
   vault.
-- Damage: unparseable file, one unparseable block, fence missing a key,
-  fence naming a path outside the vault.
+- Damage: unparseable file, one unparseable block, a block failing its
+  Adler-32 check, a file from a newer version, fence missing a key, fence
+  naming a path outside the vault.
 - Write queue: two blocks saving at once, a write superseded while queued.
 - Fence parse and serialize, including preservation of unknown keys.
+- Salvage fixtures: truncated between blocks, truncated mid-base64,
+  conflict markers spliced in, a caption holding a brace and an escaped
+  quote, trailing garbage after the closing brace, and a file where the
+  same id appears twice — which must merge by annotation rather than pick
+  a side.
+- Write guards: a serialization with no blocks is refused over a file that
+  had blocks, and the drawing reaches the rescue store instead.
 
 Integration, in the style of `tests/markdown/inkBlockIntegration.test.ts`:
 
@@ -285,6 +433,13 @@ Integration, in the style of `tests/markdown/inkBlockIntegration.test.ts`:
   overwrites.
 - A missing file in each of the three settings.
 - A fence naming a block that is not in the file.
+- A damaged file read at open is quarantined, salvaged and rewritten, and
+  the blocks that survived are drawable afterwards.
+- A damaged read arriving while a note is open does not displace what the
+  session holds, and a save made afterwards still lands.
+- A quarantine that fails to write blocks the repair: the file is left
+  exactly as it was and its blocks go read-only.
+- A file from a newer version is never quarantined and never written.
 - A copied fence in two notes, edited from both.
 - An old-format block in the same note as a new-format one.
 - Rename of an ink file rewrites the fences that name it.
@@ -300,9 +455,22 @@ declined: SVG and previews cost most of the size saving this exists for,
 per-block files mean thousands of files in a vault, and recognition is a
 separate feature that this design does not block.
 
+No last-known-good backup file either. A second copy per note would
+roughly double the sync traffic for the exact data whose size this design
+exists to reduce, and it buys only one case: a file already damaged at
+first open, with nothing in memory to fall back on. Salvage usually
+recovers most of that case anyway. If it is ever wanted, it is additive
+and nothing here forecloses it.
+
 ## Consequences accepted
 
-- One corrupt ink file affects a note's blocks rather than one block.
+- A repaired file still loses the block that straddled the damage, and
+  anything else salvage could not lift out intact.
+- Quarantine files accumulate beside ink files until someone reviews them.
+  Nothing removes them automatically, deliberately.
+- Repair happens without being asked, so a file is rewritten on open. The
+  quarantine copy and the undo action are what make that acceptable.
+- Every save carries one extra `adapter.stat`.
 - A copied fence shares its ink, so editing the copy changes the
   original. This is what the user asked for, and it is the cheap
   behavior; splitting on edit remains possible later.
