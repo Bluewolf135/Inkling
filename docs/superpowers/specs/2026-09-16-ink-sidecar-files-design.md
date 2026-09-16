@@ -213,6 +213,25 @@ or a named folder.
 The setting governs creation only. Changing it never moves an existing
 file, and no file is ever relocated as a side effect.
 
+**To keep ink out of the way**, point the setting at a named folder and
+add that folder to Obsidian's **Settings → Files & Links → Excluded
+files**. It disappears from search, the graph and the quick switcher while
+staying an ordinary vault file for every API and every sync. The
+quarantine files below land there too, which is most of the reason to
+bother.
+
+**Not a hidden folder.** Obsidian's Vault API does not see paths beginning
+with a dot at all, so ink under `.inkling/` would have to go through
+`vault.adapter` — losing the `modify` event the external-change watch
+needs, the `rename` event the fence rewrite is driven by, the `delete`
+event the missing-file state depends on, and `adapter.trashLocal` as a
+restore source. Worse, Self-hosted LiveSync treats hidden files as a
+separate opt-in mechanism from ordinary replication, so a dot-folder is
+exactly where "it syncs everything" stops being true. Ink that silently
+stops syncing is the worst failure available here, and the in-note format
+cannot produce it. `src/vaultWrite.ts` declined the same bet for the same
+reason.
+
 ## Lifecycle
 
 **Insert.** The command writes the fence with a generated `id` and the
@@ -393,10 +412,27 @@ Blocks salvage could not recover show the same missing state as a block
 the file does not hold, with Restore reaching memory, the trash and the
 rescue store as above.
 
-Quarantine files are never removed automatically. The rescue store expires
-entries after a fortnight because a stale drawing reappearing is an
-ambush; a quarantine file is the opposite, and can be the only surviving
-copy of what was lost. The unreferenced-blocks command reports them.
+### Quarantine files do not multiply
+
+One is written per damage event, not per save and not per session, and the
+confirming re-read above means a file caught mid-sync produces none at
+all. In normal use the count is zero and stays zero.
+
+The case that would multiply is the same file going damaged repeatedly —
+a sync corrupting it the same way each time. So **an identical quarantine
+is not written twice**: if a quarantine for this ink file already exists
+with the same contents, the existing one is the copy, and repair proceeds
+without writing another. Sizes are compared first, so the contents are
+only read when they might match.
+
+They are never removed automatically. The rescue store expires entries
+after a fortnight because a stale drawing reappearing is an ambush; a
+quarantine file is the opposite, and can be the only surviving copy of
+what was lost. But never-automatically is not never: the
+unreferenced-blocks command lists them with their dates and sizes and
+removes the ones the user picks, which is the same bargain that command
+already makes for blocks — it names what it will delete and waits to be
+told.
 
 ### Guarding the write
 
@@ -535,6 +571,8 @@ Integration, in the style of `tests/markdown/inkBlockIntegration.test.ts`:
   leaves no quarantine file behind.
 - Undoing a repair does not trigger a second one, and writes no second
   quarantine file.
+- The same file damaged the same way twice leaves one quarantine file, not
+  two; damaged a second, different way leaves two.
 - A copied fence in two notes, edited from both.
 - An old-format block in the same note as a new-format one.
 - Rename of an ink file rewrites the fences that name it.
@@ -561,10 +599,11 @@ and nothing here forecloses it.
 
 - A repaired file still loses the block that straddled the damage, and
   anything else salvage could not lift out intact.
-- Quarantine files accumulate beside ink files until someone reviews them.
-  Each is the size of the ink file — on the order of 350 KB — and each
-  syncs to every device. Nothing removes them automatically, deliberately:
-  a quarantine file can be the only surviving copy of what was lost.
+- Quarantine files sit beside ink files until someone removes them, at
+  roughly 350 KB each, on every device. One per distinct damage event, and
+  none at all in normal use. Nothing removes them automatically,
+  deliberately: a quarantine file can be the only surviving copy of what
+  was lost, and the tidy command is where removal lives.
 - Repair happens without being asked, so a file is rewritten on open. The
   quarantine copy, the confirming re-read and the undo action are what
   make that acceptable.
