@@ -118,8 +118,20 @@ JSON today, 257 KB gzipped, 198 KB with brotli. Deflate via the web platform's
 desktop Electron and in the WebViews Obsidian mobile uses. That last part
 is the risk — it must be confirmed on the Samsung tablet before this
 ships, and the implementation must detect its absence at load and fall
-back to storing the block uncompressed rather than failing to save. The
-format records the codec in `version`.
+back to storing the block uncompressed rather than failing to save.
+
+**The codec is per block, not per file.** An optional `codec` key beside
+`strokes`, absent meaning `deflate`, `"none"` meaning the fallback above.
+It cannot live in `version`: compression is per block and the fallback is
+per block, so one device without `CompressionStream` saving one block
+produces a file whose blocks disagree, which a single file-level codec
+cannot describe. `version` governs the structure of the file and nothing
+else.
+
+**The fallback is still base64**, of the uncompressed bytes. There is no
+saving in writing the JSON inline, and everything below — salvage
+especially — depends on `strokes` being an opaque base64 string in every
+case, whatever produced it.
 
 `CompressionStream('deflate')` specifically, not `'deflate-raw'`. The zlib
 wrapper costs six bytes a block and carries an Adler-32 trailer that
@@ -154,19 +166,38 @@ in-note format already draws this distinction — `fromFuture` in
 **Damaged.** Its JSON does not parse at all, or parses into something that
 is not a block map. Only this enters the repair path below.
 
-Within a readable file, a single block whose `strokes` will not decode,
-fails its Adler-32 check, or does not parse back into annotations is
-isolated: that block is read-only, the rest of the file is normal.
+Within a readable file, a block classifies on its own, two ways:
 
-One case sits between readable and damaged and must not be confused with
-either. A device where `CompressionStream` turns out to be missing — the
-risk this design names above — reads a perfectly valid version-1 file
-whose blocks it cannot inflate. That is **unsupported, not damaged**: the
-file is treated exactly as one from the future, read-only and never
-written over, never quarantined and never salvaged. Salvaging it would
-rewrite a good file into one with its strokes thrown away, which is the
-worst outcome this section exists to prevent. The banner says the device
-cannot read compressed ink rather than that the file is broken.
+**Undecodable.** Its `strokes` is not valid base64, fails its Adler-32
+check, or does not parse back into annotations. Something corrupted it.
+
+**Unsupported.** It names a `codec` this build does not have — in
+practice, `deflate` read on a device where `CompressionStream` turned out
+to be missing. Nothing is wrong with the block; this reader simply cannot
+open it. Worth separating from undecodable because it is not a fault and
+should not be reported as one.
+
+### A block this build cannot read is still carried through
+
+Both of the above render read-only with a banner naming which they are.
+But read-only is not enough on its own, and this is the trap: the store
+holds *parsed* blocks, so a file serialized from what the store parsed
+would omit every block that failed to parse. A single stroke in block 3
+would then erase block 12, on a file that was merely written by a newer
+build or read on a weaker device. That is the worst outcome in this
+document, and it arrives through the ordinary save path rather than
+through any failure.
+
+So `strokes` is treated as an opaque string throughout. A block the store
+could not decode keeps its original text, is written back byte for byte on
+every rewrite, and is never re-encoded. The same holds for keys within a
+block and at the top of the file that this build does not recognise: they
+are preserved on rewrite, exactly as the fence preserves unknown keys and
+for the same reason.
+
+This is what makes the `CompressionStream` risk survivable rather than
+fatal. A device without it can open a file full of deflated blocks, draw
+in a new one, save, and hand every other block back untouched.
 
 Read-only means never written over, exactly as now. Any drawing that
 cannot be saved goes to the rescue store (`markdown/inkRecovery.ts`) and
@@ -304,6 +335,29 @@ than picking a side, and the store merges them through the existing
 both sides' strokes. A conflicted file therefore resolves to the union of
 what was drawn, which is what principle 1 asks for.
 
+**Duplicates merge against an empty base.** `mergeInkBlocks` is genuinely
+three-way, and its base is load-bearing: an annotation present in the base
+and absent from ours is read as a deliberate erasure and dropped. Between
+two salvaged copies there is no base — neither was derived from the other,
+and nothing here knows which came first — so passing anything but an empty
+base would silently discard strokes in the name of an erasure that never
+happened. With an empty base the function reduces to the union, which is
+the only defensible answer when provenance is unknown.
+
+### Damage is confirmed before it is acted on
+
+A read that fails does not start a repair. The file is re-read after a
+short delay, and only a second failure counts as damage.
+
+The reason is replication. A file caught mid-write by a sync is partial on
+disk for a moment and complete a moment later, and that moment is exactly
+when the external-change watch fires. Repairing on the first failed read
+would convert a transient state into a permanent rewrite — and then
+replicate that rewrite to every other device, having salvaged an
+incomplete file over a whole one. Waiting costs nothing, because a damaged
+read never displaces what the session already holds, so nobody is blocked
+while the answer settles.
+
 ### What repair does
 
 1. Copy the damaged text aside, unaltered, to
@@ -321,7 +375,19 @@ what was drawn, which is what principle 1 asks for.
 5. Raise one notice, per file, per session — not per block, or the
    Newton's Laws note would raise thirty-eight. It says how many drawings
    came back and how many did not, names the quarantine file, and offers
-   **Undo the repair**, which copies the quarantine back over.
+   **Undo the repair**.
+
+Undo puts the damaged file back, and the wording says so: it is for the
+case where the salvage looks wrong and someone would rather have the
+original bytes to work on by hand. It is not a way to recover a good file,
+because there was no good file.
+
+**Undo also stops the repair from running again.** Restoring the damaged
+text means the next read fails, which would repair it, which the user
+would undo — a loop that writes a quarantine file every time round. So a
+file whose repair has been undone is marked for the rest of the session
+and left alone: its blocks go read-only, and the banner says a repair was
+undone rather than that the file is unreadable.
 
 Blocks salvage could not recover show the same missing state as a block
 the file does not hold, with Restore reaching memory, the trash and the
@@ -344,10 +410,24 @@ held blocks. A block serialized with an empty stroke payload never goes
 over one whose view holds annotations. Either refuses the write and routes
 the drawing to the rescue store, exactly as a failed save does today.
 
+**These guard saves, not commands.** Removing unreferenced blocks can
+legitimately empty a file, and it is the one path licensed to destroy
+stroke data because it names what it will remove and waits to be told to
+go ahead. It writes through the same queue with the emptiness guard
+disabled. A guard that cannot be turned off by the one operation it is
+wrong for gets turned off everywhere by the first person it annoys.
+
 **After.** `adapter.stat` compares the file's size on disk against what was
 written, which is what notices a write cut short — the failure a
 backgrounded app on mobile is killed into. A full re-read and parse runs
 only on the first write after an open or a repair.
+
+The comparison is in bytes, measured with `TextEncoder`, not in string
+length. Everything in the file is ASCII except `caption`, which holds
+whatever the user typed, so a single accented character makes UTF-16
+length disagree with the file on disk and a length-based check report a
+truncated write on every save. A guard that cries wolf on notes with
+accents in them is worse than no guard.
 
 **Not after every write.** Re-reading and parsing a few hundred KB once a
 second while the pen is still moving is the cost Phases E and F were spent
@@ -386,7 +466,8 @@ originals, with the originals kept.
 New, small, and each testable without Obsidian:
 
 - `markdown/inkFile.ts` — parse and serialize the ink file, including
-  per-block compression and the three-way classification above.
+  per-block compression, the per-block codec, and the classification
+  above. Unknown keys and undecodable blocks survive the round trip.
 - `markdown/inkFileSalvage.ts` — the scanner: raw text in, blocks
   recovered by id (duplicates as a list) and the ids it could not recover
   out. Pure, no Obsidian, driven entirely by fixtures.
@@ -425,7 +506,17 @@ Unit, no Obsidian required:
   same id appears twice — which must merge by annotation rather than pick
   a side.
 - Write guards: a serialization with no blocks is refused over a file that
-  had blocks, and the drawing reaches the rescue store instead.
+  had blocks, and the drawing reaches the rescue store instead; the same
+  write is allowed when the unreferenced-blocks command makes it.
+- The size comparison is in bytes: a block whose caption holds a non-ASCII
+  character does not report a truncated write.
+- Carry-through, which is the one that protects the most: a file holding
+  an undecodable block, a block with an unrecognised `codec`, an unknown
+  key inside a block and an unknown key at the top is rewritten after a
+  *different* block is edited, and every one of those survives byte for
+  byte.
+- Salvaged duplicates merge against an empty base, and no annotation
+  present in either copy is missing from the result.
 
 Integration, in the style of `tests/markdown/inkBlockIntegration.test.ts`:
 
@@ -437,9 +528,13 @@ Integration, in the style of `tests/markdown/inkBlockIntegration.test.ts`:
   the blocks that survived are drawable afterwards.
 - A damaged read arriving while a note is open does not displace what the
   session holds, and a save made afterwards still lands.
-- A quarantine that fails to write blocks the repair: the file is left
+- A quarantine that cannot be written stops the repair: the file is left
   exactly as it was and its blocks go read-only.
 - A file from a newer version is never quarantined and never written.
+- A read that fails once and parses on the re-read does not repair, and
+  leaves no quarantine file behind.
+- Undoing a repair does not trigger a second one, and writes no second
+  quarantine file.
 - A copied fence in two notes, edited from both.
 - An old-format block in the same note as a new-format one.
 - Rename of an ink file rewrites the fences that name it.
@@ -467,10 +562,17 @@ and nothing here forecloses it.
 - A repaired file still loses the block that straddled the damage, and
   anything else salvage could not lift out intact.
 - Quarantine files accumulate beside ink files until someone reviews them.
-  Nothing removes them automatically, deliberately.
+  Each is the size of the ink file — on the order of 350 KB — and each
+  syncs to every device. Nothing removes them automatically, deliberately:
+  a quarantine file can be the only surviving copy of what was lost.
 - Repair happens without being asked, so a file is rewritten on open. The
-  quarantine copy and the undo action are what make that acceptable.
+  quarantine copy, the confirming re-read and the undo action are what
+  make that acceptable.
 - Every save carries one extra `adapter.stat`.
+- The repair path is code that should never run in normal use, which makes
+  it the code most likely to be wrong on the day it does. The fixtures are
+  the mitigation, and the quarantine invariant is what bounds the damage
+  when the fixtures turn out to have missed a case.
 - A copied fence shares its ink, so editing the copy changes the
   original. This is what the user asked for, and it is the cheap
   behavior; splitting on edit remains possible later.
