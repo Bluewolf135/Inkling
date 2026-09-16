@@ -134,7 +134,9 @@ export function translateAnnotation(annotation: Annotation, dx: number, dy: numb
 		return { ...annotation, at: { x: annotation.at.x + dx, y: annotation.at.y + dy } };
 	}
 	if (annotation.kind === 'stroke') {
-		return { ...annotation, points: annotation.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+		// Spread, not rebuilt: a point without its pressure draws at full
+		// width, so a moved pen stroke used to land visibly thicker.
+		return { ...annotation, points: annotation.points.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy })) };
 	}
 	return {
 		...annotation,
@@ -150,7 +152,9 @@ export function scaleAnnotation(annotation: Annotation, from: Rect, to: Rect): A
 	const scaleX = from.maxX - from.minX === 0 ? 1 : (to.maxX - to.minX) / (from.maxX - from.minX);
 	const scaleY = from.maxY - from.minY === 0 ? 1 : (to.maxY - to.minY) / (from.maxY - from.minY);
 
+	// Pressure comes along for the same reason as in translateAnnotation.
 	const project = (p: Point): Point => ({
+		...p,
 		x: to.minX + (p.x - from.minX) * scaleX,
 		y: to.minY + (p.y - from.minY) * scaleY,
 	});

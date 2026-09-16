@@ -118,6 +118,24 @@ describe('transforms', () => {
 		expect(moved).toMatchObject({ points: [{ x: 5, y: -5 }, { x: 15, y: 5 }] });
 	});
 
+	// A point with no pressure draws at full width, so dropping `p` on a move
+	// or resize made a tapered pen stroke visibly thicker the moment it landed.
+	it('keeps pen pressure when translating a stroke', () => {
+		const moved = translateAnnotation(stroke([{ x: 0, y: 0, p: 0.2 }, { x: 10, y: 10 }]), 5, -5);
+		expect(moved).toMatchObject({ points: [{ x: 5, y: -5, p: 0.2 }, { x: 15, y: 5 }] });
+		expect((moved as StrokeAnnotation).points[1]).not.toHaveProperty('p');
+	});
+
+	it('keeps pen pressure when resizing a stroke', () => {
+		const scaled = scaleAnnotation(
+			stroke([{ x: 0, y: 0, p: 0.4 }, { x: 10, y: 10 }]),
+			{ minX: 0, minY: 0, maxX: 10, maxY: 10 },
+			{ minX: 0, minY: 0, maxX: 20, maxY: 20 },
+		);
+		expect(scaled).toMatchObject({ points: [{ x: 0, y: 0, p: 0.4 }, { x: 20, y: 20 }] });
+		expect((scaled as StrokeAnnotation).points[1]).not.toHaveProperty('p');
+	});
+
 	it('keeps a degenerate axis unscaled instead of dividing by zero', () => {
 		const flat = stroke([{ x: 0, y: 50 }, { x: 10, y: 50 }]);
 		const scaled = scaleAnnotation(
