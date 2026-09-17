@@ -1,4 +1,16 @@
-import { parseInkFile, readInkFileBlock, type BlockRead, type InkFileBlock, type InkFileContents } from './inkFile';
+import { INK_BLOCK_VERSION, type InkBlockData } from './inkBlockFormat';
+import { decodeStrokes } from './inkFileCodec';
+import {
+	byteLength,
+	parseInkFile,
+	readInkFileBlock,
+	serializeInkFile,
+	writeInkFileBlock,
+	type BlockRead,
+	type InkFileBlock,
+	type InkFileContents,
+} from './inkFile';
+import { mergeInkBlocks } from './mergeInkBlocks';
 
 // One live ink file, shared by every block that names it.
 //
@@ -47,6 +59,71 @@ export type StoreChange = ReadonlySet<string> | 'all';
 // save, null for anything that came from the file.
 export type StoreListener = (change: StoreChange, origin: object | null) => void;
 
+// What a block last put on screen: the data, and the revision it came from.
+export interface BlockBase {
+	block: InkFileBlock;
+	revision: number;
+}
+
+export type WriteRefusal =
+	// The file is absent, from the future, damaged, or not what was last read
+	// and unreadable now.
+	| 'not-writable'
+	| 'block-absent'
+	| 'block-unreadable'
+	| 'block-exists'
+	// The encoded block did not decode back to what was encoded.
+	| 'encoding-mismatch'
+	| 'no-blocks-over-blocks'
+	// The file kept changing underneath every attempt.
+	| 'moved-on'
+	| 'failed';
+
+export type WriteOutcome =
+	| { kind: 'written'; block: InkFileBlock; revision: number; merged: boolean }
+	| { kind: 'refused'; reason: WriteRefusal };
+
+// A save that finds the file changed goes round again, merging. More than a
+// few in a row is not a race, it is something rewriting the file constantly,
+// and the drawing is safer held than chasing it.
+const MAX_WRITE_ATTEMPTS = 3;
+
+function refused(reason: WriteRefusal): WriteOutcome {
+	return { kind: 'refused', reason };
+}
+
+// The in-note block's shape, which is what the merge and the rescue store
+// already speak.
+export function toInkBlockData(block: InkFileBlock, id?: string): InkBlockData {
+	return {
+		version: INK_BLOCK_VERSION,
+		...(id ? { id } : {}),
+		width: block.width,
+		height: block.height,
+		...(block.caption ? { caption: block.caption } : {}),
+		annotations: block.annotations,
+	};
+}
+
+export function toFileBlock(data: InkBlockData): InkFileBlock {
+	return {
+		width: data.width,
+		height: data.height,
+		...(data.caption?.trim() ? { caption: data.caption.trim() } : {}),
+		// A copy of the list: the store holds this as the block's base, and
+		// must not see a live array change underneath it.
+		annotations: [...data.annotations],
+	};
+}
+
+interface PendingUpdate {
+	id: string;
+	writer: object;
+	data: InkFileBlock;
+	base: BlockBase;
+	waiters: Array<(outcome: WriteOutcome) => void>;
+}
+
 interface HeldBlock {
 	read: BlockRead;
 	// The block exactly as the file held it, serialized, which is how a
@@ -74,6 +151,12 @@ export class InkFileStore {
 	private readonly listeners = new Set<StoreListener>();
 	private tail: Promise<unknown> = Promise.resolve();
 	private loading: Promise<void> | null = null;
+	// Saves queued and not yet started, so a later save from the same block
+	// can take the place of an earlier one rather than follow it.
+	private readonly pending: PendingUpdate[] = [];
+	// The first write after the file is opened is read back and parsed. A file
+	// that was already wrong shows it there; after that, a size check is enough.
+	private verifyNextWrite = true;
 
 	constructor(
 		readonly path: string,
@@ -112,6 +195,36 @@ export class InkFileStore {
 
 	fileDeleted(): void {
 		void this.enqueue(() => this.adopt(null, null));
+	}
+
+	/**
+	 * Saves one block. `writer` is whoever is saving — one block view — and
+	 * `base` is the block as that writer last showed it. When the store holds a
+	 * different revision by the time the save runs, the three are merged.
+	 */
+	updateBlock(id: string, writer: object, data: InkFileBlock, base: BlockBase): Promise<WriteOutcome> {
+		const queued = this.pending.find((update) => update.id === id && update.writer === writer);
+		if (queued) {
+			// Collapsed into the later save. Only for the same writer: two blocks
+			// showing one drawing are two sets of strokes, and both must land.
+			queued.data = data;
+			queued.base = base;
+			return new Promise((resolve) => queued.waiters.push(resolve));
+		}
+
+		const update: PendingUpdate = { id, writer, data, base, waiters: [] };
+		this.pending.push(update);
+		return this.enqueue(async () => {
+			this.pending.splice(this.pending.indexOf(update), 1);
+			const outcome = await this.commit(update.id, update.data, update.base, update.writer);
+			for (const waiter of update.waiters) waiter(outcome);
+			return outcome;
+		});
+	}
+
+	/** Adds a block the file does not hold yet, creating the file if there is none. */
+	createBlock(id: string, data: InkFileBlock): Promise<WriteOutcome> {
+		return this.enqueue(() => this.commit(id, data, null, null));
 	}
 
 	// The opaque stroke payload, which is what the rescue store compares a
@@ -207,6 +320,117 @@ export class InkFileStore {
 		this.current = { kind: 'readable' };
 		if (!wasReadable) this.notify('all', origin);
 		else if (changed.size > 0) this.notify(changed, origin);
+	}
+
+	private async commit(id: string, data: InkFileBlock, base: BlockBase | null, writer: object | null): Promise<WriteOutcome> {
+		const creating = base === null;
+
+		for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+			const status = this.current.kind;
+			// Only creating a block may create a file. A save that finds no file
+			// is a save for a file that went missing, and writing it would put a
+			// one-block file over one that was merely misplaced.
+			if (status !== 'readable' && !(creating && status === 'absent')) return refused('not-writable');
+
+			// Blocks held from a file that has since gone are not written into a
+			// new one as a side effect of inserting a block.
+			const from = status === 'absent' ? null : this.contents;
+			const current = status === 'absent' ? undefined : this.held.get(id);
+
+			let next = data;
+			let merged = false;
+			if (base === null) {
+				if (current) return refused('block-exists');
+			} else {
+				if (!current) return refused('block-absent');
+				if (current.read.kind !== 'decoded') return refused('block-unreadable');
+				if (current.revision !== base.revision) {
+					next = toFileBlock(
+						mergeInkBlocks(toInkBlockData(base.block), toInkBlockData(data), toInkBlockData(current.read.block)),
+					);
+					merged = true;
+				}
+			}
+
+			const raw = await writeInkFileBlock(from?.blocks.get(id), next);
+
+			// Before: the block must decode back to what was encoded. This is
+			// what stops an empty or corrupt payload being written over a block
+			// whose view holds annotations — and a legitimately empty block
+			// still passes, because it decodes to zero of zero.
+			const check = await decodeStrokes(raw.strokes, raw.codec);
+			if (check.kind !== 'decoded' || check.annotations.length !== next.annotations.length) {
+				console.error(`Inkling: block ${id} did not encode faithfully, so ${this.path} was not written.`);
+				return refused('encoding-mismatch');
+			}
+
+			const blocks = new Map(from?.blocks ?? []);
+			blocks.set(id, raw);
+			// Before: a serialization holding no blocks never goes over a file
+			// that held some. Unreachable from a save, which always adds one; it
+			// guards whatever writes through here next.
+			if ((from?.blocks.size ?? 0) > 0 && blocks.size === 0) return refused('no-blocks-over-blocks');
+
+			const contents: InkFileContents = { extra: from?.extra ?? [], blocks };
+			const text = serializeInkFile(contents);
+
+			let result: ReplaceResult;
+			try {
+				result = await this.io.replaceIf(this.path, status === 'absent' ? null : this.lastText, text);
+			} catch (error) {
+				console.error(`Inkling: could not write ${this.path}.`, error);
+				return refused('failed');
+			}
+
+			if (!result.written) {
+				// The file is not what was last seen. A file gone bad refuses
+				// outright: there is nothing to merge into, and writing over it
+				// is exactly what repair (not a save) is for.
+				if (result.found !== null && parseInkFile(result.found).kind === 'damaged') return refused('not-writable');
+				await this.adopt(result.found, null);
+				continue;
+			}
+
+			// After: a write cut short leaves a shorter file. lastText is left as
+			// it was, so the next save finds the file changed, reads what was
+			// left, and refuses rather than writing on the strength of it.
+			let size: number | null = null;
+			try {
+				size = await this.io.size(this.path);
+			} catch {
+				size = null;
+			}
+			if (size !== null && size !== byteLength(text)) {
+				console.error(`Inkling: ${this.path} is ${size} bytes after writing ${byteLength(text)}; the write did not complete.`);
+				return refused('failed');
+			}
+
+			if (this.verifyNextWrite) {
+				let reread: string | null = null;
+				try {
+					reread = await this.io.read(this.path);
+				} catch {
+					reread = null;
+				}
+				const read = reread === null ? null : parseInkFile(reread);
+				if (read?.kind !== 'readable' || JSON.stringify(read.contents.blocks.get(id)) !== JSON.stringify(raw)) {
+					console.error(`Inkling: ${this.path} did not read back as written.`);
+					return refused('failed');
+				}
+				this.verifyNextWrite = false;
+			}
+
+			if (status === 'absent') this.held.clear();
+			this.contents = contents;
+			this.lastText = text;
+			const revision = ++this.revisions;
+			this.held.set(id, { read: { kind: 'decoded', block: next }, json: JSON.stringify(raw), revision });
+			this.current = { kind: 'readable' };
+			this.notify(status === 'readable' ? new Set([id]) : 'all', writer);
+			return { kind: 'written', block: next, revision, merged };
+		}
+
+		return refused('moved-on');
 	}
 }
 
