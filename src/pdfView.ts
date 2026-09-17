@@ -398,6 +398,15 @@ export class PdfAnnotateView extends FileView {
 			getCurrentPage: () => this.currentPageNumber,
 			onAnnotationsChanged: (pageNumber) => this.markPageDirty(pageNumber),
 			onZoomSettled: (pageNumber, scale) => void this.upgradeResolution(pageNumber, scale),
+			// Relative to the page's first render, so an unzoomed page draws
+			// exactly as it always has, and a page upgradeResolution has
+			// since re-backed denser draws the same width in PDF space rather
+			// than a thinner one.
+			getInkScale: (pageNumber) => {
+				const base = this.baseScales.get(pageNumber);
+				const rendered = this.renderedScales.get(pageNumber);
+				return base && rendered ? rendered / base : 1;
+			},
 			onSnapHighlighterStroke: (pageNumber, points, color) => this.snapHighlighterStroke(pageNumber, points, color),
 			onGoToPage: (pageNumber) => this.scrollToPage(pageNumber),
 			onToggleNavigation: () => this.toggleNavigationPanel(),

@@ -139,6 +139,13 @@ export interface AnnotationControllerOptions {
 	// render is now too low-resolution to look sharp at this zoom level and,
 	// if so, re-render it (see its upgradeResolution).
 	onZoomSettled?: (pageNumber: number, scale: number) => void;
+	// Canvas pixels per unit of pen width on a page, asked each time ink is
+	// made. Omitted, a unit is one pixel. A host that re-backs a page at a
+	// different resolution — the PDF view does, whenever a zoom sharpens one
+	// — has to answer, or the same pen draws a different width after the
+	// re-render than before it: one page of handwriting came out in two
+	// widths exactly that way.
+	getInkScale?: (pageNumber: number) => number;
 	// Called right before a highlighter stroke commits (pointerup, or a
 	// cancelled-but-kept gesture) — src/pdfView.ts uses this to replace the
 	// raw freehand path with one or more straight, text-line-height segments
@@ -440,11 +447,18 @@ export class AnnotationController {
 		return this.toolState.getWidth();
 	}
 
+	// The toolbar width in a page's own canvas pixels — see getInkScale.
+	// What every stroke, shape and eraser on that page is made with; the
+	// toolbar and the shared state keep the unscaled number.
+	private inkWidth(pageNumber: number): number {
+		return this.getWidth() * (this.options.getInkScale?.(pageNumber) ?? 1);
+	}
+
 	setWidth(width: number): void {
 		this.toolState.setWidth(width);
 		// Clamped by the shared state, so read it back rather than restyling
 		// a selection with a value it refused.
-		if (this.selection.ids.size > 0) this.restyleSelection({ width: this.getWidth() });
+		if (this.selection.ids.size > 0) this.restyleSelection({ width: this.inkWidth(this.selection.pageNumber) });
 	}
 
 	hasSelection(): boolean {
@@ -856,7 +870,7 @@ export class AnnotationController {
 			}
 			case 'shape': {
 				mode.end = this.clampToPage(pageNumber, point);
-				if (distance(mode.start, mode.end) > 2) this.commitNew(pageNumber, this.shapeFromDraft(mode));
+				if (distance(mode.start, mode.end) > 2) this.commitNew(pageNumber, this.shapeFromDraft(pageNumber, mode));
 				break;
 			}
 			case 'erase':
@@ -901,7 +915,7 @@ export class AnnotationController {
 				if (mode.points.length >= 2) this.commitDrawStroke(pageNumber, mode);
 				break;
 			case 'shape':
-				if (distance(mode.start, mode.end) > 2) this.commitNew(pageNumber, this.shapeFromDraft(mode));
+				if (distance(mode.start, mode.end) > 2) this.commitNew(pageNumber, this.shapeFromDraft(pageNumber, mode));
 				break;
 			case 'erase':
 			case 'move':
@@ -947,7 +961,7 @@ export class AnnotationController {
 						kind: 'shape',
 						tool: recognized.tool,
 						color: this.getColor(),
-						width: this.getWidth(),
+						width: this.inkWidth(pageNumber),
 						start: recognized.start,
 						end: recognized.end,
 					});
@@ -963,7 +977,7 @@ export class AnnotationController {
 				return;
 			}
 		}
-		this.commitNew(pageNumber, this.strokeFromDraft(mode));
+		this.commitNew(pageNumber, this.strokeFromDraft(pageNumber, mode));
 	}
 
 	// Opens the host’s note editor and applies whatever comes back.
@@ -1016,7 +1030,7 @@ export class AnnotationController {
 		this.notify();
 	}
 
-	private strokeFromDraft(mode: { tool: DrawToolType; points: Point[] }): StrokeAnnotation {
+	private strokeFromDraft(pageNumber: number, mode: { tool: DrawToolType; points: Point[] }): StrokeAnnotation {
 		// Thinned here, at the moment the stroke commits, rather than when it
 		// is written to the file. A save lands about a second after the pen
 		// lifts and re-renders the block from what it wrote — so simplifying
@@ -1034,27 +1048,27 @@ export class AnnotationController {
 		// checked in the pointer layer, the renderer, and the serializer.
 		const keepPressure = this.options.isPressureEnabled?.() ?? true;
 		const points = keepPressure ? simplified : simplified.map(({ x, y }) => ({ x, y }));
-		return { id: createId(), kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.getWidth(), points };
+		return { id: createId(), kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.inkWidth(pageNumber), points };
 	}
 
-	private shapeFromDraft(mode: { tool: ShapeToolType; start: Point; end: Point }): ShapeAnnotation {
+	private shapeFromDraft(pageNumber: number, mode: { tool: ShapeToolType; start: Point; end: Point }): ShapeAnnotation {
 		return {
 			id: createId(),
 			kind: 'shape',
 			tool: mode.tool,
 			color: this.getColor(),
-			width: this.getWidth(),
+			width: this.inkWidth(pageNumber),
 			start: mode.start,
 			end: mode.end,
 		};
 	}
 
 	private applyErase(pageNumber: number, point: Point): void {
-		this.store.setPageLive(pageNumber, eraseAt(this.store.getPage(pageNumber), point, this.eraserRadius()));
+		this.store.setPageLive(pageNumber, eraseAt(this.store.getPage(pageNumber), point, this.eraserRadius(pageNumber)));
 	}
 
-	private eraserRadius(): number {
-		return Math.max(this.getWidth() * ERASER_RADIUS_FACTOR, MIN_ERASER_RADIUS);
+	private eraserRadius(pageNumber: number): number {
+		return Math.max(this.inkWidth(pageNumber) * ERASER_RADIUS_FACTOR, MIN_ERASER_RADIUS);
 	}
 
 	private restyleSelection(patch: Partial<Pick<Annotation, 'color' | 'width'>>): void {
@@ -1141,7 +1155,7 @@ export class AnnotationController {
 
 		const dragMode = this.drag?.pageNumber === pageNumber ? this.drag.mode : null;
 		const lassoPath = dragMode?.kind === 'lasso' ? dragMode.points : null;
-		const draft = this.draftFor(dragMode);
+		const draft = this.draftFor(pageNumber, dragMode);
 		// A highlighter's draft is not drawn here. It goes to the multiplied
 		// layer underneath, so that what is on screen mid-stroke is what the
 		// stroke will look like once it commits; see redrawHighlightDraft.
@@ -1150,7 +1164,7 @@ export class AnnotationController {
 		const overlayDraft = highlightDraft ? null : draft;
 
 		const eraserCursor =
-			this.eraserCursor?.pageNumber === pageNumber ? { point: this.eraserCursor.point, radius: this.eraserRadius() } : null;
+			this.eraserCursor?.pageNumber === pageNumber ? { point: this.eraserCursor.point, radius: this.eraserRadius(pageNumber) } : null;
 		const selected =
 			this.selection.pageNumber === pageNumber && this.selection.ids.size > 0
 				? this.store.getPage(pageNumber).filter((a) => this.selection.ids.has(a.id))
@@ -1196,16 +1210,16 @@ export class AnnotationController {
 		return overlay;
 	}
 
-	private draftFor(mode: DragMode | null): Annotation | null {
+	private draftFor(pageNumber: number, mode: DragMode | null): Annotation | null {
 		if (!mode) return null;
-		if (mode.kind === 'draw') return { id: DRAFT_ID, kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.getWidth(), points: mode.points };
+		if (mode.kind === 'draw') return { id: DRAFT_ID, kind: 'stroke', tool: mode.tool, color: this.getColor(), width: this.inkWidth(pageNumber), points: mode.points };
 		if (mode.kind === 'shape') {
 			return {
 				id: DRAFT_ID,
 				kind: 'shape',
 				tool: mode.tool,
 				color: this.getColor(),
-				width: this.getWidth(),
+				width: this.inkWidth(pageNumber),
 				start: mode.start,
 				end: mode.end,
 			};

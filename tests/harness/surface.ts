@@ -1,4 +1,4 @@
-import { AnnotationController } from '../../src/annotate/controller';
+import { AnnotationController, type AnnotationControllerOptions } from '../../src/annotate/controller';
 import type { Annotation, Point } from '../../src/annotate/types';
 
 // A drawing surface that runs outside Obsidian, so the wiring between the
@@ -313,13 +313,13 @@ export interface TestSurface {
 
 const PAGE = 1;
 
-export function mountTestSurface(width = 800, height = 450): TestSurface {
+export function mountTestSurface(width = 800, height = 450, options: AnnotationControllerOptions = {}): TestSurface {
 	installSurfaceStubs();
 
 	const host = document.createElement('div');
 	document.body.appendChild(host);
 
-	const controller = new AnnotationController({ getCurrentPage: () => PAGE });
+	const controller = new AnnotationController({ getCurrentPage: () => PAGE, ...options });
 	// The shared default is the select tool, which suits a PDF opened to be
 	// read. A surface built to be drawn on in a test wants the pen, and
 	// leaving it unset is how the first run of these tests came to assert
