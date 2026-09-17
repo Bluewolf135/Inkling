@@ -151,11 +151,15 @@ function toPdfSpace(annotation: Annotation, viewport: PageViewport): Annotation 
 // here — rather than hand-deriving a flip/scale — keeps our canvas<->PDF
 // coordinate mapping correct for rotated pages too, not just the common
 // upright case.
+//
+// Only the position moves; whatever else a point carries comes with it.
+// Rebuilding it as a bare {x, y} dropped stylus pressure on every save and
+// every zoom re-render, the same way translateAnnotation once did.
 function convert(viewport: PageViewport, point: Point, direction: 'toViewport' | 'toPdf'): Point {
 	const result: unknown[] =
 		direction === 'toViewport' ? viewport.convertToViewportPoint(point.x, point.y) : viewport.convertToPdfPoint(point.x, point.y);
 	const [x, y] = result as [number, number];
-	return { x, y };
+	return { ...point, x, y };
 }
 
 // One line of real PDF text, in canvas space — used to snap a freehand
