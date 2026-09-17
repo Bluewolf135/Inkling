@@ -1,4 +1,4 @@
-import { MarkdownPostProcessorContext, MarkdownRenderChild, Plugin, setIcon, setTooltip } from 'obsidian';
+import { Editor, MarkdownPostProcessorContext, MarkdownRenderChild, Notice, Plugin, setIcon, setTooltip } from 'obsidian';
 import {
 	AnnotationController,
 	buildToolbar,
@@ -10,10 +10,11 @@ import {
 	type Annotation,
 } from '../annotate';
 import { createId } from '../annotate/id';
-import { INK_BLOCK_LANGUAGE, InkBlockData, emptyInkBlock, inkBlockMarkdown } from './inkBlockFormat';
+import { INK_BLOCK_LANGUAGE, InkBlockData, emptyInkBlock } from './inkBlockFormat';
 import { InNoteStorage } from './inNoteStorage';
 import type { BlockRefusal, InkBlockStorage, StorageHost, StorageWriteResult } from './inkBlockStorage';
-import { isInkFileFence, parseInkFence } from './inkFence';
+import { inkFenceMarkdown, isInkFileFence, isVaultPath, parseInkFence } from './inkFence';
+import { emptyFileBlock } from './inkFile';
 import { InkFileStorage } from './inkFileStorage';
 import { InkFileStores } from './inkFileStore';
 import { vaultInkFileIO } from './inkFileVaultIO';
@@ -1035,12 +1036,48 @@ class InkBlockChild extends MarkdownRenderChild {
 	}
 }
 
+export interface InkBlockOptions {
+	captionsEnabled: () => boolean;
+	/** Where a new block's ink file goes, for a note at this path. */
+	inkFilePathFor: (notePath: string) => string;
+}
+
+// The block is created in the ink file before its fence goes into the note.
+//
+// A fence naming a block its file does not hold is a missing block — pasted
+// from another vault, or arrived before its file did — and is refused rather
+// than saved, because saving it would put a new drawing where an existing one
+// may yet arrive. Creating the entry first is what lets that rule be absolute:
+// a block this command inserted is never mistaken for one that is missing.
+// An empty block costs about forty bytes.
+async function insertInkFileBlock(stores: InkFileStores, editor: Editor, path: string): Promise<void> {
+	if (!isVaultPath(path)) {
+		new Notice(`Inkling: ${path} is not a place in the vault an ink file can go, so no ink block was inserted. Check where new ink files go in settings.`);
+		return;
+	}
+	const id = createId();
+	const store = stores.acquire(path);
+	try {
+		await store.load();
+		const outcome = await store.createBlock(id, emptyFileBlock());
+		if (outcome.kind !== 'written') {
+			new Notice(`Inkling: could not add a drawing to ${path}, so no ink block was inserted.`);
+			return;
+		}
+		// Trailing newline so the cursor ends up on a fresh line after the
+		// block rather than inside the fence.
+		editor.replaceSelection(`${inkFenceMarkdown({ file: path, id, extra: [] })}\n`);
+	} finally {
+		stores.release(path);
+	}
+}
+
 export interface InkBlockRegistration {
 	/** Settles once every ink file store has run what it has queued. */
 	whenIdle(): Promise<void>;
 }
 
-export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsEnabled: () => boolean): InkBlockRegistration {
+export function registerInkBlock(plugin: Plugin, toolState: ToolState, options: InkBlockOptions): InkBlockRegistration {
 	// Once per load. Entries belong to blocks that may never be opened again,
 	// so nothing else will ever expire them, and localStorage is small enough
 	// that a fortnight of abandoned drawings is worth sweeping out.
@@ -1062,7 +1099,7 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsE
 				const storage = isInkFileFence(source)
 					? new InkFileStorage(stores, parseInkFence(source))
 					: new InNoteStorage(plugin, ctx, el, source);
-				return new InkBlockView(plugin, ctx, el, storage, toolState, captionsEnabled);
+				return new InkBlockView(plugin, ctx, el, storage, toolState, options.captionsEnabled);
 			}),
 		);
 	});
@@ -1072,15 +1109,13 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsE
 		name: 'Insert ink annotation block',
 		// Command palette only, per the plan — no ribbon icon, so it's
 		// reachable the same way on desktop and mobile.
-		editorCallback: (editor) => {
-			// Stamped with its id up front, so a note full of freshly inserted
-			// blocks — which are otherwise byte-identical — can still tell
-			// itself apart at save time. Two blocks with no id and no ink in
-			// them are the same bytes, and so cannot be told apart at all —
-			// see findUniqueInkBlockByBody.
-			// Trailing newline so the cursor ends up on a fresh line after
-			// the block rather than inside the fence.
-			editor.replaceSelection(`${inkBlockMarkdown({ ...emptyInkBlock(), id: createId() })}\n`);
+		editorCallback: (editor, ctx) => {
+			const notePath = ctx.file?.path;
+			if (!notePath) {
+				new Notice('Inkling: this note has no file yet, so there is nowhere to name its ink file.');
+				return;
+			}
+			void insertInkFileBlock(stores, editor, options.inkFilePathFor(notePath));
 		},
 	});
 

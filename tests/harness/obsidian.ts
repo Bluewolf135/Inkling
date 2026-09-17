@@ -142,6 +142,10 @@ export class PluginSettingTab {
 		public app: unknown,
 		public plugin: unknown,
 	) {}
+	refreshDomState(): void {
+		// Nothing renders in a test.
+	}
+
 	getSettingDefinitions(): unknown[] {
 		return [];
 	}

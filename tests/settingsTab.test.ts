@@ -28,6 +28,17 @@ function controls(tab: InklingSettingTab) {
 }
 
 describe('the settings tab', () => {
+	it('offers the ink file folder only when ink files go in a folder', () => {
+		const { tab, plugin } = openTab();
+		const folder = flatten(tab.getSettingDefinitions()).find((def) => def.control?.key === 'inkFileFolder');
+		const visible = folder?.visible;
+		if (typeof visible !== 'function') throw new Error('the ink file folder should decide its own visibility');
+
+		expect(visible()).toBe(false);
+		plugin.settings.inkFileLocation = 'folder';
+		expect(visible()).toBe(true);
+	});
+
 	it('describes every setting there is, once', () => {
 		const { tab } = openTab();
 		const keys = controls(tab).map((c) => c.key);

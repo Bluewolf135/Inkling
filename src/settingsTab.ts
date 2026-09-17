@@ -114,6 +114,31 @@ export class InklingSettingTab extends PluginSettingTab {
 			},
 			{
 				type: 'group',
+				heading: 'Ink blocks',
+				items: [
+					{
+						name: 'Where new ink files go',
+						desc:
+							'An ink block keeps its drawing in a file of its own, one per note, so the note stays text. ' +
+							'This decides where that file is created. Changing it never moves a file that already exists.',
+						aliases: ['ink file', 'attachments'],
+						control: {
+							type: 'dropdown',
+							key: 'inkFileLocation',
+							defaultValue: defaults.inkFileLocation,
+							options: { attachments: 'Same folder as attachments', 'beside-note': 'Same folder as the note', folder: 'A folder of their own' },
+						},
+					},
+					{
+						name: 'Ink file folder',
+						desc: 'To keep ink files out of search and the graph, add this folder to Files and links, Excluded files.',
+						visible: () => this.plugin.settings.inkFileLocation === 'folder',
+						control: { type: 'folder', key: 'inkFileFolder', defaultValue: defaults.inkFileFolder, placeholder: defaults.inkFileFolder },
+					},
+				],
+			},
+			{
+				type: 'group',
 				heading: 'Extracted notes',
 				items: [
 					{
@@ -159,5 +184,7 @@ export class InklingSettingTab extends PluginSettingTab {
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		Object.assign(this.plugin.settings, writeSetting(this.plugin.settings, key, value));
 		await this.plugin.saveSettings();
+		// The folder setting shows only for one location.
+		if (key === 'inkFileLocation') this.refreshDomState();
 	}
 }

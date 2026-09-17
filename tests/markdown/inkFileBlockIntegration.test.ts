@@ -204,3 +204,54 @@ describe('an ink file deleted while its note is open', () => {
 		expect(await note.inkStrokeCount(INK, blockId)).toBe(1);
 	});
 });
+
+describe('inserting a block', () => {
+	beforeEach(() => {
+		note = mountNote({ path: 'Physics.md', contents: '# Physics\n\n', openInEditor: true });
+	});
+
+	it('puts a three-line fence in the note', async () => {
+		await note.runInsertCommand();
+		expect(note.contents()).toMatch(/```inkling\nfile: Ink\/Physics\.ink\nid: ink-[^\n]+\n```\n$/);
+	});
+
+	it('creates the block in the ink file, so it is never mistaken for a missing one', async () => {
+		await note.runInsertCommand();
+		const id = /id: (.+)\n/.exec(note.contents())?.[1];
+		if (!id) throw new Error('no id in the inserted fence');
+		expect(await note.inkStrokeCount('Ink/Physics.ink', id)).toBe(0);
+	});
+
+	it('gives a block that renders ready to draw in, and saves', async () => {
+		await note.runInsertCommand();
+		note.rerender();
+		await note.settle();
+		expect(banner()).toBeNull();
+
+		const id = /id: (.+)\n/.exec(note.contents())?.[1] ?? '';
+		note.block(0).openForEditing();
+		note.block(0).drawStroke(STROKE);
+		await note.flushWrites();
+		expect(await note.inkStrokeCount('Ink/Physics.ink', id)).toBe(1);
+	});
+
+	it('adds to an ink file the note already has', async () => {
+		await note.runInsertCommand();
+		await note.runInsertCommand();
+		const ids = [...note.contents().matchAll(/id: (.+)\n/g)].map((match) => match[1] ?? '');
+		expect(ids).toHaveLength(2);
+		for (const id of ids) expect(await note.inkStrokeCount('Ink/Physics.ink', id)).toBe(0);
+	});
+
+	it('inserts nothing when the ink file cannot be written', async () => {
+		note = mountNote({
+			path: 'Physics.md',
+			contents: '# Physics\n\n',
+			openInEditor: true,
+			inkFiles: { 'Ink/Physics.ink': '{"version":1,"blocks":{' },
+		});
+		await note.runInsertCommand();
+		expect(note.contents()).toBe('# Physics\n\n');
+		expect(note.notices().some((message) => message.includes('no ink block was inserted'))).toBe(true);
+	});
+});

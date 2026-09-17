@@ -9,6 +9,7 @@ import {
 	parseInkBlock,
 } from '../../src/markdown/inkBlockFormat';
 import { parseInkFile, readInkFileBlock } from '../../src/markdown/inkFile';
+import { inkFileName } from '../../src/markdown/inkFilePath';
 import { ToolState } from '../../src/annotate/toolState';
 import type { ToolType } from '../../src/annotate/types';
 import type { Plugin } from 'obsidian';
@@ -96,6 +97,8 @@ export interface TestNote {
 	sync(next: string): Promise<void>;
 	/** Let every ink file store finish what it has queued, and the promises after it. */
 	settle(): Promise<void>;
+	/** Runs "Insert ink annotation block" in this note's editor, and lets it settle. */
+	runInsertCommand(): Promise<void>;
 	/** An ink file's text, or undefined when there is none. */
 	inkFile(path: string): string | undefined;
 	/** Change an ink file behind the plugin's back. */
@@ -154,6 +157,8 @@ export interface MountNoteOptions {
 	blockCaptions?: boolean;
 	/** Ink files in the vault beside the note, by path. */
 	inkFiles?: Record<string, string>;
+	/** Where the insert command puts a new block's ink file. Defaults to Ink/<note>.ink. */
+	inkFilePathFor?: (notePath: string) => string;
 }
 
 function defaultContents(blocks: { id?: string }[], width: number, height: number): string {
@@ -314,6 +319,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		: [];
 
 	let processor: BlockProcessor | null = null;
+	const commands = new Map<string, { id: string; editorCallback?: (editor: unknown, ctx: unknown) => void }>();
 	const plugin = {
 		app: {
 			vault,
@@ -322,13 +328,18 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		registerMarkdownCodeBlockProcessor: (_language: string, cb: BlockProcessor) => {
 			processor = cb;
 		},
-		addCommand: () => undefined,
+		addCommand: (command: { id: string; editorCallback?: (editor: unknown, ctx: unknown) => void }) => {
+			commands.set(command.id, command);
+		},
 		registerEvent: () => undefined,
 	};
 
 	const toolState = new ToolState();
 	toolState.setTool(options.tool ?? 'pen');
-	const registration = registerInkBlock(plugin as unknown as Plugin, toolState, () => options.blockCaptions ?? false);
+	const registration = registerInkBlock(plugin as unknown as Plugin, toolState, {
+		captionsEnabled: () => options.blockCaptions ?? false,
+		inkFilePathFor: options.inkFilePathFor ?? ((notePath) => `Ink/${inkFileName(notePath)}`),
+	});
 	// Read back through a closure. The only assignment TypeScript can see in
 	// straight-line code is the `null` above — the one that matters happens
 	// inside a callback handed to production code — so reading it directly
@@ -422,6 +433,12 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 			await vi.advanceTimersByTimeAsync(0);
 		},
 		settle,
+		runInsertCommand: async () => {
+			const insert = commands.get('insert-ink-block')?.editorCallback;
+			if (!insert) throw new Error('registerInkBlock did not register the insert command');
+			insert(editor, { file });
+			await settle();
+		},
 		inkFile: (inkPath) => inkFiles.get(inkPath),
 		setInkFile: (inkPath, text) => {
 			inkFiles.set(inkPath, text);

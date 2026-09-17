@@ -3,6 +3,8 @@
 // module has to stay loadable without an app around it — which is what
 // makes it testable.
 import { ALL_PRESET_COLORS } from './annotate/types';
+import { isVaultPath } from './markdown/inkFence';
+import { INK_FILE_LOCATIONS, type InkFileLocation } from './markdown/inkFilePath';
 import { TEMPLATE_STYLES, type PageSizeName, type TemplateStyle } from './templates';
 
 export type { PageSizeName };
@@ -33,6 +35,11 @@ export interface InklingSettings {
 	// than showing it — so this governs only whether the affordance to add
 	// one appears. Off means every existing block renders exactly as before.
 	blockCaptions: boolean;
+	// Where a newly inserted ink block's file is created. Changing it never
+	// moves a file that exists.
+	inkFileLocation: InkFileLocation;
+	// The folder used when inkFileLocation is 'folder'.
+	inkFileFolder: string;
 	extractionNotePattern: string;
 	// Colour category names, keyed by lowercase hex — so "Yellow =
 	// definition, Red = disagree" works without touching code.
@@ -60,6 +67,10 @@ export function defaultSettings(): InklingSettings {
 		darkInversion: 'off',
 		toolbarStartsCollapsed: false,
 		blockCaptions: false,
+		// Wherever the vault's images already go, so ink lands somewhere
+		// sensible without anyone configuring anything.
+		inkFileLocation: 'attachments',
+		inkFileFolder: 'Ink',
 		extractionNotePattern: '{folder}/{name} — annotations.md',
 		colorLabels: defaultColorLabels(),
 	};
@@ -102,6 +113,12 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 	const usablePattern =
 		typeof pattern === 'string' && pattern.trim().includes('{name}') ? pattern.trim() : defaults.extractionNotePattern;
 
+	// A folder in the vault, never a hidden one: the Vault API cannot see a
+	// dot-folder, and ink that silently stops syncing is the worst failure
+	// there is.
+	const rawFolder = typeof source.inkFileFolder === 'string' ? source.inkFileFolder.trim().replace(/^\/+/, '').replace(/\/+$/, '') : '';
+	const inkFileFolder = rawFolder && isVaultPath(rawFolder) ? rawFolder : defaults.inkFileFolder;
+
 	return {
 		defaultTemplate: pick(source.defaultTemplate, TEMPLATE_STYLES, defaults.defaultTemplate),
 		pageSize: pick(source.pageSize, ['letter', 'a4'] as const, defaults.pageSize),
@@ -112,6 +129,8 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 		darkInversion: pick(source.darkInversion, ['off', 'on', 'follow-theme'] as const, defaults.darkInversion),
 		toolbarStartsCollapsed: bool(source.toolbarStartsCollapsed, defaults.toolbarStartsCollapsed),
 		blockCaptions: bool(source.blockCaptions, defaults.blockCaptions),
+		inkFileLocation: pick(source.inkFileLocation, INK_FILE_LOCATIONS, defaults.inkFileLocation),
+		inkFileFolder,
 		extractionNotePattern: usablePattern,
 		colorLabels: labels,
 	};
@@ -157,6 +176,9 @@ export function writeSetting(settings: InklingSettings, key: string, value: unkn
 	// normalizeSettings answers a refused value with the default, which is
 	// right for a file on disk and wrong for a control: picking something
 	// invalid should not quietly reset a setting that was fine.
-	const accepted = kept === value || (typeof value === 'string' && kept === value.trim());
+	const accepted =
+		kept === value ||
+		(typeof value === 'string' && kept === value.trim()) ||
+		(key === 'inkFileFolder' && typeof value === 'string' && kept === value.trim().replace(/^\/+/, '').replace(/\/+$/, ''));
 	return accepted ? candidate : settings;
 }

@@ -5,6 +5,7 @@ import { collectAnnotations } from './extract/extract';
 import { extractionNotePath, mergeIntoNote, renderExtraction } from './extract/extractFormat';
 import { compactInkBlocks } from './markdown/compactInkBlocks';
 import { registerInkBlock } from './markdown/inkBlock';
+import { inkFilePathFor } from './markdown/inkFilePath';
 import { registerNoteCreation } from './noteCreation';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
 import { CORE_PDF_VIEW_TYPE, PdfAnnotateView, VIEW_TYPE_PDF } from './pdfView';
@@ -64,7 +65,16 @@ export default class InklingPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf, this.toolState, () => this.settings));
 		registerNoteCreation(this, () => ({ template: this.settings.defaultTemplate, pageSize: this.settings.pageSize }));
-		registerInkBlock(this, this.toolState, () => this.settings.blockCaptions);
+		registerInkBlock(this, this.toolState, {
+			captionsEnabled: () => this.settings.blockCaptions,
+			inkFilePathFor: (notePath) =>
+				inkFilePathFor(
+					notePath,
+					this.settings.inkFileLocation,
+					this.settings.inkFileFolder,
+					(source, name) => this.app.fileManager.getNewFileParent(source, name).path,
+				),
+		});
 
 		// Obsidian's own core PDF view stays the default for opening a .pdf —
 		// full native chrome (page number, zoom, outline) and no pdf-lib

@@ -110,6 +110,28 @@ describe('normalizeSettings', () => {
 		first.colorLabels['#e03131'] = 'Changed';
 		expect(second.colorLabels['#e03131']).toBe('Red');
 	});
+
+	it('puts new ink files with attachments unless told otherwise', () => {
+		expect(defaultSettings().inkFileLocation).toBe('attachments');
+		expect(defaultSettings().inkFileFolder).toBe('Ink');
+	});
+
+	it('keeps an ink file location and folder it recognises', () => {
+		const settings = normalizeSettings({ inkFileLocation: 'folder', inkFileFolder: 'Blocks/Ink' });
+		expect(settings.inkFileLocation).toBe('folder');
+		expect(settings.inkFileFolder).toBe('Blocks/Ink');
+	});
+
+	it('refuses an ink file folder that is not a folder in the vault', () => {
+		expect(normalizeSettings({ inkFileFolder: '.inkling' }).inkFileFolder).toBe('Ink');
+		expect(normalizeSettings({ inkFileFolder: '../outside' }).inkFileFolder).toBe('Ink');
+		expect(normalizeSettings({ inkFileFolder: '' }).inkFileFolder).toBe('Ink');
+		expect(normalizeSettings({ inkFileLocation: 'cloud' }).inkFileLocation).toBe('attachments');
+	});
+
+	it('takes a folder with slashes around it as the folder', () => {
+		expect(normalizeSettings({ inkFileFolder: '/Ink/' }).inkFileFolder).toBe('Ink');
+	});
 });
 
 describe('block captions', () => {
