@@ -155,3 +155,13 @@ describe('a captioned block', () => {
 		expect(content).toContain("Newton's second law");
 	});
 });
+
+describe('a fence whose ink lives in a file', () => {
+	it('is left exactly as it is and not counted as unreadable', () => {
+		const source = '# Note\n\n```inkling\nfile: Ink/Note.ink\nid: a\n```\n';
+		const result = compactInkBlocks(source);
+		expect(result.content).toBe(source);
+		expect(result.skipped).toBe(0);
+		expect(result.blocks).toBe(0);
+	});
+});

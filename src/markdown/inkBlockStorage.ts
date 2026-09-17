@@ -55,5 +55,16 @@ export interface InkBlockStorage {
 	open(host: StorageHost): void;
 	/** Never throws. */
 	write(data: InkBlockData): Promise<StorageWriteResult>;
+	/**
+	 * Called once a write has settled and the view no longer counts it as
+	 * unsaved work — the first moment the storage can put a merged result on
+	 * screen.
+	 */
+	afterWrite?(): void;
+	/**
+	 * Called when the view held a drawing because the block was refused after
+	 * it was drawn in, so the storage can save it once the refusal lifts.
+	 */
+	heldWhileRefused?(): void;
 	close(): void;
 }

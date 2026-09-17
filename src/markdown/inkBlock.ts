@@ -13,6 +13,10 @@ import { createId } from '../annotate/id';
 import { INK_BLOCK_LANGUAGE, InkBlockData, emptyInkBlock, inkBlockMarkdown } from './inkBlockFormat';
 import { InNoteStorage } from './inNoteStorage';
 import type { BlockRefusal, InkBlockStorage, StorageHost, StorageWriteResult } from './inkBlockStorage';
+import { isInkFileFence, parseInkFence } from './inkFence';
+import { InkFileStorage } from './inkFileStorage';
+import { InkFileStores } from './inkFileStore';
+import { vaultInkFileIO } from './inkFileVaultIO';
 import { InkRescueStore, browserRescueStorage } from './inkRecovery';
 
 // Batches rapid successive strokes into one write, the same reasoning as
@@ -900,7 +904,21 @@ class InkBlockView implements StorageHost {
 
 	private async write(): Promise<void> {
 		this.writeHandle = null;
-		if (this.detached || !this.writable()) return;
+		if (this.detached || !this.loaded) return;
+
+		// Refused after it was drawn in — an in-note block found damaged by a
+		// sync, or an ink file deleted inside the debounce. What is on screen
+		// was never saved, and the refusal is exactly why it cannot be now, so
+		// it is held somewhere that survives a quit rather than dropped.
+		if (this.refusal !== null) {
+			if (this.seeded) {
+				this.data = { ...this.data, annotations: this.toStored(this.controller.getPageAnnotations(BLOCK_PAGE)) };
+			}
+			unsavedInk.hold(this.storage.rescuePath, this.blockId, this.data, this.storage.rescueSource());
+			unsavedInk.persist(this.storage.rescuePath, this.blockId);
+			this.storage.heldWhileRefused?.();
+			return;
+		}
 
 		// Saving can re-render this block; doing that mid-stroke would destroy
 		// the surface the stroke is being drawn on. Gestures are short, so
@@ -933,6 +951,7 @@ class InkBlockView implements StorageHost {
 		} finally {
 			this.writing = false;
 		}
+		this.storage.afterWrite?.();
 
 		switch (result.kind) {
 			case 'saved':
@@ -1016,16 +1035,33 @@ class InkBlockChild extends MarkdownRenderChild {
 	}
 }
 
-export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsEnabled: () => boolean): void {
+export interface InkBlockRegistration {
+	/** Settles once every ink file store has run what it has queued. */
+	whenIdle(): Promise<void>;
+}
+
+export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsEnabled: () => boolean): InkBlockRegistration {
 	// Once per load. Entries belong to blocks that may never be opened again,
 	// so nothing else will ever expire them, and localStorage is small enough
 	// that a fortnight of abandoned drawings is worth sweeping out.
 	unsavedInk.purgeExpired();
 
+	// One per load, shared by every block naming the same ink file.
+	const vault = plugin.app.vault;
+	const stores = new InkFileStores(vaultInkFileIO(vault));
+	plugin.registerEvent(vault.on('modify', (file) => stores.fileChanged(file.path)));
+	plugin.registerEvent(vault.on('create', (file) => stores.fileChanged(file.path)));
+	plugin.registerEvent(vault.on('delete', (file) => stores.fileDeleted(file.path)));
+	plugin.registerEvent(vault.on('rename', (file, oldPath) => stores.fileRenamed(oldPath, file.path)));
+
 	plugin.registerMarkdownCodeBlockProcessor(INK_BLOCK_LANGUAGE, (source, el, ctx) => {
 		ctx.addChild(
 			new InkBlockChild(el, () => {
-				const storage = new InNoteStorage(plugin, ctx, el, source);
+				// Decided by the fence's own content, so a vault can hold both
+				// formats indefinitely and neither is a fallback for the other.
+				const storage = isInkFileFence(source)
+					? new InkFileStorage(stores, parseInkFence(source))
+					: new InNoteStorage(plugin, ctx, el, source);
 				return new InkBlockView(plugin, ctx, el, storage, toolState, captionsEnabled);
 			}),
 		);
@@ -1047,4 +1083,6 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsE
 			editor.replaceSelection(`${inkBlockMarkdown({ ...emptyInkBlock(), id: createId() })}\n`);
 		},
 	});
+
+	return { whenIdle: () => stores.whenIdle() };
 }

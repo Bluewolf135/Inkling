@@ -2,6 +2,7 @@ import { createId } from '../annotate/id';
 import { SIMPLIFY_EPSILON, simplifyPoints } from '../annotate/simplify';
 import { Annotation } from '../annotate/types';
 import { INK_BLOCK_LANGUAGE, parseInkBlock, serializeInkBlock } from './inkBlockFormat';
+import { isInkFileFence } from './inkFence';
 
 export interface CompactResult {
 	content: string;
@@ -84,6 +85,14 @@ export function compactInkBlocks(source: string): CompactResult {
 		}
 
 		const body = lines.slice(index + 1, close).join('\n');
+		// Its strokes are in an ink file, compressed, and nothing here applies.
+		// Not counted as skipped: nothing is wrong with it.
+		if (isInkFileFence(body)) {
+			for (let copy = index; copy <= close; copy++) out.push(lines[copy] ?? '');
+			index = close;
+			continue;
+		}
+
 		const { data, malformed } = parseInkBlock(body);
 
 		if (malformed) {

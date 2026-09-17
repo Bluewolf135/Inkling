@@ -8,6 +8,7 @@ import {
 	inkBlockMarkdown,
 	parseInkBlock,
 } from '../../src/markdown/inkBlockFormat';
+import { parseInkFile, readInkFileBlock } from '../../src/markdown/inkFile';
 import { ToolState } from '../../src/annotate/toolState';
 import type { ToolType } from '../../src/annotate/types';
 import type { Plugin } from 'obsidian';
@@ -93,6 +94,18 @@ export interface TestNote {
 	 * revisit a decision it made when it rendered.
 	 */
 	sync(next: string): Promise<void>;
+	/** Let every ink file store finish what it has queued, and the promises after it. */
+	settle(): Promise<void>;
+	/** An ink file's text, or undefined when there is none. */
+	inkFile(path: string): string | undefined;
+	/** Change an ink file behind the plugin's back. */
+	setInkFile(path: string, text: string): void;
+	/** Change an ink file and announce it, as a sync landing would. */
+	syncInkFile(path: string, text: string): Promise<void>;
+	/** Delete an ink file and announce it. */
+	deleteInkFile(path: string): Promise<void>;
+	/** Stroke annotations in one block of an ink file, or -1 when it cannot be read. */
+	inkStrokeCount(path: string, id: string): Promise<number>;
 	/** Saves that went into the editor while it was in reading view. */
 	discardedEditorWrites(): number;
 	/** How many times the save path read the note one line at a time. */
@@ -139,6 +152,8 @@ export interface MountNoteOptions {
 	 * write. Off by default, which is how the plugin ships.
 	 */
 	blockCaptions?: boolean;
+	/** Ink files in the vault beside the note, by path. */
+	inkFiles?: Record<string, string>;
 }
 
 function defaultContents(blocks: { id?: string }[], width: number, height: number): string {
@@ -172,6 +187,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 	let discardedEditorWrites = 0;
 	let getLineCalls = 0;
 	const file = new TFile(path);
+	const inkFiles = new Map(Object.entries(options.inkFiles ?? {}));
 
 	// Vault events, only as far as anything under test listens to them.
 	// A block that could not be read watches for its own note changing, so
@@ -180,16 +196,57 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 	type VaultListener = { event: string; cb: (file: TFile) => void };
 	const listeners: VaultListener[] = [];
 
+	const fire = (event: string, target: TFile): void => {
+		for (const listener of [...listeners]) {
+			if (listener.event === event) listener.cb(target);
+		}
+	};
+
 	const vault = {
 		getAbstractFileByPath: (wanted: string) => (wanted === path ? file : null),
+		getFileByPath: (wanted: string) => (wanted === path ? file : inkFiles.has(wanted) ? new TFile(wanted) : null),
+		// Every folder exists. Nothing under test depends on creating one.
+		getFolderByPath: (wanted: string) => ({ path: wanted }),
+		createFolder: async () => undefined,
+		read: async (target: TFile) => {
+			if (target.path === path) return contents;
+			const text = inkFiles.get(target.path);
+			if (text === undefined) throw new Error(`no such file: ${target.path}`);
+			return text;
+		},
+		create: async (target: string, data: string) => {
+			if (target === path || inkFiles.has(target)) throw new Error(`file already exists: ${target}`);
+			inkFiles.set(target, data);
+			const created = new TFile(target);
+			fire('create', created);
+			return created;
+		},
 		process: async (target: TFile, fn: (data: string) => string) => {
-			if (target.path !== path) throw new Error(`no such file: ${target.path}`);
-			contents = fn(contents);
-			return contents;
+			if (target.path === path) {
+				contents = fn(contents);
+				return contents;
+			}
+			const current = inkFiles.get(target.path);
+			if (current === undefined) throw new Error(`no such file: ${target.path}`);
+			const next = fn(current);
+			if (next !== current) {
+				inkFiles.set(target.path, next);
+				// Obsidian reports the plugin's own writes back to it, and the
+				// store has to cope with hearing about them. The note's own
+				// writes are not reported, as before this harness held ink files.
+				fire('modify', target);
+			}
+			return next;
 		},
 		cachedRead: async (target: TFile) => {
 			if (target.path !== path) throw new Error(`no such file: ${target.path}`);
 			return contents;
+		},
+		adapter: {
+			stat: async (wanted: string) => {
+				const text = wanted === path ? contents : inkFiles.get(wanted);
+				return text === undefined ? null : { type: 'file', ctime: 0, mtime: 0, size: new TextEncoder().encode(text).length };
+			},
 		},
 		on: (event: string, cb: (file: TFile) => void): VaultListener => {
 			const ref = { event, cb };
@@ -266,11 +323,12 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 			processor = cb;
 		},
 		addCommand: () => undefined,
+		registerEvent: () => undefined,
 	};
 
 	const toolState = new ToolState();
 	toolState.setTool(options.tool ?? 'pen');
-	registerInkBlock(plugin as unknown as Plugin, toolState, () => options.blockCaptions ?? false);
+	const registration = registerInkBlock(plugin as unknown as Plugin, toolState, () => options.blockCaptions ?? false);
 	// Read back through a closure. The only assignment TypeScript can see in
 	// straight-line code is the `null` above — the one that matters happens
 	// inside a callback handed to production code — so reading it directly
@@ -320,6 +378,16 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		return found;
 	};
 
+	// Ink file work runs on real streams (deflate is not a timer), so it is
+	// awaited rather than advanced past, a few rounds deep because a store
+	// settling can start a block saving.
+	const settle = async (): Promise<void> => {
+		for (let round = 0; round < 5; round++) {
+			await registration.whenIdle();
+			await vi.advanceTimersByTimeAsync(0);
+		}
+	};
+
 	return {
 		path,
 		contents: () => contents,
@@ -332,6 +400,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		blockCount: () => mounted.length,
 		flushWrites: async () => {
 			await vi.advanceTimersByTimeAsync(WRITE_SETTLE_MS);
+			await settle();
 		},
 		advance: async (ms: number) => {
 			await vi.advanceTimersByTimeAsync(ms);
@@ -346,13 +415,33 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		},
 		sync: async (next: string) => {
 			contents = next;
-			for (const listener of [...listeners]) {
-				if (listener.event === 'modify') listener.cb(file);
-			}
+			fire('modify', file);
 			// Reading a file is asynchronous, so a listener has not finished
 			// reacting by the time it returns. Settled here rather than in
 			// every test that changes a file.
 			await vi.advanceTimersByTimeAsync(0);
+		},
+		settle,
+		inkFile: (inkPath) => inkFiles.get(inkPath),
+		setInkFile: (inkPath, text) => {
+			inkFiles.set(inkPath, text);
+		},
+		syncInkFile: async (inkPath, text) => {
+			const existed = inkFiles.has(inkPath);
+			inkFiles.set(inkPath, text);
+			fire(existed ? 'modify' : 'create', new TFile(inkPath));
+			await settle();
+		},
+		deleteInkFile: async (inkPath) => {
+			inkFiles.delete(inkPath);
+			fire('delete', new TFile(inkPath));
+			await settle();
+		},
+		inkStrokeCount: async (inkPath, id) => {
+			const read = parseInkFile(inkFiles.get(inkPath) ?? '');
+			if (read.kind !== 'readable') return -1;
+			const block = await readInkFileBlock(read.contents.blocks.get(id));
+			return block.kind === 'decoded' ? block.block.annotations.filter((a) => a.kind === 'stroke').length : -1;
 		},
 		discardedEditorWrites: () => discardedEditorWrites,
 		getLineCalls: () => getLineCalls,

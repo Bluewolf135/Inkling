@@ -468,6 +468,11 @@ export class InkFileStores {
 		return this.entries.has(path);
 	}
 
+	/** Settles once every store in use has run everything it has queued. */
+	async whenIdle(): Promise<void> {
+		await Promise.all([...this.entries.values()].map((entry) => entry.store.whenIdle()));
+	}
+
 	fileChanged(path: string): void {
 		this.entries.get(path)?.store.fileChanged();
 	}
