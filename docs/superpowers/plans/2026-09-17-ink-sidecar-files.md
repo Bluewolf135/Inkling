@@ -223,7 +223,7 @@ describe('encoding and decoding strokes', () => {
 		const decoded = await decodeStrokes(strokes, undefined);
 		expect(decoded.kind).toBe('decoded');
 		if (decoded.kind !== 'decoded') return;
-		expect(written(decoded.annotations)).toBe(written(annotations));
+		expect(decoded.annotations.map(storedAnnotation)).toEqual(annotations.map(storedAnnotation));
 	});
 
 	it('round-trips an empty block to a payload that is not empty', async () => {

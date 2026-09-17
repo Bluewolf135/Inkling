@@ -197,6 +197,26 @@ function readAnnotation(value: unknown): Annotation | null {
 	return null;
 }
 
+// A list of stored annotations, read one at a time, with a count of those
+// that could not be. Shared by the in-note block and the ink file, so the two
+// formats cannot come to disagree about what a readable annotation is.
+export function readAnnotations(value: unknown): { annotations: Annotation[]; dropped: number } {
+	const annotations: Annotation[] = [];
+	let dropped = 0;
+	if (Array.isArray(value)) {
+		for (const entry of value) {
+			const annotation = readAnnotation(entry);
+			if (annotation) annotations.push(annotation);
+			else dropped += 1;
+		}
+	} else if (value !== undefined) {
+		// Annotations that are not a list at all. Counted as one loss rather
+		// than none: something was there, and it is not here.
+		dropped += 1;
+	}
+	return { annotations, dropped };
+}
+
 export function emptyInkBlock(): InkBlockData {
 	return { version: INK_BLOCK_VERSION, width: DEFAULT_BLOCK_WIDTH, height: DEFAULT_BLOCK_HEIGHT, annotations: [] };
 }
@@ -271,19 +291,7 @@ export function parseInkBlock(source: string): ParseResult {
 	const rawCaption = typeof raw.caption === 'string' ? raw.caption.trim() : '';
 	const caption = rawCaption ? rawCaption : undefined;
 
-	const annotations: Annotation[] = [];
-	let dropped = 0;
-	if (Array.isArray(raw.annotations)) {
-		for (const entry of raw.annotations) {
-			const annotation = readAnnotation(entry);
-			if (annotation) annotations.push(annotation);
-			else dropped += 1;
-		}
-	} else if (raw.annotations !== undefined) {
-		// A block whose annotations are not a list at all. Counted as one
-		// loss rather than none: something was there, and it is not here.
-		dropped += 1;
-	}
+	const { annotations, dropped } = readAnnotations(raw.annotations);
 
 	// A block written by a *newer* version of the plugin may legitimately
 	// hold things this build can't represent, so flag it rather than
