@@ -280,10 +280,10 @@ export class PdfAnnotateView extends FileView {
 	// from renderedPages, which recycling (see releasePage) empties again.
 	private readonly seededPages = new Set<number>();
 	private visiblePages = new Set<number>();
-	// Pages actually within the viewport, as opposed to visiblePages' padded
-	// render-ahead set — see onIntersect.
-	private readonly onScreenPages = new Set<number>();
+	// The page filling most of the view — see updateCurrentPage — and the
+	// frame that will next measure it, if one is pending.
 	private currentPageNumber = 1;
+	private currentPageFrame: number | null = null;
 	private disposeToolbar: (() => void) | null = null;
 	private addingPage = false;
 
@@ -452,6 +452,9 @@ export class PdfAnnotateView extends FileView {
 		// type into. So listen globally and check that this view is the one
 		// the user is actually looking at.
 		this.registerDomEvent(document, 'keydown', (event) => this.handleKey(event));
+		// contentEl is the scroll container, and outlives every file shown
+		// in it, so this is registered once here rather than per load.
+		this.registerDomEvent(this.contentEl, 'scroll', () => this.scheduleCurrentPageUpdate());
 		// Obsidian fires this on a theme switch, which is what follow-theme
 		// has to react to.
 		this.registerEvent(this.app.workspace.on('css-change', () => this.applyInversion()));
@@ -830,7 +833,10 @@ export class PdfAnnotateView extends FileView {
 		this.renderedPages.clear();
 		this.seededPages.clear();
 		this.visiblePages.clear();
-		this.onScreenPages.clear();
+		if (this.currentPageFrame !== null) {
+			window.cancelAnimationFrame(this.currentPageFrame);
+			this.currentPageFrame = null;
+		}
 		this.currentPageNumber = 1;
 		// Back to a single page, so the toolbar's readout can't briefly show
 		// the *previous* file's length while the next one is still loading.
@@ -872,16 +878,6 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private onIntersect(entries: IntersectionObserverEntry[], token: number) {
-		// The observer's own notion of "visible" is deliberately padded by a
-		// page in each direction (see its rootMargin) so pages render before
-		// they're scrolled to. That padding makes it the wrong thing to
-		// derive the *current* page from — it would name a page still a
-		// screen away, sending "Add page" and the page handed back on exit
-		// to somewhere the reader isn't. This unpadded check answers that
-		// separately, from rects the entries already carry (no extra layout
-		// work beyond the container's own rect).
-		const containerRect = this.contentEl.getBoundingClientRect();
-
 		for (const entry of entries) {
 			const placeholder = entry.target as HTMLElement;
 			const pageNumber = Number(placeholder.dataset[PAGE_NUMBER_ATTR]);
@@ -895,28 +891,58 @@ export class PdfAnnotateView extends FileView {
 			} else {
 				this.visiblePages.delete(pageNumber);
 			}
+		}
 
-			const rect = entry.boundingClientRect;
-			if (rect.bottom > containerRect.top && rect.top < containerRect.bottom) {
-				this.onScreenPages.add(pageNumber);
-			} else {
-				this.onScreenPages.delete(pageNumber);
+		this.updateCurrentPage();
+		this.releaseDistantPages();
+	}
+
+	// Batched to one measurement a frame; scroll events come far faster.
+	private scheduleCurrentPageUpdate(): void {
+		if (this.currentPageFrame !== null) return;
+		this.currentPageFrame = window.requestAnimationFrame(() => {
+			this.currentPageFrame = null;
+			this.updateCurrentPage();
+		});
+	}
+
+	// The page filling most of the view, measured now.
+	//
+	// Not from the observer. It is padded by a screen in each direction (see
+	// its rootMargin) so pages render before they arrive, which means it only
+	// reports a page crossing that padding — a screen away from anything the
+	// reader can see. Deciding "on screen" from its entries left a page
+	// current long after it scrolled off: in a two-page note, page 1 never
+	// left the padding, so page 2 could never become current, and zooming it
+	// showed no zoom readout at all. Measured on scroll instead, and only
+	// over the padded set, which is a handful of pages however long the book.
+	private updateCurrentPage(): void {
+		const container = this.contentEl.getBoundingClientRect();
+		let best: number | null = null;
+		let bestShown = 0;
+		for (const pageNumber of [...this.visiblePages].sort((a, b) => a - b)) {
+			const placeholder = this.contentEl.querySelector<HTMLElement>(
+				`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
+			);
+			if (!placeholder) continue;
+			const rect = placeholder.getBoundingClientRect();
+			const shown = Math.min(rect.bottom, container.bottom) - Math.max(rect.top, container.top);
+			if (shown > bestShown) {
+				best = pageNumber;
+				bestShown = shown;
 			}
 		}
 
 		const previousPageNumber = this.currentPageNumber;
-		if (this.onScreenPages.size > 0) {
-			this.currentPageNumber = Math.min(...this.onScreenPages);
+		if (best !== null) {
+			this.currentPageNumber = best;
 		} else if (this.visiblePages.size > 0) {
 			this.currentPageNumber = Math.min(...this.visiblePages);
 		}
-		// The toolbar's page readout is the only thing watching this, and
+		// The toolbar's readouts are the only thing watching this, and
 		// scrolling isn't something the controller can observe for itself —
-		// so tell it, but only on an actual change, since this handler runs
-		// on every intersection callback while scrolling.
+		// so tell it, but only on an actual change.
 		if (this.currentPageNumber !== previousPageNumber) this.controller.refreshUi();
-
-		this.releaseDistantPages();
 	}
 
 	// Tears scrolled-far-away pages back down to bare placeholders — see
