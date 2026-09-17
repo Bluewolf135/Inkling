@@ -1622,9 +1622,9 @@ export class PdfAnnotateView extends FileView {
 		this.noteEditor = null;
 	}
 
-	// Whether the PDF page canvas is inverted, from the setting plus the
-	// current theme. Only the page: the annotation layers sit above it as
-	// separate elements, so ink keeps its real colours either way.
+	// Whether the page and its ink are inverted, from the setting plus the
+	// current theme. The class does the work — see styles.css for which
+	// layers it reaches, and why the highlight layer is not one of them.
 	private applyInversion(): void {
 		const setting = this.getSettings().darkInversion;
 		const inverted =
