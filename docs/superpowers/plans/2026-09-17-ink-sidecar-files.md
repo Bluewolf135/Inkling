@@ -637,7 +637,7 @@ describe('carrying through what this build cannot read', () => {
 describe('serializing', () => {
 	it('stamps the current version', async () => {
 		const text = await fileHolding({});
-		expect(JSON.parse(text).version).toBe(INK_FILE_VERSION);
+		expect((JSON.parse(text) as { version: unknown }).version).toBe(INK_FILE_VERSION);
 	});
 
 	it('puts one block on each line, so a line-based merge can work per block', async () => {
