@@ -1,4 +1,4 @@
-import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownView, Notice, Plugin, setIcon, setTooltip, TFile } from 'obsidian';
+import { MarkdownPostProcessorContext, MarkdownRenderChild, Plugin, setIcon, setTooltip } from 'obsidian';
 import {
 	AnnotationController,
 	buildToolbar,
@@ -10,20 +10,10 @@ import {
 	type Annotation,
 } from '../annotate';
 import { createId } from '../annotate/id';
-import {
-	INK_BLOCK_LANGUAGE,
-	INK_BLOCK_VERSION,
-	InkBlockData,
-	findInkBlockById,
-	findUniqueInkBlockByBody,
-	emptyInkBlock,
-	inkBlockMarkdown,
-	parseInkBlock,
-	serializeInkBlock,
-	type InkBlockDamage,
-} from './inkBlockFormat';
+import { INK_BLOCK_LANGUAGE, InkBlockData, emptyInkBlock, inkBlockMarkdown } from './inkBlockFormat';
+import { InNoteStorage } from './inNoteStorage';
+import type { BlockRefusal, InkBlockStorage, StorageHost, StorageWriteResult } from './inkBlockStorage';
 import { InkRescueStore, browserRescueStorage } from './inkRecovery';
-import { mergeInkBlocks } from './mergeInkBlocks';
 
 // Batches rapid successive strokes into one write, the same reasoning as
 // the PDF view's own debounce: every save rewrites a region of the user's
@@ -35,23 +25,6 @@ const WRITE_DEBOUNCE_MS = 800;
 // that under a pen still on the surface would yank the drawing surface out
 // from under the stroke in progress.
 const GESTURE_RETRY_MS = 250;
-
-// How long to wait before trying again when the block cannot be found
-// in its own note, and how many times. A note being actively edited can
-// briefly not contain the fence a save is looking for — the user is
-// midway through cutting and pasting a section, say. Retrying rather
-// than giving up is what stops a transient state from needing a
-// re-render to recover from.
-const LOCATE_RETRY_MS = 1200;
-const LOCATE_RETRIES = 4;
-
-// How long to keep restoring the note's scroll position after a save. See
-// keepScrollPosition — the scroll that has to be undone happens *after* the
-// edit that caused it, and in reading view after the re-render later still,
-// so one synchronous reset is not enough. Short enough that a deliberate
-// scroll begun in the same breath as a pen-lift is at worst briefly
-// interrupted.
-const SCROLL_RESTORE_MS = 120;
 
 // Undo histories kept across the re-render a block’s own save causes.
 //
@@ -182,23 +155,6 @@ function countOf(n: number, noun: string): string {
 	return `${n} ${noun}${n === 1 ? '' : 's'}`;
 }
 
-// What the banner says, which differs by damage because what the user can do
-// about it differs by damage. The old text covered all three at once — "may
-// have been written by a newer version" — which was a guess presented to
-// someone who could not check it and could not act on it either way.
-function damageMessage(damage: InkBlockDamage): string {
-	switch (damage.kind) {
-		case 'unreadable':
-			return 'Inkling could not read this ink block at all, so it will not be saved over. Its text is still in the note, exactly as it was.';
-		case 'partial':
-			return `Inkling could read ${damage.kept} of the ${damage.kept + damage.dropped} annotations in this ink block, so it will not be saved over.`;
-		case 'from-future':
-			return `This ink block is in format ${damage.version} and this version of Inkling reads format ${INK_BLOCK_VERSION}, so it will not be saved over. Update Inkling to edit it.`;
-		case 'none':
-			return '';
-	}
-}
-
 function recoveryKey(sourcePath: string, blockId: string): string {
 	return `${sourcePath}::${blockId}`;
 }
@@ -302,7 +258,7 @@ const MAX_BLOCK_HEIGHT = 4000;
 // Obsidian re-runs the post-processor whenever the block's section is
 // re-rendered — so everything here is torn down through the render child
 // below rather than assumed to live as long as the file is open.
-class InkBlockView {
+class InkBlockView implements StorageHost {
 	private readonly controller: AnnotationController;
 	private data: InkBlockData;
 	private disposeToolbar: (() => void) | null = null;
@@ -312,27 +268,24 @@ class InkBlockView {
 	// restates the aspect ratio that gives this element its height.
 	private readonly surfaceEl!: HTMLElement;
 	private detached = false;
-	// Set when the source held something this build couldn't fully read, in
-	// which case this block renders but never saves — see the banner below.
-	private readOnly = false;
 
 	// Identifies this block across the re-render its own save causes — see
 	// openToolStrips. Null when the block's position can't be read, in which
 	// case the tool strip simply isn't remembered.
 	private readonly stripKey: string;
 
-	// This block's own identity in the note, and the exact text it rendered
-	// from — the two things a save checks before overwriting a fence. See
-	// locate/findUniqueInkBlockByBody for why "it's an ink block" was not
-	// enough.
+	// This block's own identity, as its storage names it.
 	private readonly blockId: string;
-	private renderedSource: string;
-	// One report per view, not one per save: a mismatch repeats on every
-	// debounce tick for as long as the note is open.
-	private reportedMismatch = false;
-	// Consecutive failures to find this block in its own note. Reset on
-	// every successful save.
-	private locateFailures = 0;
+	// Whether the storage has shown this block anything yet. Nothing is drawn,
+	// seeded or saved before it has: a block that waits on a file must not
+	// accept ink it has nowhere to put, nor seed an empty store over it.
+	private loaded = false;
+	// Why this block may not be saved, if it may not. Can change underneath a
+	// rendered block — a sync conflict resolves, or a file comes back.
+	private refusal: BlockRefusal | null = null;
+	// A save in flight. Counts as unsaved work: what is on screen may be newer
+	// than what the storage holds until it lands.
+	private writing = false;
 
 	// How many surface units there are per stored unit. The block is
 	// stored 800 wide whatever screen drew it; the canvas is backed at
@@ -354,17 +307,7 @@ class InkBlockView {
 	// The drag handle along the block's bottom edge, shown only while the
 	// tool strip is open. See setResizeHandleVisible.
 	private resizeHandleEl: HTMLElement | null = null;
-	// What this build could not read in the block's source, and the banner
-	// saying so. Held rather than discarded after the constructor, because
-	// the answer can change underneath a rendered block: a sync conflict
-	// resolves, or the JSON is fixed by hand, and a banner that was decided
-	// once then outlives the damage that caused it.
-	private damage: InkBlockDamage = { kind: 'none' };
 	private bannerEl: HTMLElement | null = null;
-	private disposeRepairWatch: (() => void) | null = null;
-	// Said once per view, like the locate-failure notice: a refusal repeats
-	// on every retry, and a notice per attempt is noise about one problem.
-	private reportedStaleWrite = false;
 	// The pending frame in watchVisibility, so detaching before it runs
 	// cannot leave a callback pointing at a torn-down block.
 	private watchHandle: number | null = null;
@@ -378,28 +321,14 @@ class InkBlockView {
 		private readonly plugin: Plugin,
 		private readonly ctx: MarkdownPostProcessorContext,
 		private readonly containerEl: HTMLElement,
-		source: string,
+		private readonly storage: InkBlockStorage,
 		toolState: ToolState,
 		private readonly captionsEnabled: () => boolean,
 	) {
-		const { data, damage } = parseInkBlock(source);
-		// A block written before ids existed picks one up the first time it
-		// saves; until then it is located by its exact source text instead.
-		this.blockId = data.id ?? createId();
-		this.renderedSource = source.trim();
-
-		// Ink from a save that failed before this block was re-rendered is
-		// strictly newer than what the file holds — the file is what the
-		// failed save was trying to update. Adopting it here, and saving
-		// again below, is what turns a failed save into a delayed one
-		// rather than into lost work.
-		//
-		// Declined unless it matches the block as the file has it now: across
-		// a quit, sync can have brought back a newer version of this block
-		// from another device, and putting a held drawing over that would
-		// overwrite work rather than rescue it.
-		const rescued = unsavedInk.get(ctx.sourcePath, this.blockId, this.renderedSource);
-		this.data = rescued ? { ...rescued, id: this.blockId } : { ...data, id: this.blockId };
+		this.blockId = storage.blockId;
+		// Until the storage shows something. Its size is what the block holds
+		// space with, so a block waiting on a file reserves the default.
+		this.data = { ...emptyInkBlock(), id: this.blockId };
 
 		// The same key the recovery map uses, and for the same reason: it is
 		// the one name for this block that survives its own save.
@@ -445,31 +374,6 @@ class InkBlockView {
 		// reopened on a desktop still puts every stroke where it was drawn.
 		surface.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${this.data.height}` });
 		this.contentEl = content;
-		// Deferred until the block is near the screen — see watchVisibility.
-		// The surface keeps its size regardless, from the aspect ratio above,
-		// so nothing reflows when the canvases come and go.
-		this.watchVisibility();
-
-		if (damage.kind !== 'none') {
-			// Deliberately never saves over it: a block this build can't fully
-			// read is far more likely to be from a newer version of the
-			// plugin, or damaged in a way the original could still recover,
-			// than something worth replacing with what little parsed.
-			this.readOnly = true;
-			this.damage = damage;
-			this.buildBanner(damage);
-			this.watchForRepair();
-		}
-
-		// After the damage check above, which is what decides whether this
-		// block may ever be written: a block that must never be saved over
-		// must not offer a field whose only purpose is to save something over
-		// it.
-		this.buildCaption();
-
-		// Deliberately after mountPage/seedPage above, so the rescued ink is
-		// on screen before the save that persists it is attempted.
-		if (rescued && !this.readOnly) this.scheduleWrite();
 
 		// Blocks open closed to editing, and the toggle below is what opens
 		// them. A note is read far more often than it is drawn in, and a
@@ -477,17 +381,121 @@ class InkBlockView {
 		// that collects stray marks from a stylus resting on the way past —
 		// on the one screen, a tablet, where the pen is also how you scroll.
 		//
-		// This is separate from `this.readOnly` above, which means the block
-		// must *never* be written because we could not fully read it. That
-		// one is permanent and the toggle cannot lift it; this one is the
-		// user's to change whenever they like.
+		// This is separate from a refusal, which means the block must *never*
+		// be written. That one is permanent and the toggle cannot lift it;
+		// this one is the user's to change whenever they like.
 		this.controller.setReadOnly(true);
 
 		this.buildToolbarToggle();
-		// A read-only block never saves, so offering a handle that appears to
-		// resize it and then silently forgets would be worse than not having
-		// one.
-		if (!this.readOnly) this.buildResizeHandle();
+		// Built for every block and shown only while the block is open and may
+		// be saved: a handle that appears to resize a block and then silently
+		// forgets would be worse than not having one.
+		this.buildResizeHandle();
+
+		// After everything the storage may call back into exists. An in-note
+		// block answers synchronously, so its banner and caption land now, in
+		// the same order in the DOM as they always did.
+		storage.open(this);
+
+		// Last: a block rebuilt by its own save mounts synchronously, and
+		// mounting seeds the surface from what the storage just showed.
+		this.watchVisibility();
+	}
+
+	show(data: InkBlockData): boolean {
+		if (this.detached) return false;
+
+		if (!this.loaded) {
+			this.loaded = true;
+			// Ink from a save that failed before this block was re-rendered is
+			// strictly newer than what the storage holds — that is what the
+			// failed save was trying to update. Adopting it here, and saving
+			// again below, is what turns a failed save into a delayed one
+			// rather than into lost work.
+			//
+			// Declined unless it matches the block as stored now: across a quit,
+			// sync can have brought back a newer version of this block from
+			// another device, and putting a held drawing over that would
+			// overwrite work rather than rescue it.
+			const rescued = unsavedInk.get(this.storage.rescuePath, this.blockId, this.storage.rescueSource());
+			this.data = rescued ? { ...rescued, id: this.blockId } : { ...data, id: this.blockId };
+			this.applyAspect();
+			// After any refusal the block starts with, which decides whether a
+			// caption may be written: a block that must never be saved over must
+			// not offer a field whose only purpose is to save something over it.
+			this.buildCaption();
+			this.applyEditability();
+			if (this.mounted && !this.seeded) this.seed();
+			// So the rescued ink is on screen before the save that persists it
+			// is attempted.
+			if (rescued && this.writable()) this.scheduleWrite();
+			return true;
+		}
+
+		// Never over unsaved work. The storage merges it at the next save
+		// instead, which keeps both.
+		if (this.hasUnsavedWork()) return false;
+		this.data = { ...data, id: this.blockId };
+		this.applyAspect();
+		// Only if the store has already been given this block's annotations;
+		// otherwise the next mount seeds from the data set just above, which
+		// is the same answer one step later.
+		if (this.seeded) this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
+		return true;
+	}
+
+	refuse(refusal: BlockRefusal): void {
+		this.refusal = refusal;
+		this.bannerEl?.remove();
+		this.buildBanner(refusal);
+		// Told directly, not left to the toggle. The controller learns its
+		// read-only state inside setOpen, so a block whose tool strip is
+		// already open would keep taking ink until the next time someone
+		// closed and reopened it — which is the whole window this refusal
+		// exists to close.
+		this.applyEditability();
+	}
+
+	lift(): void {
+		this.refusal = null;
+		this.bannerEl?.remove();
+		this.bannerEl = null;
+		// The mirror of refuse, and the reason that one is not enough on its
+		// own: a repaired block whose strip was already open looked editable
+		// and silently refused every stroke, because the controller was never
+		// told the refusal had been lifted.
+		this.applyEditability();
+	}
+
+	isRefused(): boolean {
+		return this.refusal !== null;
+	}
+
+	hasUnsavedWork(): boolean {
+		return this.writeHandle !== null || this.writing || this.controller.isGestureActive();
+	}
+
+	isDetached(): boolean {
+		return this.detached;
+	}
+
+	private writable(): boolean {
+		return this.loaded && this.refusal === null;
+	}
+
+	private applyEditability(): void {
+		const open = this.disposeToolbar !== null;
+		this.controller.setReadOnly(!open || !this.writable());
+		this.setResizeHandleVisible(open && this.writable());
+	}
+
+	private applyAspect(): void {
+		this.surfaceEl.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${this.data.height}` });
+	}
+
+	private seed(): void {
+		this.seeded = true;
+		this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
 	}
 
 	// One line under the block saying what the drawing is.
@@ -497,17 +505,19 @@ class InkBlockView {
 	// setting is on syncs to one where it is off, and hiding text someone
 	// wrote is worse than showing it.
 	private buildCaption(): void {
-		if (!this.captionsEnabled() || this.readOnly) {
+		if (!this.captionsEnabled() || !this.writable()) {
 			const text = this.data.caption?.trim();
 			if (!text) return;
 			// Text, never markup. A caption comes out of the user's own note,
 			// which syncs between devices and can be hand-edited, so it is
 			// exactly as untrusted as the stroke data beside it.
-			this.containerEl.createDiv({ cls: 'inkling-ink-block-caption', text });
+			const caption = this.containerEl.createDiv({ cls: 'inkling-ink-block-caption', text });
+			if (this.resizeHandleEl) this.containerEl.insertBefore(caption, this.resizeHandleEl);
 			return;
 		}
 
 		const input = this.containerEl.createEl('input', { cls: 'inkling-ink-block-caption-input' });
+		if (this.resizeHandleEl) this.containerEl.insertBefore(input, this.resizeHandleEl);
 		input.type = 'text';
 		input.value = this.data.caption ?? '';
 		input.placeholder = 'Describe this block';
@@ -533,20 +543,15 @@ class InkBlockView {
 		this.scheduleWrite();
 	}
 
-	private buildBanner(damage: InkBlockDamage): void {
+	private buildBanner(refusal: BlockRefusal): void {
 		const banner = this.containerEl.createDiv({ cls: 'inkling-ink-block-banner' });
 		this.bannerEl = banner;
+		this.surfaceEl.insertAdjacentElement('afterend', banner);
 		setIcon(banner.createDiv({ cls: 'inkling-ink-block-banner-icon' }), 'alert-triangle');
-		banner.createDiv({ cls: 'inkling-ink-block-banner-text', text: damageMessage(damage) });
+		banner.createDiv({ cls: 'inkling-ink-block-banner-text', text: refusal.message });
 
-		// Only a partly-read block is offered a way out, and the reason is the
-		// whole shape of this feature. Nothing survived an unreadable one, so
-		// there is nothing to keep. A block from a newer version did not fail
-		// to parse so much as fail to be understood — what this build dropped
-		// is most likely what that version added, so "keep what survived"
-		// there means "throw away the part written by the newer plugin".
-		if (damage.kind !== 'partial') return;
-		this.buildRecoveryAction(banner, damage.kept, damage.dropped);
+		if (!refusal.recoverable) return;
+		this.buildRecoveryAction(banner, refusal.recoverable.kept, refusal.recoverable.dropped);
 	}
 
 	// Two clicks rather than a modal. The action is not reversible and says
@@ -576,102 +581,8 @@ class InkBlockView {
 	// fence, re-renders the section, and gives back a block with no banner,
 	// its resize handle, and everything else a healthy one has.
 	private recoverWhatSurvived(): void {
-		this.clearDamage();
+		this.lift();
 		void this.write();
-	}
-
-	// A block that could not be read watches its own note, so that the
-	// decision made when it rendered is not the only one it ever makes.
-	//
-	// Registered only by a block that was damaged when it rendered, so a
-	// healthy note carries no listeners at all — but kept for that block's
-	// whole life, not only until it is repaired. Conflicts keep happening in
-	// a live-replicating vault, and a block that healed once can be damaged
-	// again; dropping the watch on the way out would leave it writable with
-	// no banner, which fails open where the stale banner failed closed.
-	private watchForRepair(): void {
-		const vault = this.plugin.app.vault;
-		const ref = vault.on('modify', (file) => {
-			if (file.path !== this.ctx.sourcePath) return;
-			void this.recheckDamage();
-		});
-		this.disposeRepairWatch = () => vault.offref(ref);
-	}
-
-	private async recheckDamage(): Promise<void> {
-		if (this.detached) return;
-		const file = this.plugin.app.vault.getAbstractFileByPath(this.ctx.sourcePath);
-		if (!(file instanceof TFile)) return;
-
-		let contents: string;
-		try {
-			contents = await this.plugin.app.vault.cachedRead(file);
-		} catch {
-			return;
-		}
-		// Reading the file is asynchronous, so the block can have been
-		// detached while it was in flight.
-		if (this.detached) return;
-
-		const lines = contents.split('\n');
-		// A block whose id was inside the JSON that failed to parse cannot be
-		// located at all, and there is no honest way to guess which fence
-		// became which — guessing at one is how a drawing once reached another
-		// block. Its banner waits for the note to re-render, as it always did.
-		const range = this.locate(lines);
-		if (!range) return;
-
-		const body = lines.slice(range.lineStart + 1, range.lineEnd).join('\n');
-		const { data, damage } = parseInkBlock(body);
-
-		if (damage.kind !== 'none') {
-			// Damaged now, and the refusal has to come back. Nothing is
-			// re-seeded: what is on screen is what the user drew, and
-			// replacing it with the partial parse of a file we have just
-			// refused to write would take strokes off the screen on the
-			// strength of a version we do not trust.
-			if (this.isDamaged()) return;
-			this.applyDamage(damage);
-			return;
-		}
-
-		if (!this.isDamaged()) return;
-		this.clearDamage();
-		this.renderedSource = body.trim();
-		this.data = { ...data, id: this.blockId };
-		this.surfaceEl.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${this.data.height}` });
-		// Only if the store has already been given this block's annotations;
-		// otherwise the next mount seeds from the data set just above, which
-		// is the same answer one step later.
-		if (this.seeded) this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
-	}
-
-	private isDamaged(): boolean {
-		return this.damage.kind !== 'none';
-	}
-
-	private applyDamage(damage: InkBlockDamage): void {
-		this.damage = damage;
-		this.readOnly = true;
-		this.buildBanner(damage);
-		// Told directly, not left to the toggle. The controller learns its
-		// read-only state inside setOpen, so a block whose tool strip is
-		// already open would keep taking ink until the next time someone
-		// closed and reopened it — which is the whole window this refusal
-		// exists to close.
-		this.controller.setReadOnly(true);
-	}
-
-	private clearDamage(): void {
-		this.damage = { kind: 'none' };
-		this.readOnly = false;
-		this.bannerEl?.remove();
-		this.bannerEl = null;
-		// The mirror of applyDamage, and the reason that one is not enough on
-		// its own: a repaired block whose strip was already open looked
-		// editable and silently refused every stroke, because the controller
-		// was never told the refusal had been lifted.
-		this.controller.setReadOnly(this.disposeToolbar === null);
 	}
 
 	private buildToolbarToggle(): void {
@@ -703,17 +614,16 @@ class InkBlockView {
 			// all, so a block nobody has asked to edit cannot collect a stray
 			// mark from a pen on its way past.
 			//
-			// A block we could not fully read stays closed to writing whatever
+			// A block that may not be saved stays closed to writing whatever
 			// this says — that decision is not the user's to reverse, because
 			// what would be written over is what we failed to understand.
-			this.controller.setReadOnly(!open || this.readOnly);
+			this.applyEditability();
 
 			const label = open ? 'Done editing this block' : 'Edit this block';
 			setTooltip(toggle, label);
 			toggle.setAttribute('aria-label', label);
 			toggle.toggleClass('is-active', open);
 			toggle.setAttribute('aria-expanded', String(open));
-			this.setResizeHandleVisible(open);
 		};
 
 		// Never a no-op on the first call, whatever setOpen decides below:
@@ -744,7 +654,7 @@ class InkBlockView {
 		if (clamped === this.data.height) return;
 
 		this.data = { ...this.data, height: clamped };
-		this.surfaceEl.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${clamped}` });
+		this.applyAspect();
 		// Goes through the store's live-update path, so a resize counts as
 		// exactly that rather than an edit: no history entry of its own, and
 		// no change notification recursing back into the save path.
@@ -783,7 +693,7 @@ class InkBlockView {
 		// strip's own state decides which — a block whose strip the user left
 		// open comes back with its handle, and every other block comes back
 		// without one. See setResizeHandleVisible.
-		this.setResizeHandleVisible(this.disposeToolbar !== null);
+		this.setResizeHandleVisible(this.disposeToolbar !== null && this.writable());
 		handle.setAttribute('aria-label', 'Drag to resize this ink block');
 		setTooltip(handle, 'Drag to resize');
 
@@ -944,12 +854,12 @@ class InkBlockView {
 		this.controller.mountPage(BLOCK_PAGE, this.contentEl, width, height);
 
 		if (!this.seeded) {
-			// Only ever on the first mount. mountPage repaints from the store,
-			// which is the live truth once anything has been drawn, so
-			// reseeding on a remount would put the file’s version back and
-			// throw away every stroke made since.
-			this.seeded = true;
-			this.controller.seedPage(BLOCK_PAGE, this.toSurface(this.data.annotations));
+			// Only ever on the first mount, and only once the storage has shown
+			// this block something. mountPage repaints from the store, which is
+			// the live truth once anything has been drawn, so reseeding on a
+			// remount would put the stored version back and throw away every
+			// stroke made since.
+			if (this.loaded) this.seed();
 		} else if (Math.abs(previous - this.scale) > 0.001) {
 			// The column changed width, or the note moved to another screen.
 			// Everything in the store is in the old surface units and has to
@@ -982,48 +892,17 @@ class InkBlockView {
 		this.controller.unmountPage(BLOCK_PAGE);
 	}
 
-	private scheduleWrite(): void {
-		if (this.detached || this.readOnly) return;
+	scheduleWrite(): void {
+		if (this.detached || !this.writable()) return;
 		if (this.writeHandle !== null) window.clearTimeout(this.writeHandle);
 		this.writeHandle = window.setTimeout(() => void this.write(), WRITE_DEBOUNCE_MS);
 	}
 
-	// Saving a block rewrites the note, and any document change makes the
-	// editor scroll its cursor back into view. Drawing with a stylus never
-	// moves that cursor — it stays wherever it was last placed, which for a
-	// note you opened and drew in is usually the very top — so every autosave
-	// yanked the note back up to it a couple of seconds after the user
-	// stopped writing, which is the whole time a debounced save takes to
-	// fire. Reading view has the same symptom by a different route: the
-	// re-render resets the preview scroller.
-	//
-	// So: remember where the note actually is, and put it back. Repeatedly,
-	// for a moment, because the scroll being undone happens after the edit
-	// returns rather than during it.
-	private keepScrollPosition(): () => void {
-		const scroller = findScrollParent(this.containerEl);
-		if (!scroller) return () => undefined;
-		const { scrollTop, scrollLeft } = scroller;
-
-		return () => {
-			const deadline = performance.now() + SCROLL_RESTORE_MS;
-			const restore = () => {
-				// Only ever corrects a jump away from where the note was. A
-				// scroller already sitting where it should be is left alone, so
-				// this can't fight the user for control of it.
-				if (scroller.scrollTop !== scrollTop) scroller.scrollTop = scrollTop;
-				if (scroller.scrollLeft !== scrollLeft) scroller.scrollLeft = scrollLeft;
-				if (performance.now() < deadline) window.requestAnimationFrame(restore);
-			};
-			restore();
-		};
-	}
-
 	private async write(): Promise<void> {
 		this.writeHandle = null;
-		if (this.detached || this.readOnly) return;
+		if (this.detached || !this.writable()) return;
 
-		// Saving re-renders this block; doing that mid-stroke would destroy
+		// Saving can re-render this block; doing that mid-stroke would destroy
 		// the surface the stroke is being drawn on. Gestures are short, so
 		// waiting one out costs nothing.
 		if (this.controller.isGestureActive()) {
@@ -1038,96 +917,39 @@ class InkBlockView {
 		if (this.seeded) {
 			this.data = { ...this.data, annotations: this.toStored(this.controller.getPageAnnotations(BLOCK_PAGE)) };
 		}
-		// Held from here on, not only on failure. Every path below can end
-		// without writing — a note that closed mid-debounce, a fence that has
-		// moved, a vault error — and each of those used to leave the drawing
-		// on screen and nothing in the file, which the next re-render then
-		// discarded. Stashing first and clearing on success means the only
-		// way to lose ink is to lose the session.
-		unsavedInk.hold(this.ctx.sourcePath, this.blockId, this.data, this.renderedSource);
+		// Held from here on, not only on failure. Every path a storage takes can
+		// end without writing, and each of those used to leave the drawing on
+		// screen and nothing stored, which the next re-render then discarded.
+		// Holding first and forgetting on success means the only way to lose
+		// ink is to lose the session.
+		unsavedInk.hold(this.storage.rescuePath, this.blockId, this.data, this.storage.rescueSource());
 
-		const restoreScroll = this.keepScrollPosition();
-
-		const editor = this.findOpenEditor();
-		if (editor) {
-			// Through the editor, not the file, whenever the note is open:
-			// this lands as an ordinary edit in the same document the user is
-			// working in — one undo step, no external-modification reload,
-			// and no fight with unsaved changes the editor hasn’t flushed to
-			// disk yet.
-			// One call, not one per line. Reading the document a line at a
-			// time costs a tree lookup and a string slice apiece, which was
-			// tolerable at 409 lines and is not at 7,788 — the count on the
-			// largest note in the vault once stored JSON began wrapping. This
-			// runs on the main thread while the pen is still moving.
-			const lines = editor.getValue().split('\n');
-
-			const range = this.locate(lines);
-			if (!range) {
-				this.handleLocateFailure();
-				return;
-			}
-
-			const serialized = this.bodyToWrite(lines, range);
-			if (serialized === null) {
-				this.refuseStaleWrite();
-				return;
-			}
-
-			editor.replaceRange(
-				`${serialized}\n`,
-				{ line: range.lineStart + 1, ch: 0 },
-				{ line: range.lineEnd, ch: 0 },
-			);
-			this.renderedSource = serialized;
-			this.locateFailures = 0;
-			unsavedInk.forget(this.ctx.sourcePath, this.blockId);
-			restoreScroll();
-			return;
-		}
-
-		const file = this.plugin.app.vault.getAbstractFileByPath(this.ctx.sourcePath);
-		if (!(file instanceof TFile)) {
-			// No editor and no file: there is nowhere left to write, so the
-			// only copy of this drawing is the one being held.
-			unsavedInk.persist(this.ctx.sourcePath, this.blockId);
-			return;
-		}
-
+		// The storage call starts synchronously, before the first await, so a
+		// block flushing its save as it is torn down still gets it started.
+		this.writing = true;
+		let result: StorageWriteResult;
 		try {
-			let wrote = false;
-			let refused = false;
-			let written = '';
-			await this.plugin.app.vault.process(file, (contents) => {
-				const lines = contents.split('\n');
-				const range = this.locate(lines);
-				if (!range) return contents;
-				const body = this.bodyToWrite(lines, range);
-				if (body === null) {
-					refused = true;
-					return contents;
-				}
-				written = body;
-				lines.splice(range.lineStart + 1, range.lineEnd - range.lineStart - 1, body);
-				wrote = true;
-				return lines.join('\n');
-			});
-			if (refused) {
-				this.refuseStaleWrite();
+			result = await this.storage.write(this.data);
+		} finally {
+			this.writing = false;
+		}
+
+		switch (result.kind) {
+			case 'saved':
+				unsavedInk.forget(this.storage.rescuePath, this.blockId);
 				return;
-			}
-			if (!wrote) {
-				this.handleLocateFailure();
+			case 'retry':
+				// Written out before the retry rather than after the last one.
+				// Retries usually resolve within a few seconds, but those are
+				// seconds in which the only copy is in memory, and a crash is
+				// exactly the event this exists for.
+				unsavedInk.persist(this.storage.rescuePath, this.blockId);
+				if (this.writeHandle !== null) window.clearTimeout(this.writeHandle);
+				this.writeHandle = window.setTimeout(() => void this.write(), result.afterMs);
 				return;
-			}
-			this.renderedSource = written;
-			this.locateFailures = 0;
-			unsavedInk.forget(this.ctx.sourcePath, this.blockId);
-			restoreScroll();
-		} catch (error) {
-			unsavedInk.persist(this.ctx.sourcePath, this.blockId);
-			console.error('Inkling: failed to save an ink block.', error);
-			new Notice('Inkling: could not save this ink block. Your drawing is still on screen and will be saved again shortly.');
+			case 'held':
+				unsavedInk.persist(this.storage.rescuePath, this.blockId);
+				return;
 		}
 	}
 
@@ -1142,148 +964,6 @@ class InkBlockView {
 	private toStored(annotations: Annotation[]): Annotation[] {
 		if (this.scale === 1) return annotations;
 		return annotations.map((annotation) => scaleAnnotationUniform(annotation, 1 / this.scale));
-	}
-
-	// Where this block’s fence actually is in `lines`.
-	//
-	// By id first, because that answers the question directly. Obsidian’s
-	// getSectionInfo is a report of where a block is, and in a note holding
-	// several it is a report that can be wrong — which is how one block’s
-	// drawing was written into another’s, and how refusing that write then
-	// lost the drawing instead.
-	//
-	// For the one case an id search cannot answer — a block that has never
-	// been saved, and so carries no id in the file yet — the note is searched
-	// for the fence holding this view's exact text instead. getSectionInfo is
-	// not consulted at all any more, and that is the fix for a second way
-	// this lost work.
-	//
-	// It used to be the fallback, with its reported range checked against
-	// that same text before writing. The check could not do the job it was
-	// given: two ink blocks nobody has drawn in yet are the same fifty-five
-	// bytes of empty JSON, so an empty block compared equal to *any* other
-	// empty block, a misreported range sailed through, and one block's
-	// drawing was written into another block's fence — which reads, from the
-	// outside, as the work in the first block disappearing the moment the
-	// second one was touched.
-	//
-	// Searching for a uniquely-matching fence answers the question directly
-	// and refuses when the answer is ambiguous, which a failed save turns
-	// into ink kept rather than ink misplaced.
-	// What to put in the fence, decided against what the fence says *now*.
-	//
-	// A save used to overwrite whatever was there. That is correct while this
-	// view is the only thing editing the block, and wrong the moment it is
-	// not: a block flushes its pending write when it is torn down, and it is
-	// torn down precisely because the note changed — a sync landing inside
-	// the debounce is exactly that case. The other device's strokes went
-	// silently.
-	//
-	// The comparison costs a join and a string equality on lines already in
-	// hand, and the answer is "unchanged" for every save but the rare one, so
-	// nothing below it runs in the ordinary case.
-	//
-	// Returns null to refuse: the fence holds something this build cannot
-	// read, and merging into a block we could not parse is exactly the guess
-	// the refusal elsewhere exists to prevent.
-	private bodyToWrite(lines: readonly string[], range: { lineStart: number; lineEnd: number }): string | null {
-		const current = lines.slice(range.lineStart + 1, range.lineEnd).join('\n').trim();
-		if (current === this.renderedSource) return serializeInkBlock(this.data);
-
-		const { data: theirs, damage } = parseInkBlock(current);
-		if (damage.kind !== 'none') return null;
-
-		// The base is what this view last read, which is what makes this a
-		// three-way merge rather than a guess about who is newer.
-		const base = parseInkBlock(this.renderedSource).data;
-		return serializeInkBlock(mergeInkBlocks(base, this.data, theirs));
-	}
-
-	// The fence moved on and holds something unreadable, so there is nothing
-	// to merge into. The drawing is already held; persisting it means the
-	// session can end without losing it, and the block's own damage banner
-	// takes over from here.
-	private refuseStaleWrite(): void {
-		unsavedInk.persist(this.ctx.sourcePath, this.blockId);
-		if (this.reportedStaleWrite) return;
-		this.reportedStaleWrite = true;
-		console.error(
-			`Inkling: ink block ${this.blockId} in ${this.ctx.sourcePath} changed elsewhere and cannot be read, ` +
-				'so this save was refused rather than written over it. The drawing is held on this device.',
-		);
-		new Notice('Inkling: this ink block changed elsewhere and could not be read, so it was not saved over.');
-	}
-
-	private locate(lines: readonly string[]): { lineStart: number; lineEnd: number } | null {
-		const byId = findInkBlockById(lines, this.blockId);
-		if (byId) return byId;
-
-		return findUniqueInkBlockByBody(lines, this.renderedSource);
-	}
-
-	// The block is not where it should be. The drawing is already stashed
-	// (see write), so nothing is lost either way — but a retry usually
-	// resolves it without the user ever knowing, and only a run of
-	// failures is worth telling them about.
-	private handleLocateFailure(): void {
-		// Written out before the retry rather than after the last one. The
-		// retries usually resolve a transient edit within a few seconds, but
-		// those are seconds in which the only copy is in memory, and a crash
-		// is exactly the event this exists for.
-		unsavedInk.persist(this.ctx.sourcePath, this.blockId);
-		this.locateFailures += 1;
-		if (this.locateFailures <= LOCATE_RETRIES) {
-			if (this.writeHandle !== null) window.clearTimeout(this.writeHandle);
-			this.writeHandle = window.setTimeout(() => void this.write(), LOCATE_RETRY_MS);
-			return;
-		}
-		this.reportMismatch();
-	}
-
-	// Refusing to save is the safe outcome, but a silent one would look like
-	// ink vanishing, so say so once. The block's own next render re-seeds
-	// from the file and picks the work back up.
-	private reportMismatch(): void {
-		if (this.reportedMismatch) return;
-		this.reportedMismatch = true;
-		console.error(
-			`Inkling: could not find ink block ${this.blockId} in ${this.ctx.sourcePath} to save it. ` +
-				'The drawing is still on screen and is held on this device, and will be written the next time the note renders. ' +
-				'If the block was deleted from the note, that is expected.',
-		);
-		new Notice('Inkling: an ink block could not be saved yet. Your drawing is safe — leave the note open.');
-	}
-
-	// Any open editor on this note, not just the focused one — drawing on a
-	// canvas doesn't necessarily move focus to the note's editor, and a note
-	// can be open in a split alongside the one being looked at.
-	// The editor to save through, or null to go to the file instead.
-	//
-	// A view in reading mode is skipped, and that is not a nicety: an edit
-	// made through its editor is silently discarded. Measured in the running
-	// app — replaceRange on a reading-mode view changed the buffer, left
-	// `dirty` false, never reached disk, and was gone the moment the view
-	// re-synced from the file.
-	//
-	// That made this the worst kind of failure. The write did not throw, so
-	// the save counted itself a success, cleared the recovery entry that
-	// exists to survive a failed save, and left the ink on screen with
-	// nothing in the file — until the next re-render, which took it. Exactly
-	// the "it glitched and it was gone" this plugin already has one fix for;
-	// that fix addressed a save that could not find its block, and this is a
-	// save that finds it and writes somewhere that does not last.
-	//
-	// Live Preview reports 'source' here, the same as source mode, so only
-	// reading view takes the file path below — which is the path that works
-	// regardless of what is open.
-	private findOpenEditor() {
-		for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
-			const view = leaf.view;
-			if (!(view instanceof MarkdownView) || view.file?.path !== this.ctx.sourcePath) continue;
-			if (view.getMode() === 'preview') continue;
-			return view.editor;
-		}
-		return null;
 	}
 
 	detach(): void {
@@ -1302,8 +982,7 @@ class InkBlockView {
 			void this.write();
 		}
 		this.detached = true;
-		this.disposeRepairWatch?.();
-		this.disposeRepairWatch = null;
+		this.storage.close();
 		this.disposeToolbar?.();
 		this.disposeToolbar = null;
 		// destroy, not unmountAll: this controller is one of many built over
@@ -1344,7 +1023,12 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, captionsE
 	unsavedInk.purgeExpired();
 
 	plugin.registerMarkdownCodeBlockProcessor(INK_BLOCK_LANGUAGE, (source, el, ctx) => {
-		ctx.addChild(new InkBlockChild(el, () => new InkBlockView(plugin, ctx, el, source, toolState, captionsEnabled)));
+		ctx.addChild(
+			new InkBlockChild(el, () => {
+				const storage = new InNoteStorage(plugin, ctx, el, source);
+				return new InkBlockView(plugin, ctx, el, storage, toolState, captionsEnabled);
+			}),
+		);
 	});
 
 	plugin.addCommand({
