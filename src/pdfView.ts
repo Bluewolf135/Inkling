@@ -799,7 +799,15 @@ export class PdfAnnotateView extends FileView {
 	// the plugin-wide ToolState, which outlives every view over it. Without
 	// this, each PDF leaf ever opened would stay reachable from that state
 	// for the rest of the session.
+	//
+	// super first, and awaited. FileView's own onClose is what runs
+	// loadFile(null), and that is the only path by which onUnloadFile — the
+	// flush and the teardown — happens when a view closes. Skipping it left
+	// the save debounce armed and the writer alive while destroy() below
+	// emptied the store, so the debounce saved every unsaved page as blank:
+	// a page of handwriting lost to "Stop annotating" on 2026-09-16.
 	async onClose(): Promise<void> {
+		await super.onClose();
 		this.controller.destroy();
 	}
 

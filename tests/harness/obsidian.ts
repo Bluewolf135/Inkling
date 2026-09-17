@@ -114,6 +114,71 @@ export class MarkdownView {
 
 export class Plugin extends Component {}
 
+// View and FileView, as far as a view's lifecycle goes — and in the order
+// Obsidian 1.13.7's app.js runs it, because the order is the whole point.
+// `View.close` detaches, unloads, then awaits `onClose`. `FileView.onClose`
+// is where `loadFile(null)` happens, and `loadFile` is the only thing that
+// calls `onUnloadFile`. A subclass that overrides `onClose` without calling
+// super therefore never has `onUnloadFile` called on close at all — which is
+// how the PDF view lost the flush it relied on, and a page of ink with it.
+export class View extends Component {
+	app: unknown;
+	containerEl: HTMLElement;
+	contentEl: HTMLElement;
+	constructor(public leaf: { app?: unknown }) {
+		super();
+		this.app = leaf.app;
+		this.containerEl = document.createElement('div');
+		this.contentEl = this.containerEl.appendChild(document.createElement('div'));
+	}
+	async open(): Promise<void> {
+		this.load();
+		await this.onOpen();
+	}
+	async close(): Promise<void> {
+		this.containerEl.remove();
+		this.unload();
+		await this.onClose();
+	}
+	async onOpen(): Promise<void> {
+		// Overridden by subclasses.
+	}
+	async onClose(): Promise<void> {
+		// Overridden by subclasses.
+	}
+	addAction(_icon: string, _title: string, _callback: () => void): HTMLElement {
+		return document.createElement('div');
+	}
+	// Attached for real, so a test can dispatch the event and see the view
+	// respond. Never detached: a test view lives only as long as its test.
+	registerDomEvent(el: EventTarget, type: string, cb: (event: Event) => void): void {
+		el.addEventListener(type, cb);
+	}
+}
+
+export class FileView extends View {
+	file: TFile | null = null;
+	async onClose(): Promise<void> {
+		this.contentEl.replaceChildren();
+		await this.loadFile(null);
+	}
+	async loadFile(file: TFile | null): Promise<void> {
+		const previous = this.file;
+		if (previous === file) return;
+		if (previous) await this.onUnloadFile(previous);
+		this.file = null;
+		if (!file) return;
+		this.file = file;
+		await this.onLoadFile(file);
+	}
+	async onLoadFile(_file: TFile): Promise<void> {
+		// Overridden by subclasses.
+	}
+	async onUnloadFile(_file: TFile): Promise<void> {
+		// Overridden by subclasses.
+	}
+}
+
 // Recorded rather than rendered. Obsidian's own setIcon leaves an empty
 // <svg> behind for a name the running build does not know, which is a blank
 // button and no error — the failure that cost this plugin its block toggle
