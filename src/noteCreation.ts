@@ -138,11 +138,18 @@ function openCreateNoteModal(app: App, folder: TFolder, defaults: NoteCreationDe
 }
 
 export function registerNoteCreation(plugin: Plugin, getDefaults: () => NoteCreationDefaults): void {
+	const createInCurrentFolder = () => openCreateNoteModal(plugin.app, getTargetFolder(plugin.app), getDefaults());
+
 	plugin.addCommand({
 		id: 'create-handwritten-note',
 		name: 'Create handwritten note',
-		callback: () => openCreateNoteModal(plugin.app, getTargetFolder(plugin.app), getDefaults()),
+		callback: createInCurrentFolder,
 	});
+
+	// The command palette and a folder's context menu are both a hunt on a
+	// tablet; the side panel is one tap. Same icon as the folder menu entry,
+	// so the two read as the same action.
+	plugin.addRibbonIcon('pen-line', 'Create handwritten note', createInCurrentFolder);
 
 	plugin.registerEvent(
 		plugin.app.workspace.on('file-menu', (menu, file) => {

@@ -114,6 +114,26 @@ export class MarkdownView {
 
 export class Plugin extends Component {}
 
+// Every Modal opened, in order. Opening records the modal and stops there:
+// what a dialog lays out inside itself is Obsidian's Setting API, which
+// nothing here renders, and the question tests ask is which dialog a
+// control opened.
+export const openedModals: Modal[] = [];
+
+export class Modal {
+	constructor(public app: unknown) {}
+	open(): void {
+		openedModals.push(this);
+	}
+	close(): void {
+		// Nothing to close in a test.
+	}
+}
+
+export class Setting {
+	constructor(public containerEl: HTMLElement) {}
+}
+
 // View and FileView, as far as a view's lifecycle goes — and in the order
 // Obsidian 1.13.7's app.js runs it, because the order is the whole point.
 // `View.close` detaches, unloads, then awaits `onClose`. `FileView.onClose`
@@ -203,5 +223,6 @@ export function normalizePath(path: string): string {
 
 export function resetObsidianStubs(): void {
 	notices.length = 0;
+	openedModals.length = 0;
 	iconRequests.length = 0;
 }
