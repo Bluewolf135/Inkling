@@ -134,6 +134,22 @@ export class Setting {
 	constructor(public containerEl: HTMLElement) {}
 }
 
+// The declarative half only (Obsidian 1.13): definitions are data, and the
+// base class's own control accessors, which read and write
+// `plugin.settings[key]`, are what a subclass overrides.
+export class PluginSettingTab {
+	constructor(
+		public app: unknown,
+		public plugin: unknown,
+	) {}
+	getSettingDefinitions(): unknown[] {
+		return [];
+	}
+	update(): void {
+		// Nothing renders in a test.
+	}
+}
+
 // View and FileView, as far as a view's lifecycle goes — and in the order
 // Obsidian 1.13.7's app.js runs it, because the order is the whole point.
 // `View.close` detaches, unloads, then awaits `onClose`. `FileView.onClose`

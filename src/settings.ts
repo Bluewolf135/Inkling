@@ -116,3 +116,47 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 		colorLabels: labels,
 	};
 }
+
+// ---- One setting at a time, by key ----
+//
+// How the settings tab reads and writes: Obsidian's declarative settings
+// API names each control by a string key and asks the tab for its value, or
+// hands it a new one. Flat fields are keyed by name; a colour's category
+// label is `colorLabels.<hex>`, since those live one level down.
+
+const COLOR_LABEL_KEY = 'colorLabels.';
+
+export function colorLabelKey(color: string): string {
+	return COLOR_LABEL_KEY + color.toLowerCase();
+}
+
+export function readSetting(settings: InklingSettings, key: string): unknown {
+	if (key.startsWith(COLOR_LABEL_KEY)) return settings.colorLabels[key.slice(COLOR_LABEL_KEY.length)];
+	if (key === 'colorLabels' || !(key in settings)) return undefined;
+	return settings[key as keyof InklingSettings];
+}
+
+// The settings with one value changed, put through normalizeSettings like
+// anything read from disk — so a value no control should be able to send
+// still cannot get in. A value it refuses leaves the old one in place rather
+// than resetting to the default, and an unknown key changes nothing.
+export function writeSetting(settings: InklingSettings, key: string, value: unknown): InklingSettings {
+	if (key.startsWith(COLOR_LABEL_KEY)) {
+		const color = key.slice(COLOR_LABEL_KEY.length);
+		if (!(color in settings.colorLabels)) return settings;
+		// Cleared, a label goes back to the colour's own name — not to
+		// whatever it was, which would make it impossible to clear.
+		const labels = { ...settings.colorLabels, [color]: typeof value === 'string' ? value : '' };
+		if (!labels[color]?.trim()) delete labels[color];
+		return normalizeSettings({ ...settings, colorLabels: labels });
+	}
+	if (key === 'colorLabels' || !(key in settings)) return settings;
+
+	const candidate = normalizeSettings({ ...settings, [key]: value });
+	const kept = candidate[key as keyof InklingSettings];
+	// normalizeSettings answers a refused value with the default, which is
+	// right for a file on disk and wrong for a control: picking something
+	// invalid should not quietly reset a setting that was fine.
+	const accepted = kept === value || (typeof value === 'string' && kept === value.trim());
+	return accepted ? candidate : settings;
+}

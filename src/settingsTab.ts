@@ -1,26 +1,21 @@
-import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
+import { PluginSettingTab, type App, type Plugin, type SettingDefinitionItem } from 'obsidian';
 import { ALL_PRESET_COLORS } from './annotate';
 import { TEMPLATE_STYLES, TEMPLATE_STYLE_LABELS } from './templates';
-import { defaultSettings, normalizeSettings, type InklingSettings } from './settings';
+import { colorLabelKey, defaultSettings, readSetting, writeSetting, type InklingSettings } from './settings';
 
 // The Obsidian-facing half of the settings. The pure half — the shape,
-// the defaults, and the defensive read of whatever loadData() returns —
-// lives in ./settings so it can be tested without standing up an app.
-function pick<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
-	return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
-}
-
+// the defaults, the defensive read of whatever loadData() returns, and
+// reading or writing one setting by key — lives in ./settings so it can be
+// tested without standing up an app.
 export interface SettingsHost extends Plugin {
 	settings: InklingSettings;
 	saveSettings(): Promise<void>;
 }
 
-// Built imperatively, which lint warns about and which is deliberate: the
-// declarative settings API landed in Obsidian 1.13 and this plugin still
-// admits 1.4.4 (see manifest.json). Adopting it means either dropping the
-// tab for older builds or maintaining both descriptions of the same
-// settings, which is exactly the kind of duplication that drifts. Revisit
-// when minAppVersion moves past 1.13.
+// Described declaratively, with Obsidian 1.13's settings API: the tab says
+// what its settings are and Obsidian draws them, which is also what puts
+// every one of them in Obsidian's settings search. minAppVersion is 1.13.0
+// for this; an older app would load the plugin with an empty tab.
 export class InklingSettingTab extends PluginSettingTab {
 	constructor(
 		app: App,
@@ -29,173 +24,140 @@ export class InklingSettingTab extends PluginSettingTab {
 		super(app, plugin);
 	}
 
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		const defaults = defaultSettings();
 
-		const commit = () => void this.plugin.saveSettings();
+		return [
+			{
+				type: 'group',
+				heading: 'Handwritten notes',
+				items: [
+					{
+						name: 'Default template',
+						desc: 'The ruling a new handwritten note starts with.',
+						control: {
+							type: 'dropdown',
+							key: 'defaultTemplate',
+							defaultValue: defaults.defaultTemplate,
+							options: Object.fromEntries(TEMPLATE_STYLES.map((style) => [style, TEMPLATE_STYLE_LABELS[style]])),
+						},
+					},
+					{
+						name: 'Page size',
+						desc: 'The paper size for new handwritten notes and for pages added to them.',
+						control: { type: 'dropdown', key: 'pageSize', defaultValue: defaults.pageSize, options: { letter: 'Letter', a4: 'A4' } },
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Pen',
+				items: [
+					{
+						name: 'Pressure sensitivity',
+						desc: 'Vary a pen stroke’s width with how hard the stylus presses. Has no effect on a mouse.',
+						aliases: ['stylus', 'taper'],
+						control: { type: 'toggle', key: 'pressure', defaultValue: defaults.pressure },
+					},
+					{
+						name: 'Stroke smoothing',
+						desc: 'Fit a curve through the pen’s samples instead of joining them with straight lines.',
+						control: { type: 'toggle', key: 'smoothing', defaultValue: defaults.smoothing },
+					},
+					{
+						name: 'Shape recognition',
+						desc: 'Hold the pen still at the end of a stroke to snap a rough circle, box or line to a clean one.',
+						control: {
+							type: 'dropdown',
+							key: 'shapeRecognition',
+							defaultValue: defaults.shapeRecognition,
+							options: { hold: 'Hold to snap', off: 'Off' },
+						},
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Reading and editing',
+				items: [
+					{
+						name: 'Invert PDF pages',
+						desc: 'Darken the PDF page, and invert the ink on it so it stays readable. Off by default: the toolbar’s contrast button flips one document without changing this.',
+						aliases: ['dark mode', 'night'],
+						control: {
+							type: 'dropdown',
+							key: 'darkInversion',
+							defaultValue: defaults.darkInversion,
+							options: { off: 'Never', 'follow-theme': 'Follow theme', on: 'Always' },
+						},
+					},
+					{
+						name: 'Start with the toolbar collapsed',
+						desc: 'Useful on a phone, where the full tool strip covers a real slice of the page.',
+						control: { type: 'toggle', key: 'toolbarStartsCollapsed', defaultValue: defaults.toolbarStartsCollapsed },
+					},
+					{
+						name: 'Ink block captions',
+						desc:
+							'Adds a line under each ink block for a short description, so a page of handwriting reads as something in search results ' +
+							'and to a screen reader. A block that already has a caption always shows it, whether or not this is on.',
+						control: { type: 'toggle', key: 'blockCaptions', defaultValue: defaults.blockCaptions },
+					},
+					{
+						name: 'Save frequency',
+						desc:
+							'Automatic scales how often a PDF is written to its size, so a large textbook is not rewritten every few seconds. ' +
+							'Frequent saves every ten seconds whatever the size.',
+						control: { type: 'dropdown', key: 'saveCadence', defaultValue: defaults.saveCadence, options: { auto: 'Automatic', frequent: 'Frequent' } },
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Extracted notes',
+				items: [
+					{
+						name: 'Note path',
+						desc: 'Where an extracted note goes. {folder} and {name} come from the PDF. Must contain {name}.',
+						control: {
+							type: 'text',
+							key: 'extractionNotePattern',
+							defaultValue: defaults.extractionNotePattern,
+							placeholder: defaults.extractionNotePattern,
+							// Refused rather than saved: a path with no {name} would
+							// put every book's annotations in one file, each run
+							// wiping the last.
+							validate: (value) => (value.includes('{name}') ? undefined : 'Must contain {name}, or every PDF would share one note.'),
+						},
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Colour categories',
+				items: [
+					{
+						name: 'What each colour means',
+						desc: 'For the pen and the highlighter alike. These become the headings in an extracted note.',
+					},
+					...ALL_PRESET_COLORS.map(({ value, label }) => ({
+						name: label,
+						aliases: [value],
+						control: { type: 'text' as const, key: colorLabelKey(value), defaultValue: label, placeholder: label },
+					})),
+				],
+			},
+		];
+	}
 
-		new Setting(containerEl).setName('Handwritten notes').setHeading();
+	getControlValue(key: string): unknown {
+		return readSetting(this.plugin.settings, key);
+	}
 
-		new Setting(containerEl)
-			.setName('Default template')
-			.setDesc('The ruling a new handwritten note starts with.')
-			.addDropdown((dropdown) => {
-				for (const style of TEMPLATE_STYLES) dropdown.addOption(style, TEMPLATE_STYLE_LABELS[style]);
-				dropdown.setValue(this.plugin.settings.defaultTemplate).onChange((value) => {
-					this.plugin.settings.defaultTemplate = pick(value, TEMPLATE_STYLES, 'blank');
-					commit();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName('Page size')
-			.setDesc('The paper size for new handwritten notes and for pages added to them.')
-			.addDropdown((dropdown) => {
-				dropdown
-					.addOption('letter', 'Letter')
-					.addOption('a4', 'A4')
-					.setValue(this.plugin.settings.pageSize)
-					.onChange((value) => {
-						this.plugin.settings.pageSize = pick(value, ['letter', 'a4'] as const, 'letter');
-						commit();
-					});
-			});
-
-		new Setting(containerEl).setName('Pen').setHeading();
-
-		new Setting(containerEl)
-			.setName('Pressure sensitivity')
-			.setDesc('Vary a pen stroke’s width with how hard the stylus presses. Has no effect on a mouse.')
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.pressure).onChange((value) => {
-					this.plugin.settings.pressure = value;
-					commit();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName('Stroke smoothing')
-			.setDesc('Fit a curve through the pen’s samples instead of joining them with straight lines.')
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.smoothing).onChange((value) => {
-					this.plugin.settings.smoothing = value;
-					commit();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName('Shape recognition')
-			.setDesc('Hold the pen still at the end of a stroke to snap a rough circle, box or line to a clean one.')
-			.addDropdown((dropdown) => {
-				dropdown
-					.addOption('hold', 'Hold to snap')
-					.addOption('off', 'Off')
-					.setValue(this.plugin.settings.shapeRecognition)
-					.onChange((value) => {
-						this.plugin.settings.shapeRecognition = pick(value, ['off', 'hold'] as const, 'hold');
-						commit();
-					});
-			});
-
-		new Setting(containerEl).setName('Reading and editing').setHeading();
-
-		new Setting(containerEl)
-			.setName('Invert PDF pages')
-			.setDesc(
-				'Darken the PDF page itself. Off by default: the toolbar’s contrast button flips one document without changing this. Your ink keeps its real colours either way.',
-			)
-			.addDropdown((dropdown) => {
-				dropdown
-					.addOption('off', 'Never')
-					.addOption('follow-theme', 'Follow theme')
-					.addOption('on', 'Always')
-					.setValue(this.plugin.settings.darkInversion)
-					.onChange((value) => {
-						this.plugin.settings.darkInversion = pick(value, ['off', 'on', 'follow-theme'] as const, 'off');
-						commit();
-					});
-			});
-
-		new Setting(containerEl)
-			.setName('Start with the toolbar collapsed')
-			.setDesc('Useful on a phone, where the full tool strip covers a real slice of the page.')
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.toolbarStartsCollapsed).onChange((value) => {
-					this.plugin.settings.toolbarStartsCollapsed = value;
-					commit();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName('Ink block captions')
-			.setDesc(
-				'Adds a line under each ink block for a short description, so a page of handwriting reads as something in search results ' +
-					'and to a screen reader. A block that already has a caption always shows it, whether or not this is on.',
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.blockCaptions).onChange((value) => {
-					this.plugin.settings.blockCaptions = value;
-					commit();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName('Save frequency')
-			.setDesc(
-				'Automatic scales how often a PDF is written to its size, so a large textbook is not rewritten every few seconds. ' +
-					'Frequent saves every ten seconds whatever the size.',
-			)
-			.addDropdown((dropdown) => {
-				dropdown
-					.addOption('auto', 'Automatic')
-					.addOption('frequent', 'Frequent')
-					.setValue(this.plugin.settings.saveCadence)
-					.onChange((value) => {
-						this.plugin.settings.saveCadence = pick(value, ['auto', 'frequent'] as const, 'auto');
-						commit();
-					});
-			});
-
-		new Setting(containerEl).setName('Extracted notes').setHeading();
-
-		new Setting(containerEl)
-			.setName('Note path')
-			.setDesc('Where an extracted note goes. {folder} and {name} come from the PDF. Must contain {name}.')
-			.addText((text) =>
-				text
-					.setPlaceholder(defaultSettings().extractionNotePattern)
-					.setValue(this.plugin.settings.extractionNotePattern)
-					.onChange((value) => {
-						// Normalised on the way in rather than validated with a
-						// warning: a pattern with no {name} would put every
-						// book's annotations in one file, each run wiping the
-						// last, and that is not worth letting anyone save.
-						this.plugin.settings.extractionNotePattern = normalizeSettings({
-							...this.plugin.settings,
-							extractionNotePattern: value,
-						}).extractionNotePattern;
-						commit();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName('Colour categories')
-			.setDesc('What each colour means, for the pen and the highlighter alike. These become the headings in an extracted note.');
-
-		for (const { value, label } of ALL_PRESET_COLORS) {
-			const key = value.toLowerCase();
-			new Setting(containerEl)
-				.setName(label)
-				.addText((text) =>
-					text
-						.setPlaceholder(label)
-						.setValue(this.plugin.settings.colorLabels[key] ?? label)
-						.onChange((typed) => {
-							this.plugin.settings.colorLabels[key] = typed.trim() || label;
-							commit();
-						}),
-				);
-		}
+	// In place: the views, commands and ink blocks each hold a getter over
+	// this one object, so replacing it would leave them reading the old one.
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		Object.assign(this.plugin.settings, writeSetting(this.plugin.settings, key, value));
+		await this.plugin.saveSettings();
 	}
 }
