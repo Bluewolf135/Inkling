@@ -135,6 +135,12 @@ interface HeldBlock {
 	revision: number;
 }
 
+interface LastSave {
+	block: InkFileBlock;
+	revision: number;
+	merged: boolean;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -157,6 +163,13 @@ export class InkFileStore {
 	// The first write after the file is opened is read back and parsed. A file
 	// that was already wrong shows it there; after that, a size check is enough.
 	private verifyNextWrite = true;
+	// What each writer last saved of each block, at the revision that save
+	// made. A writer's next save may name an older base than that — it began
+	// while that save was still running, or that save was merged and the view
+	// could not show the result — and merging against the older base would
+	// read a stroke from that save the user has since erased as one added
+	// elsewhere, and put it back.
+	private readonly lastSaved = new WeakMap<object, Map<string, LastSave>>();
 
 	constructor(
 		readonly path: string,
@@ -322,8 +335,9 @@ export class InkFileStore {
 		else if (changed.size > 0) this.notify(changed, origin);
 	}
 
-	private async commit(id: string, data: InkFileBlock, base: BlockBase | null, writer: object | null): Promise<WriteOutcome> {
-		const creating = base === null;
+	private async commit(id: string, data: InkFileBlock, named: BlockBase | null, writer: object | null): Promise<WriteOutcome> {
+		const creating = named === null;
+		const base = named && writer ? this.catchUp(named, writer, id) : named;
 
 		for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
 			const status = this.current.kind;
@@ -436,12 +450,31 @@ export class InkFileStore {
 			this.lastText = text;
 			const revision = ++this.revisions;
 			this.held.set(id, { read: { kind: 'decoded', block: next }, json: JSON.stringify(raw), revision });
+			if (writer) {
+				let saved = this.lastSaved.get(writer);
+				if (!saved) {
+					saved = new Map<string, LastSave>();
+					this.lastSaved.set(writer, saved);
+				}
+				saved.set(id, { block: data, revision, merged });
+			}
 			this.current = { kind: 'readable' };
 			this.notify(status === 'readable' ? new Set([id]) : 'all', writer);
 			return { kind: 'written', block: next, revision, merged };
 		}
 
 		return refused('moved-on');
+	}
+
+	// The base a writer's save is really from. When the writer's own last
+	// save is newer than the base it names, that save is — what it sent was
+	// on the writer's screen. Sent, not what landed: a merged save's other
+	// side never reached the screen, so it is kept as a change from elsewhere,
+	// which the revision set apart from the file's makes sure is merged.
+	private catchUp(named: BlockBase, writer: object, id: string): BlockBase {
+		const saved = this.lastSaved.get(writer)?.get(id);
+		if (!saved || saved.revision <= named.revision) return named;
+		return { block: saved.block, revision: saved.merged ? -saved.revision : saved.revision };
 	}
 }
 

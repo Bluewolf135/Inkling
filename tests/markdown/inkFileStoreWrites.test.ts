@@ -165,6 +165,56 @@ describe('a save that lands after the file changed elsewhere', () => {
 	});
 });
 
+// A writer's next save can name a base older than its own last save: the
+// save was still running when the next began, or it was merged and the view
+// could not show the result. Everything that save wrote was on the writer's
+// screen, so a stroke of it missing now was erased there — not added
+// elsewhere.
+describe('a save from a writer whose last save it has not caught up with', () => {
+	it('honours an erasure made while the save before it was still running', async () => {
+		const { io, store } = await opened({ a: holding() });
+		const view = {};
+		const base = baseOf(store, 'a');
+		let second: Promise<unknown> = Promise.resolve();
+		// Started once the first has left the queue, so it is not collapsed into it.
+		io.beforeReplace = () => {
+			second = store.updateBlock('a', view, holding(), base);
+		};
+
+		await store.updateBlock('a', view, holding('erased'), base);
+		await second;
+
+		expect(await idsOnDisk(io, 'a')).toEqual([]);
+	});
+
+	it('honours an erasure of its own merged stroke, and keeps the other side', async () => {
+		const { io, store } = await opened({ a: holding() });
+		const view = {};
+		const base = baseOf(store, 'a');
+		io.files.set(PATH, await inkFileText({ a: holding('theirs') }));
+		const merged = await store.updateBlock('a', view, holding('erased'), base);
+		expect(merged).toMatchObject({ kind: 'written', merged: true });
+
+		// The view could not show the merged result, so it still names the old base.
+		await store.updateBlock('a', view, holding(), base);
+
+		expect(await idsOnDisk(io, 'a')).toEqual(['theirs']);
+	});
+
+	it('still merges a later change from elsewhere', async () => {
+		const { io, store } = await opened({ a: holding() });
+		const view = {};
+		const base = baseOf(store, 'a');
+		await store.updateBlock('a', view, holding('mine'), base);
+		const after = baseOf(store, 'a');
+		io.files.set(PATH, await inkFileText({ a: holding('mine', 'theirs') }));
+
+		await store.updateBlock('a', view, holding(), after);
+
+		expect(await idsOnDisk(io, 'a')).toEqual(['theirs']);
+	});
+});
+
 describe('refusing', () => {
 	it.each([
 		['from a newer version', '{"version":9,"blocks":{}}'],
