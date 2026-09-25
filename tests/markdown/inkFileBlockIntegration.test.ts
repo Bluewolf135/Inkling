@@ -243,6 +243,19 @@ describe('inserting a block', () => {
 		for (const id of ids) expect(await note.inkStrokeCount('Ink/Physics.ink', id)).toBe(0);
 	});
 
+	it('puts the block where the command was run, though the note changed while the file was written', async () => {
+		await note.runInsertCommand();
+		// Typed while the second block's drawing was being written to the file.
+		note.interceptInkWrites(() => {
+			note.setContents(`${note.contents()}Typed meanwhile.\n`);
+			note.interceptInkWrites(null);
+		});
+		await note.runInsertCommand();
+
+		const contents = note.contents();
+		expect(contents.lastIndexOf('```inkling')).toBeLessThan(contents.indexOf('Typed meanwhile.'));
+	});
+
 	it('inserts nothing when the ink file cannot be written', async () => {
 		note = mountNote({
 			path: 'Physics.md',

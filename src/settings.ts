@@ -4,7 +4,7 @@
 // makes it testable.
 import { ALL_PRESET_COLORS } from './annotate/types';
 import { isVaultPath } from './markdown/inkFence';
-import { INK_FILE_LOCATIONS, type InkFileLocation } from './markdown/inkFilePath';
+import { INK_FILE_LOCATIONS, trimFolder, type InkFileLocation } from './markdown/inkFilePath';
 import { TEMPLATE_STYLES, type PageSizeName, type TemplateStyle } from './templates';
 
 export type { PageSizeName };
@@ -116,7 +116,7 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 	// A folder in the vault, never a hidden one: the Vault API cannot see a
 	// dot-folder, and ink that silently stops syncing is the worst failure
 	// there is.
-	const rawFolder = typeof source.inkFileFolder === 'string' ? source.inkFileFolder.trim().replace(/^\/+/, '').replace(/\/+$/, '') : '';
+	const rawFolder = typeof source.inkFileFolder === 'string' ? trimFolder(source.inkFileFolder.trim()) : '';
 	const inkFileFolder = rawFolder && isVaultPath(rawFolder) ? rawFolder : defaults.inkFileFolder;
 
 	return {
@@ -179,6 +179,6 @@ export function writeSetting(settings: InklingSettings, key: string, value: unkn
 	const accepted =
 		kept === value ||
 		(typeof value === 'string' && kept === value.trim()) ||
-		(key === 'inkFileFolder' && typeof value === 'string' && kept === value.trim().replace(/^\/+/, '').replace(/\/+$/, ''));
+		(key === 'inkFileFolder' && typeof value === 'string' && kept === trimFolder(value.trim()));
 	return accepted ? candidate : settings;
 }

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Annotation } from '../../src/annotate/types';
 import { emptyFileBlock, type InkFileBlock } from '../../src/markdown/inkFile';
 import { InkFileStore, InkFileStores, type StoreChange } from '../../src/markdown/inkFileStore';
@@ -191,5 +192,47 @@ describe('sharing stores', () => {
 		stores.fileRenamed(PATH, 'Attachments/Renamed.ink');
 		await store.whenIdle();
 		expect(store.status()).toEqual({ kind: 'absent' });
+	});
+});
+
+// A read that throws is not the file saying anything: on a phone it is most
+// often a file still being fetched, or locked for a moment by sync.
+describe('a file that could not be read when opened', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	async function openedFailingOnce(): Promise<InkFileStore> {
+		vi.useFakeTimers();
+		const io = memoryInkFileIO({ [PATH]: await inkFileText({ a: holding('s1') }) });
+		const files = io.files;
+		let failures = 1;
+		io.read = async (path) => {
+			if (failures > 0) {
+				failures -= 1;
+				throw new Error('file is locked');
+			}
+			return files.get(path) ?? null;
+		};
+		const store = new InkFileStore(PATH, io);
+		await store.load();
+		return store;
+	}
+
+	it('is refused at first', async () => {
+		const store = await openedFailingOnce();
+		expect(store.status()).toEqual({ kind: 'damaged' });
+	});
+
+	it('is read again without waiting for the file to change', async () => {
+		const store = await openedFailingOnce();
+		const changes = record(store);
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await store.whenIdle();
+
+		expect(store.status()).toEqual({ kind: 'readable' });
+		expect(store.blockState('a').kind).toBe('decoded');
+		expect(changes).toContain('all');
 	});
 });

@@ -2,6 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountNote, type TestNote } from '../harness/note';
 import { INK_BLOCK_VERSION, parseInkBlock } from '../../src/markdown/inkBlockFormat';
+import { emptyFileBlock } from '../../src/markdown/inkFile';
+import { inkFenceMarkdown } from '../../src/markdown/inkFence';
+import { inkFileText } from '../harness/inkFileIO';
 
 // An ink block is invisible to a reader: a page of handwritten physics is,
 // to anyone not looking at it, a JSON blob. A caption is the one line that
@@ -145,5 +148,50 @@ describe('a caption that looks like markup', () => {
 
 		expect(captionText()).toBe('<b>not bold</b>');
 		expect(note.block(0).el.querySelector('b')).toBeNull();
+	});
+});
+
+// A block whose drawing is in an ink file is shown something again whenever
+// the file changes, so its caption has to keep up with what it is shown.
+describe('a caption in an ink file', () => {
+	const INK = 'Ink/Captions.ink';
+
+	async function openFileBlock(id: string, inkFiles: Record<string, string>): Promise<TestNote> {
+		const mounted = mountNote({
+			path: 'Captions.md',
+			contents: `# Notes\n\n${inkFenceMarkdown({ file: INK, id, extra: [] })}\n`,
+			openInEditor: true,
+			blockCaptions: true,
+			inkFiles,
+		});
+		await mounted.settle();
+		return mounted;
+	}
+
+	it('follows a caption changed on another device', async () => {
+		note = await openFileBlock('ink-cap-sync', { [INK]: await inkFileText({ 'ink-cap-sync': { ...emptyFileBlock(), caption: 'Before' } }) });
+		await note.syncInkFile(INK, await inkFileText({ 'ink-cap-sync': { ...emptyFileBlock(), caption: 'After' } }));
+
+		expect(captionInput()?.value).toBe('After');
+	});
+
+	it('does not write the old caption back when the field is left', async () => {
+		note = await openFileBlock('ink-cap-blur', { [INK]: await inkFileText({ 'ink-cap-blur': { ...emptyFileBlock(), caption: 'Before' } }) });
+		const after = await inkFileText({ 'ink-cap-blur': { ...emptyFileBlock(), caption: 'After' } });
+		await note.syncInkFile(INK, after);
+
+		captionInput()?.dispatchEvent(new Event('blur'));
+		await note.flushWrites();
+
+		expect(note.inkFile(INK)).toBe(after);
+	});
+
+	it('is offered once a block that started refused can be saved', async () => {
+		note = await openFileBlock('ink-cap-late', {});
+		expect(captionInput()).toBeNull();
+
+		await note.syncInkFile(INK, await inkFileText({ 'ink-cap-late': emptyFileBlock() }));
+
+		expect(captionInput()).not.toBeNull();
 	});
 });

@@ -324,6 +324,8 @@ class InkBlockView implements StorageHost {
 	// Until one succeeds, the screen is the only copy with it in, so nothing
 	// the storage shows may be put over it.
 	private holdingUnsaved = false;
+	// The caption line or field, whichever the block last built.
+	private captionEl: HTMLElement | null = null;
 	// Whether the file’s annotations have been handed to the store yet.
 	// Once they have, the store is the live truth and a remount must not
 	// overwrite it.
@@ -454,6 +456,7 @@ class InkBlockView implements StorageHost {
 		this.applyAspect();
 		// Resized elsewhere — another device, or a second view of this block.
 		this.fitSurface();
+		this.refreshCaption();
 		// Only if the store has already been given this block's annotations;
 		// otherwise the next mount seeds from the data set just above, which
 		// is the same answer one step later.
@@ -465,6 +468,7 @@ class InkBlockView implements StorageHost {
 		this.refusal = refusal;
 		this.bannerEl?.remove();
 		this.buildBanner(refusal);
+		this.refreshCaption();
 		// Told directly, not left to the toggle. The controller learns its
 		// read-only state inside setOpen, so a block whose tool strip is
 		// already open would keep taking ink until the next time someone
@@ -477,6 +481,7 @@ class InkBlockView implements StorageHost {
 		this.refusal = null;
 		this.bannerEl?.remove();
 		this.bannerEl = null;
+		this.refreshCaption();
 		// The mirror of refuse, and the reason that one is not enough on its
 		// own: a repaired block whose strip was already open looked editable
 		// and silently refused every stroke, because the controller was never
@@ -557,10 +562,12 @@ class InkBlockView implements StorageHost {
 			// exactly as untrusted as the stroke data beside it.
 			const caption = this.containerEl.createDiv({ cls: 'inkling-ink-block-caption', text });
 			if (this.resizeHandleEl) this.containerEl.insertBefore(caption, this.resizeHandleEl);
+			this.captionEl = caption;
 			return;
 		}
 
 		const input = this.containerEl.createEl('input', { cls: 'inkling-ink-block-caption-input' });
+		this.captionEl = input;
 		if (this.resizeHandleEl) this.containerEl.insertBefore(input, this.resizeHandleEl);
 		input.type = 'text';
 		input.value = this.data.caption ?? '';
@@ -574,6 +581,18 @@ class InkBlockView implements StorageHost {
 		input.addEventListener('keydown', (event) => {
 			if (event.key === 'Enter') input.blur();
 		});
+	}
+
+	// Built again from what the block now holds and whether it may now be
+	// saved. A field left showing an older caption would write it back the
+	// next time it was left. Not while someone is typing in it: their edit is
+	// newer than anything the storage could show.
+	private refreshCaption(): void {
+		if (!this.loaded) return;
+		if (this.captionEl && this.captionEl === this.containerEl.ownerDocument.activeElement) return;
+		this.captionEl?.remove();
+		this.captionEl = null;
+		this.buildCaption();
 	}
 
 	private commitCaption(value: string): void {
@@ -1105,6 +1124,11 @@ async function insertInkFileBlock(stores: InkFileStores, editor: Editor, path: s
 		return;
 	}
 	const id = createId();
+	// Where the command was run, taken before the file is written: typing or
+	// clicking elsewhere meanwhile moves the selection, and the block belongs
+	// where it was asked for.
+	const from = editor.getCursor('from');
+	const before = editor.getValue();
 	const store = stores.acquire(path);
 	try {
 		await store.load();
@@ -1115,7 +1139,17 @@ async function insertInkFileBlock(stores: InkFileStores, editor: Editor, path: s
 		}
 		// Trailing newline so the cursor ends up on a fresh line after the
 		// block rather than inside the fence.
-		editor.replaceSelection(`${inkFenceMarkdown({ file: path, id, extra: [] })}\n`);
+		const fence = `${inkFenceMarkdown({ file: path, id, extra: [] })}\n`;
+		if (editor.getValue() === before) {
+			editor.replaceSelection(fence);
+		} else {
+			// The note changed, so a selection that was there may not be now:
+			// inserted at its start rather than put over whatever is there.
+			// A start past a shortened note goes at its end.
+			const last = editor.lineCount() - 1;
+			const at = from.line > last ? { line: last, ch: editor.getLine(last).length } : { line: from.line, ch: Math.min(from.ch, editor.getLine(from.line).length) };
+			editor.replaceRange(fence, at);
+		}
 	} finally {
 		stores.release(path);
 	}

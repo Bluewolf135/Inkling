@@ -16,8 +16,14 @@ export function inkFileName(notePath: string): string {
 	return `${name.replace(/\.md$/i, '')}.${INK_FILE_EXTENSION}`;
 }
 
+// A folder as the vault names it: no leading or trailing slashes, which a
+// setting typed by hand often has.
+export function trimFolder(folder: string): string {
+	return folder.replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
 export function joinVaultPath(folder: string, name: string): string {
-	const trimmed = folder.replace(/^\/+/, '').replace(/\/+$/, '');
+	const trimmed = trimFolder(folder);
 	return trimmed ? `${trimmed}/${name}` : name;
 }
 

@@ -2,6 +2,7 @@ import { INK_BLOCK_VERSION, type InkBlockData } from './inkBlockFormat';
 import { decodeStrokes } from './inkFileCodec';
 import {
 	byteLength,
+	isRecord,
 	parseInkFile,
 	readInkFileBlock,
 	serializeInkFile,
@@ -87,6 +88,9 @@ export type WriteOutcome =
 // few in a row is not a race, it is something rewriting the file constantly,
 // and the drawing is safer held than chasing it.
 const MAX_WRITE_ATTEMPTS = 3;
+// A read that threw is tried again after 2s, then 4s, then 6s.
+const READ_RETRY_MS = 2000;
+const READ_RETRIES = 3;
 
 function refused(reason: WriteRefusal): WriteOutcome {
 	return { kind: 'refused', reason };
@@ -141,9 +145,6 @@ interface LastSave {
 	merged: boolean;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 export class InkFileStore {
 	private current: InkFileStatus = { kind: 'loading' };
@@ -169,7 +170,9 @@ export class InkFileStore {
 	// could not show the result — and merging against the older base would
 	// read a stroke from that save the user has since erased as one added
 	// elsewhere, and put it back.
-	private readonly lastSaved = new WeakMap<object, Map<string, LastSave>>();
+	// Reads in a row that threw, for spacing out the tries after them.
+	private failedReads = 0;
+	private readonly lastSaved =new WeakMap<object, Map<string, LastSave>>();
 
 	constructor(
 		readonly path: string,
@@ -270,8 +273,16 @@ export class InkFileStore {
 				this.current = { kind: 'damaged' };
 				this.notify('all', null);
 			}
+			// Tried again, a little later each time, while nothing better is
+			// known. Otherwise a file locked for a moment as it opened would
+			// refuse every block naming it until something happened to modify it.
+			if (this.current.kind === 'damaged' && this.failedReads < READ_RETRIES) {
+				this.failedReads += 1;
+				window.setTimeout(() => this.fileChanged(), READ_RETRY_MS * this.failedReads);
+			}
 			return;
 		}
+		this.failedReads = 0;
 		await this.adopt(text, null);
 	}
 

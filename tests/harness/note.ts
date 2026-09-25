@@ -299,7 +299,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		replaceRange: (
 			text: string,
 			from: { line: number; ch: number },
-			to: { line: number; ch: number },
+			to: { line: number; ch: number } = from,
 		) => {
 			const lines = contents.split('\n');
 			const offsetOf = (position: { line: number; ch: number }): number => {
@@ -319,6 +319,11 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 		},
 		replaceSelection: (text: string) => {
 			contents += text;
+		},
+		// Where replaceSelection writes: the end of the note.
+		getCursor: () => {
+			const lines = contents.split('\n');
+			return { line: lines.length - 1, ch: lines[lines.length - 1]?.length ?? 0 };
 		},
 	};
 
