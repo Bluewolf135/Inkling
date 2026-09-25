@@ -386,7 +386,18 @@ export class InkFileStore {
 				// The file is not what was last seen. A file gone bad refuses
 				// outright: there is nothing to merge into, and writing over it
 				// is exactly what repair (not a save) is for.
-				if (result.found !== null && parseInkFile(result.found).kind === 'damaged') return refused('not-writable');
+				//
+				// Recorded, not only refused. The store would otherwise still
+				// call the file readable, so every block naming it would retry
+				// forever without a word to the user. Taking the damaged text as
+				// the last seen means any later version of the file — even the
+				// one this store held before — is read again and lifts this.
+				if (result.found !== null && parseInkFile(result.found).kind === 'damaged') {
+					this.lastText = result.found;
+					this.current = { kind: 'damaged' };
+					this.notify('all', null);
+					return refused('not-writable');
+				}
 				await this.adopt(result.found, null);
 				continue;
 			}

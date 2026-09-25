@@ -189,6 +189,10 @@ export class InkFileStorage implements InkBlockStorage {
 				this.base = { block: state.block, revision: state.revision };
 			} else {
 				this.strokes = previous;
+				// The view has ink the file does not, and would not take the
+				// file's version over it. Saving now merges the two, where
+				// waiting could leave a held drawing waiting for good.
+				host.scheduleWrite();
 			}
 		}
 

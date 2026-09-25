@@ -107,6 +107,12 @@ export interface TestNote {
 	syncInkFile(path: string, text: string): Promise<void>;
 	/** Delete an ink file and announce it. */
 	deleteInkFile(path: string): Promise<void>;
+	/**
+	 * Runs at the start of every write to an ink file until cleared with null
+	 * — a sync landing mid-save when it changes the file, a failing disk when
+	 * it throws.
+	 */
+	interceptInkWrites(hook: ((path: string) => void) | null): void;
 	/** Stroke annotations in one block of an ink file, or -1 when it cannot be read. */
 	inkStrokeCount(path: string, id: string): Promise<number>;
 	/** Saves that went into the editor while it was in reading view. */
@@ -193,6 +199,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 	let getLineCalls = 0;
 	const file = new TFile(path);
 	const inkFiles = new Map(Object.entries(options.inkFiles ?? {}));
+	let inkWriteHook: ((path: string) => void) | null = null;
 
 	// Vault events, only as far as anything under test listens to them.
 	// A block that could not be read watches for its own note changing, so
@@ -231,6 +238,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 				contents = fn(contents);
 				return contents;
 			}
+			inkWriteHook?.(target.path);
 			const current = inkFiles.get(target.path);
 			if (current === undefined) throw new Error(`no such file: ${target.path}`);
 			const next = fn(current);
@@ -453,6 +461,9 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 			inkFiles.delete(inkPath);
 			fire('delete', new TFile(inkPath));
 			await settle();
+		},
+		interceptInkWrites: (hook) => {
+			inkWriteHook = hook;
 		},
 		inkStrokeCount: async (inkPath, id) => {
 			const read = parseInkFile(inkFiles.get(inkPath) ?? '');

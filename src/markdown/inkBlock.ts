@@ -317,6 +317,13 @@ class InkBlockView implements StorageHost {
 	// cannot leave a callback pointing at a torn-down block.
 	private watchHandle: number | null = null;
 	private mounted = false;
+	// The canvases' backing size while mounted, so a block whose data changes
+	// size underneath it can tell its surface no longer matches.
+	private mountedSize: { width: number; height: number } | null = null;
+	// Ink on screen that a save was refused, failed, or is waiting to retry.
+	// Until one succeeds, the screen is the only copy with it in, so nothing
+	// the storage shows may be put over it.
+	private holdingUnsaved = false;
 	// Whether the file’s annotations have been handed to the store yet.
 	// Once they have, the store is the live truth and a remount must not
 	// overwrite it.
@@ -425,6 +432,9 @@ class InkBlockView implements StorageHost {
 			const rescued = unsavedInk.get(this.storage.rescuePath, this.blockId, this.storage.rescueSource());
 			this.data = rescued ? { ...rescued, id: this.blockId } : { ...data, id: this.blockId };
 			this.applyAspect();
+			// A block scrolled into view before its storage answered mounted at
+			// the default size, and the seed below does not re-back a canvas.
+			this.fitSurface();
 			// After any refusal the block starts with, which decides whether a
 			// caption may be written: a block that must never be saved over must
 			// not offer a field whose only purpose is to save something over it.
@@ -442,6 +452,8 @@ class InkBlockView implements StorageHost {
 		if (this.hasUnsavedWork()) return false;
 		this.data = { ...data, id: this.blockId };
 		this.applyAspect();
+		// Resized elsewhere — another device, or a second view of this block.
+		this.fitSurface();
 		// Only if the store has already been given this block's annotations;
 		// otherwise the next mount seeds from the data set just above, which
 		// is the same answer one step later.
@@ -477,7 +489,7 @@ class InkBlockView implements StorageHost {
 	}
 
 	hasUnsavedWork(): boolean {
-		return this.writeHandle !== null || this.writing || this.controller.isGestureActive();
+		return this.writeHandle !== null || this.writing || this.holdingUnsaved || this.controller.isGestureActive();
 	}
 
 	isDetached(): boolean {
@@ -496,6 +508,33 @@ class InkBlockView implements StorageHost {
 
 	private applyAspect(): void {
 		this.surfaceEl.setCssProps({ '--inkling-block-aspect': `${this.data.width} / ${this.data.height}` });
+	}
+
+	// Re-backs a mounted surface at the size this.data now gives the block,
+	// when that is not the size it was mounted at. Whatever the page holds is
+	// carried across in stored units; a caller about to seed replaces it anyway.
+	private fitSurface(): void {
+		if (!this.mounted) return;
+		// A surface not laid out yet measures zero wide, and surfaceScale reads
+		// that as 1 — a soft canvas. The scale it mounted at stays until it
+		// can be measured.
+		const scale = this.surfaceEl.clientWidth ? surfaceScale(this.surfaceEl, this.data.width) : this.scale;
+		const width = this.data.width * scale;
+		const height = this.data.height * scale;
+		if (this.mountedSize?.width === width && this.mountedSize.height === height) return;
+
+		const factor = scale / this.scale;
+		const annotations = this.controller.getPageAnnotations(BLOCK_PAGE);
+		this.controller.resizePage(
+			BLOCK_PAGE,
+			width,
+			height,
+			factor === 1 ? annotations : annotations.map((a) => scaleAnnotationUniform(a, factor)),
+		);
+		if (factor !== 1) this.retained.history.clear();
+		this.scale = scale;
+		this.retained.scale = scale;
+		this.mountedSize = { width, height };
 	}
 
 	private seed(): void {
@@ -669,6 +708,7 @@ class InkBlockView implements StorageHost {
 			clamped * this.scale,
 			this.controller.getPageAnnotations(BLOCK_PAGE),
 		);
+		if (this.mounted) this.mountedSize = { width: this.data.width * this.scale, height: clamped * this.scale };
 	}
 
 	// Shows or hides the resize handle along with the tool strip.
@@ -857,6 +897,7 @@ class InkBlockView implements StorageHost {
 		const height = this.data.height * this.scale;
 
 		this.controller.mountPage(BLOCK_PAGE, this.contentEl, width, height);
+		this.mountedSize = { width, height };
 
 		if (!this.seeded) {
 			// Only ever on the first mount, and only once the storage has shown
@@ -892,6 +933,7 @@ class InkBlockView implements StorageHost {
 		// much, so the next callback picks it up.
 		if (this.controller.isGestureActive()) return;
 		this.mounted = false;
+		this.mountedSize = null;
 		// The store keeps this page’s annotations, so remounting redraws them
 		// without touching the file.
 		this.controller.unmountPage(BLOCK_PAGE);
@@ -917,6 +959,7 @@ class InkBlockView implements StorageHost {
 			}
 			unsavedInk.hold(this.storage.rescuePath, this.blockId, this.data, this.storage.rescueSource());
 			unsavedInk.persist(this.storage.rescuePath, this.blockId);
+			this.holdingUnsaved = true;
 			this.storage.heldWhileRefused?.();
 			return;
 		}
@@ -952,25 +995,31 @@ class InkBlockView implements StorageHost {
 		} finally {
 			this.writing = false;
 		}
-		this.storage.afterWrite?.();
 
+		// Before afterWrite, which may show the storage's version of the block:
+		// a save that did not land must already count as unsaved work by then,
+		// or that version goes on screen over the ink the save was for.
 		switch (result.kind) {
 			case 'saved':
+				this.holdingUnsaved = false;
 				unsavedInk.forget(this.storage.rescuePath, this.blockId);
-				return;
+				break;
 			case 'retry':
 				// Written out before the retry rather than after the last one.
 				// Retries usually resolve within a few seconds, but those are
 				// seconds in which the only copy is in memory, and a crash is
 				// exactly the event this exists for.
+				this.holdingUnsaved = true;
 				unsavedInk.persist(this.storage.rescuePath, this.blockId);
 				if (this.writeHandle !== null) window.clearTimeout(this.writeHandle);
 				this.writeHandle = window.setTimeout(() => void this.write(), result.afterMs);
-				return;
+				break;
 			case 'held':
+				this.holdingUnsaved = true;
 				unsavedInk.persist(this.storage.rescuePath, this.blockId);
-				return;
+				break;
 		}
+		this.storage.afterWrite?.();
 	}
 
 	// Stored units to surface units and back. The only two places the two
