@@ -1,4 +1,6 @@
-import { FileView, ItemView, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
+import annotationWriterWorkerSource from 'inline-worker:annotation-writer';
+import pdfWorkerSource from 'inline-worker:pdf';
+import { FileView, ItemView, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
 import { ToolState } from './annotate';
 import { collectAnnotations } from './extract/extract';
@@ -38,6 +40,8 @@ export default class InklingPlugin extends Plugin {
 	// The action buttons added to core PDF views, kept so onunload can take
 	// them back off again.
 	private readonly actions: HTMLElement[] = [];
+	// The blob: URL pdf.js starts its worker from, revoked at unload.
+	private pdfWorkerUrl: string | null = null;
 	// The selected tool, its color and its width, held once for the whole
 	// plugin rather than per drawing surface. A Markdown ink block's
 	// controller is destroyed and rebuilt every time the block saves — which
@@ -281,6 +285,8 @@ export default class InklingPlugin extends Plugin {
 		// toolbar of every open PDF with nothing behind them.
 		for (const action of this.actions) action.remove();
 		this.actions.length = 0;
+		if (this.pdfWorkerUrl) URL.revokeObjectURL(this.pdfWorkerUrl);
+		this.pdfWorkerUrl = null;
 	}
 
 	private decorateIfCorePdfLeaf(leaf: WorkspaceLeaf | null): void {
@@ -311,30 +317,20 @@ export default class InklingPlugin extends Plugin {
 		await leaf.setViewState({ type: VIEW_TYPE_PDF, state: { file: file.path } }, page === null ? undefined : { page });
 	}
 
+	// Both workers are embedded in main.js (see esbuild.config.mjs for why),
+	// so pdf.js gets a same-origin blob: URL of the worker's source. Should a
+	// module worker still fail to start, pdf.js imports the same URL on the
+	// main thread instead, which is slower but still opens the book.
 	private configurePdfWorker() {
-		const pluginDir = this.manifest.dir;
-		if (!pluginDir) {
-			throw new Error('Inkling: could not resolve plugin directory for pdf.worker.js');
-		}
-		const workerPath = normalizePath(`${pluginDir}/pdf.worker.js`);
-		GlobalWorkerOptions.workerSrc = this.app.vault.adapter.getResourcePath(workerPath);
+		this.pdfWorkerUrl = URL.createObjectURL(new Blob([pdfWorkerSource], { type: 'text/javascript' }));
+		GlobalWorkerOptions.workerSrc = this.pdfWorkerUrl;
 	}
 
 	// See src/pdf/annotationWriter.worker.ts — runs pdf-lib's parse/mutate/
 	// save off the main thread so saving a heavily-annotated PDF can't stall
-	// pointer input while the user is actively writing.
-	//
-	// Hands over a reader for the bundle's *source*, not a resource path:
-	// the client builds the worker from a same-origin blob, because a Worker
-	// constructed from a plugin resource URL is cross-origin to the main
-	// window in desktop Obsidian and fails there (see its comment). Lazy, so
-	// only a session that actually annotates pays for reading it.
+	// pointer input while the user is actively writing. The client builds
+	// the worker from a same-origin blob of this source (see its comment).
 	private configureAnnotationWriterWorker() {
-		const pluginDir = this.manifest.dir;
-		if (!pluginDir) {
-			throw new Error('Inkling: could not resolve plugin directory for annotation-writer.worker.js');
-		}
-		const workerPath = normalizePath(`${pluginDir}/annotation-writer.worker.js`);
-		setAnnotationWriterWorkerSourceProvider(() => this.app.vault.adapter.read(workerPath));
+		setAnnotationWriterWorkerSourceProvider(() => Promise.resolve(annotationWriterWorkerSource));
 	}
 }

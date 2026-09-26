@@ -11,8 +11,9 @@ import {
 } from './annotationWriterCore';
 import type { WorkerResponseMessage } from './annotationWriterProtocol';
 
-// Reads annotationWriter.worker.ts's bundled output as source text (see
-// main.ts's configureAnnotationWriterWorker). Deliberately the source, not a
+// Supplies annotationWriter.worker.ts's bundled output as source text, which
+// main.js carries embedded (see main.ts's configureAnnotationWriterWorker and
+// esbuild.config.mjs). Deliberately the source, not a
 // URL: desktop Obsidian serves plugin files from a per-vault origin
 // (`app://<vaultId>`) distinct from the main window's (`app://obsidian.md`),
 // and constructing a Worker from a script on that other origin throws
@@ -22,9 +23,9 @@ import type { WorkerResponseMessage } from './annotationWriterProtocol';
 // code itself sidesteps the cross-origin question entirely, with no
 // dynamic import of a foreign URL involved either.
 //
-// A provider rather than the text itself so the (sizable) bundle is only
-// ever read for someone who actually annotates something, not at plugin
-// load; cached below after the first read. A module singleton because
+// A provider rather than the text itself so tests can hand in their own, and
+// so nothing is turned into a blob until someone actually annotates
+// something; cached below after the first call. A module singleton because
 // PdfAnnotateView, which needs this, has no handle on the Plugin instance
 // to resolve it itself.
 let sourceProvider: (() => Promise<string>) | null = null;

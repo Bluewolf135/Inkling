@@ -11,8 +11,6 @@ node_modules
 # Don't include compiled build output in the repo.
 # They should be uploaded to GitHub releases instead.
 main.js
-pdf.worker.js
-annotation-writer.worker.js
 
 # Exclude sourcemaps
 *.map

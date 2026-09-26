@@ -10,6 +10,58 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === 'production';
 
+// Both workers ship inside main.js, as source text. Obsidian's community
+// catalogue and BRAT install exactly three files from a release — main.js,
+// manifest.json and styles.css — so a worker shipped as its own file never
+// reaches anyone who installs that way, and the PDF view has nothing to run.
+// The main thread starts each worker from a same-origin blob of that text
+// (see main.ts), which is also what desktop needs regardless: a Worker built
+// from a plugin resource URL is cross-origin to the main window there.
+//
+// `import source from 'inline-worker:<name>'` bundles the named entry on its
+// own and hands back its output as a string. Its inputs are reported as
+// watch files, so `npm run dev` rebuilds main.js when a worker changes.
+const INLINE_WORKERS = {
+	// The pdf.js worker, run as a module Worker: bundled ESM.
+	pdf: { entryPoint: 'node_modules/pdfjs-dist/build/pdf.worker.mjs', format: 'esm' },
+	// pdf-lib's parse/mutate/save, off the main thread — see
+	// src/pdf/annotationWriter.worker.ts for why. A classic script (iife):
+	// blob-sourced code has no module URL to resolve imports against, and
+	// bundling has already inlined everything, pdf-lib included.
+	'annotation-writer': { entryPoint: 'src/pdf/annotationWriter.worker.ts', format: 'iife' },
+};
+
+const inlineWorkers = {
+	name: 'inline-workers',
+	setup(build) {
+		build.onResolve({ filter: /^inline-worker:/ }, (args) => ({
+			path: args.path.slice('inline-worker:'.length),
+			namespace: 'inline-worker',
+		}));
+		build.onLoad({ filter: /.*/, namespace: 'inline-worker' }, async (args) => {
+			const worker = INLINE_WORKERS[args.path];
+			if (!worker) return { errors: [{ text: `Unknown inline worker "${args.path}"` }] };
+			const result = await esbuild.build({
+				entryPoints: [worker.entryPoint],
+				bundle: true,
+				format: worker.format,
+				target: 'es2021',
+				logLevel: 'silent',
+				sourcemap: prod ? false : 'inline',
+				treeShaking: true,
+				minify: prod,
+				write: false,
+				metafile: true,
+			});
+			return {
+				contents: result.outputFiles[0].text,
+				loader: 'text',
+				watchFiles: Object.keys(result.metafile.inputs),
+			};
+		});
+	},
+};
+
 const context = await esbuild.context({
 	banner: {
 		js: banner,
@@ -39,56 +91,12 @@ const context = await esbuild.context({
 	treeShaking: true,
 	outfile: 'main.js',
 	minify: prod,
-});
-
-// The pdf.js worker runs off-thread as a module Worker (loaded locally via
-// DataAdapter.getResourcePath, never from a CDN — see hard requirements).
-// It needs its own build: bundled ESM output, separate from main.js's cjs.
-const workerContext = await esbuild.context({
-	entryPoints: ['node_modules/pdfjs-dist/build/pdf.worker.mjs'],
-	bundle: true,
-	format: 'esm',
-	target: 'es2021',
-	logLevel: 'info',
-	sourcemap: prod ? false : 'inline',
-	treeShaking: true,
-	outfile: 'pdf.worker.js',
-	minify: prod,
-});
-
-// The annotation-writer worker (pdf-lib's parse/mutate/save, off the main
-// thread — see src/pdf/annotationWriter.worker.ts for why).
-//
-// Built as a classic script (iife), not an ES module, and read as source
-// text rather than loaded by URL: desktop Obsidian serves each vault's
-// resource paths from their own origin (`app://<vaultId>`), distinct from
-// the main window's (`app://obsidian.md`), and a Worker constructed from a
-// script on that other origin throws SecurityError outright — confirmed on
-// a real device, for a classic worker just as much as a module one, so it
-// isn't a module-only restriction to dodge by changing format. The client
-// builds the worker from a same-origin blob of this file's own source
-// instead (see annotationWriterClient.ts). Blob-sourced code has no module
-// URL to resolve imports against, and bundle:true has already inlined
-// everything (pdf-lib included), so nothing here needs module semantics.
-const annotationWriterWorkerContext = await esbuild.context({
-	entryPoints: ['src/pdf/annotationWriter.worker.ts'],
-	bundle: true,
-	format: 'iife',
-	target: 'es2021',
-	logLevel: 'info',
-	sourcemap: prod ? false : 'inline',
-	treeShaking: true,
-	outfile: 'annotation-writer.worker.js',
-	minify: prod,
+	plugins: [inlineWorkers],
 });
 
 if (prod) {
 	await context.rebuild();
-	await workerContext.rebuild();
-	await annotationWriterWorkerContext.rebuild();
 	process.exit(0);
 } else {
 	await context.watch();
-	await workerContext.watch();
-	await annotationWriterWorkerContext.watch();
 }

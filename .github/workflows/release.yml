@@ -36,4 +36,4 @@ jobs:
             --draft \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            main.js manifest.json styles.css pdf.worker.js annotation-writer.worker.js
+            main.js manifest.json styles.css
