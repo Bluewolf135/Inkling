@@ -46,7 +46,10 @@ straight into it, adding pages as you fill them.
 
 **Ink blocks in Markdown.** A ```` ```inkling ```` block is a drawing
 surface inside an ordinary note, for a diagram in the middle of a page of
-typing.
+typing. "Insert ink annotation block" leaves a three-line fence in the note
+and keeps the strokes in an `.ink` file beside your other attachments, one
+per note, so the note stays readable and small. Where those files go is a
+setting.
 
 **Getting around.** Outline, page jump, find-in-document, per-page zoom
 (pinch, Ctrl+wheel, or the toolbar), a collapsible toolbar, and dark-mode
@@ -79,9 +82,8 @@ Not in the community catalogue yet. Install with
 2. **Add Beta Plugin**, and give it this repository.
 3. Enable **Inkling** in Community Plugins.
 
-Or manually: download `main.js`, `manifest.json`, `styles.css`,
-`pdf.worker.js` and `annotation-writer.worker.js` from a release into
-`<vault>/.obsidian/plugins/inkling/`.
+Or manually: download `main.js`, `manifest.json` and `styles.css` from a
+release into `<vault>/.obsidian/plugins/inkling/`.
 
 ## Mobile and stylus
 
@@ -115,9 +117,15 @@ the document it came from before a byte is written.
 **Extraction is one-directional.** Editing an extracted note does not
 change the PDF.
 
-**Ink blocks are kept working, not grown.** They render only inside
-Obsidian, so a note holding one is less portable than one holding an image.
-The PDF side is where the work goes.
+**Ink blocks render only inside Obsidian**, so a note holding one is less
+portable than one holding an image.
+
+**Renaming or moving an `.ink` file breaks its blocks, for now.** The fence
+names the file by path, and nothing rewrites it yet, so the blocks show a
+read-only "missing" banner and never save over anything. Move the file
+back and they return. Renaming or moving the *note* is fine. Blocks made
+by earlier versions, with their strokes inside the note, keep working
+exactly as they did.
 
 ## Development
 
