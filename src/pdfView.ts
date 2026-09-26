@@ -354,6 +354,9 @@ export class PdfAnnotateView extends FileView {
 	// is a property of the document, and retrying forever just means a
 	// notice every interval for as long as the book stays open.
 	private consecutiveWriteFailures = 0;
+	// The save in flight, and the one queued behind it. See flushAnnotations.
+	private saving: Promise<void> | null = null;
+	private saveAgain: Promise<void> | null = null;
 	// The outline/find panel and its outline area, held so teardown can
 	// drop them and so a find can write into them from a walk that
 	// outlives the keystroke that started it.
@@ -1298,10 +1301,21 @@ export class PdfAnnotateView extends FileView {
 			window.clearTimeout(this.maxWaitHandle);
 			this.maxWaitHandle = null;
 		}
-		if (file && this.dirtyPages.size > 0) await this.flushAnnotations(file);
+		// A save still in flight counts even with nothing new behind it: the
+		// callers go on to read the file or terminate the writer.
+		if (file && (this.dirtyPages.size > 0 || this.saving)) await this.flushAnnotations(file);
 	}
 
-	private async flushAnnotations(file: TFile): Promise<void> {
+	// One save at a time. Each save is built against what the writer believes
+	// is on disk and advances that belief only once its write has landed, so a
+	// second save started while the first is in flight is built on a base that
+	// is about to be wrong: an append at a stale offset, a commit that folds
+	// the wrong bytes into the session, or two full rewrites landing in the
+	// wrong order with the older one last. On a tablet a large book's save
+	// takes seconds, so a stroke drawn straight after another did exactly
+	// that. A save asked for mid-flight runs once the current one settles,
+	// and however many ask, one follow-up carries everything dirtied meanwhile.
+	private flushAnnotations(file: TFile): Promise<void> {
 		if (this.writeDebounceHandle !== null) {
 			window.clearTimeout(this.writeDebounceHandle);
 			this.writeDebounceHandle = null;
@@ -1310,6 +1324,21 @@ export class PdfAnnotateView extends FileView {
 			window.clearTimeout(this.maxWaitHandle);
 			this.maxWaitHandle = null;
 		}
+		if (this.saving) {
+			this.saveAgain ??= this.saving.then(() => {
+				this.saveAgain = null;
+				return this.flushAnnotations(file);
+			});
+			return this.saveAgain;
+		}
+		const saving = this.saveDirtyPages(file).finally(() => {
+			if (this.saving === saving) this.saving = null;
+		});
+		this.saving = saving;
+		return saving;
+	}
+
+	private async saveDirtyPages(file: TFile): Promise<void> {
 		if (this.dirtyPages.size === 0 || !this.writer) return;
 
 		const pageNumbers = [...this.dirtyPages];

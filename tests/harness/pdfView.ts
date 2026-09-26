@@ -37,12 +37,15 @@ export function fakeViewport(scale: number) {
 	};
 }
 
-export function openPdfView(options: { toolState?: ToolState } = {}) {
+export function openPdfView(options: { toolState?: ToolState; writeDone?: () => Promise<void> } = {}) {
 	const writes: WrittenPage[][] = [];
 	let terminated = false;
 	const writer = {
 		write: vi.fn(async (pages: WrittenPage[]) => {
 			writes.push(pages.map((p) => ({ pageNumber: p.pageNumber, annotations: structuredClone(p.annotations) })));
+			// A save that takes as long as the test says, the way one of a
+			// large book does on a tablet.
+			await options.writeDone?.();
 			return { mode: 'rewrite', bytes: pdfBytes() };
 		}),
 		commit: vi.fn(async () => {}),
