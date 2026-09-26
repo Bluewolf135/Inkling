@@ -1107,7 +1107,7 @@ class InkBlockChild extends MarkdownRenderChild {
 export interface InkBlockOptions {
 	captionsEnabled: () => boolean;
 	/** Where a new block's ink file goes, for a note at this path. */
-	inkFilePathFor: (notePath: string) => string;
+	inkFilePathFor: (notePath: string) => Promise<string>;
 }
 
 // The block is created in the ink file before its fence goes into the note.
@@ -1118,17 +1118,24 @@ export interface InkBlockOptions {
 // may yet arrive. Creating the entry first is what lets that rule be absolute:
 // a block this command inserted is never mistaken for one that is missing.
 // An empty block costs about forty bytes.
-async function insertInkFileBlock(stores: InkFileStores, editor: Editor, path: string): Promise<void> {
+async function insertInkFileBlock(stores: InkFileStores, editor: Editor, resolvePath: () => Promise<string>): Promise<void> {
+	// Where the command was run, taken before anything is awaited: typing or
+	// clicking elsewhere meanwhile moves the selection, and the block belongs
+	// where it was asked for.
+	const from = editor.getCursor('from');
+	const before = editor.getValue();
+	let path: string;
+	try {
+		path = await resolvePath();
+	} catch {
+		new Notice('Inkling: could not work out where this note’s ink file goes, so no ink block was inserted.');
+		return;
+	}
 	if (!isVaultPath(path)) {
 		new Notice(`Inkling: ${path} is not a place in the vault an ink file can go, so no ink block was inserted. Check where new ink files go in settings.`);
 		return;
 	}
 	const id = createId();
-	// Where the command was run, taken before the file is written: typing or
-	// clicking elsewhere meanwhile moves the selection, and the block belongs
-	// where it was asked for.
-	const from = editor.getCursor('from');
-	const before = editor.getValue();
 	const store = stores.acquire(path);
 	try {
 		await store.load();
@@ -1198,7 +1205,7 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, options: 
 				new Notice('Inkling: this note has no file yet, so there is nowhere to name its ink file.');
 				return;
 			}
-			void insertInkFileBlock(stores, editor, options.inkFilePathFor(notePath));
+			void insertInkFileBlock(stores, editor, () => options.inkFilePathFor(notePath));
 		},
 	});
 

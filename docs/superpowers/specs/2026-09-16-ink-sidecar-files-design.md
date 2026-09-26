@@ -1,6 +1,17 @@
 # Ink outside the note — design
 
-Status: design, not approved for implementation
+Status: approved; phase 1 implemented (docs/superpowers/plans/2026-09-17-ink-sidecar-files.md). Phases 2–4 not started.
+
+Verified in the running app, 2026-09-26, on a copy of the Newton note:
+inserting writes a three-line fence and creates the block in the ink file;
+a second block in the same note joins the same file; drawing changes the
+ink file and leaves the note's bytes identical; desktop compresses (no
+`codec` key). One thing the design did not know: `getNewFileParent` does
+**not** answer with the attachment folder for a non-note file name — it
+answered with the new-note folder (the vault root), so the first ink file
+landed there. New files now take the folder of
+`fileManager.getAvailablePathForAttachment` instead, keeping the note's
+own file name because that call numbers a name that already exists.
 Date: 2026-09-16
 
 Moves a Markdown ink block's strokes out of the note and into a file of
@@ -206,7 +217,7 @@ is written as soon as the file is writable again.
 ## Where new files go
 
 A setting, defaulting to **follow Obsidian's attachment location** via
-`fileManager.getNewFileParent`, so ink lands wherever the user's images
+the folder of `fileManager.getAvailablePathForAttachment`, so ink lands wherever the user's images
 already do without configuring anything. Alternatives: beside the note,
 or a named folder.
 

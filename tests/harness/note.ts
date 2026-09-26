@@ -351,7 +351,7 @@ export function mountNote(options: MountNoteOptions = {}): TestNote {
 	toolState.setTool(options.tool ?? 'pen');
 	const registration = registerInkBlock(plugin as unknown as Plugin, toolState, {
 		captionsEnabled: () => options.blockCaptions ?? false,
-		inkFilePathFor: options.inkFilePathFor ?? ((notePath) => `Ink/${inkFileName(notePath)}`),
+		inkFilePathFor: (notePath) => Promise.resolve(options.inkFilePathFor ? options.inkFilePathFor(notePath) : `Ink/${inkFileName(notePath)}`),
 	});
 	// Read back through a closure. The only assignment TypeScript can see in
 	// straight-line code is the `null` above — the one that matters happens

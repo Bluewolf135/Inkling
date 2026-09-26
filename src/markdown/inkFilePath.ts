@@ -33,16 +33,20 @@ function parentOf(path: string): string {
 }
 
 /**
- * `attachmentFolderFor` is Obsidian's `fileManager.getNewFileParent(notePath,
- * fileName).path`, which answers with the attachment folder when given a
- * file name that is not a note.
+ * `attachmentPathFor` is Obsidian's
+ * `fileManager.getAvailablePathForAttachment(fileName, notePath)`. Only the
+ * folder of its answer is used: it answers with a free name, which is
+ * "Forces 1.ink" once the note's ink file exists, and a second block in the
+ * same note belongs in the same file. (`getNewFileParent` is not a
+ * substitute — checked in the running app, it answers with the new-note
+ * folder whatever the file name.)
  */
-export function inkFilePathFor(
+export async function inkFilePathFor(
 	notePath: string,
 	location: InkFileLocation,
 	folder: string,
-	attachmentFolderFor: (notePath: string, fileName: string) => string,
-): string {
+	attachmentPathFor: (fileName: string, notePath: string) => Promise<string>,
+): Promise<string> {
 	const name = inkFileName(notePath);
 	switch (location) {
 		case 'beside-note':
@@ -50,6 +54,6 @@ export function inkFilePathFor(
 		case 'folder':
 			return joinVaultPath(folder, name);
 		case 'attachments':
-			return joinVaultPath(attachmentFolderFor(notePath, name), name);
+			return joinVaultPath(parentOf(await attachmentPathFor(name, notePath)), name);
 	}
 }

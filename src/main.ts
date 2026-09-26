@@ -72,7 +72,7 @@ export default class InklingPlugin extends Plugin {
 					notePath,
 					this.settings.inkFileLocation,
 					this.settings.inkFileFolder,
-					(source, name) => this.app.fileManager.getNewFileParent(source, name).path,
+					(name, source) => this.app.fileManager.getAvailablePathForAttachment(name, source),
 				),
 		});
 

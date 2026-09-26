@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { inkFileName, inkFilePathFor, joinVaultPath } from '../../src/markdown/inkFilePath';
 
-const attachments = (folder: string) => () => folder;
+// Stands in for Obsidian's fileManager.getAvailablePathForAttachment: the
+// full path an attachment of that name would be saved at.
+const attachments = (folder: string) => (name: string) => Promise.resolve(joinVaultPath(folder, name));
 
 describe('naming an ink file', () => {
 	it('takes the note’s name', () => {
@@ -25,29 +27,41 @@ describe('joining a folder and a name', () => {
 });
 
 describe('where a new ink file goes', () => {
-	it('follows the attachment folder by default', () => {
-		expect(inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', attachments('Attachments'))).toBe('Attachments/Forces.ink');
+	it('follows the attachment folder by default', async () => {
+		expect(await inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', attachments('Attachments'))).toBe('Attachments/Forces.ink');
 	});
 
-	it('asks for the attachment folder with the note and the ink file’s name', () => {
+	it('asks for the attachment path with the ink file’s name and the note', async () => {
 		const asked: Array<[string, string]> = [];
-		inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', (note, name) => {
-			asked.push([note, name]);
-			return '/';
+		await inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', (name, note) => {
+			asked.push([name, note]);
+			return Promise.resolve(name);
 		});
-		expect(asked).toEqual([['Physics/Forces.md', 'Forces.ink']]);
+		expect(asked).toEqual([['Forces.ink', 'Physics/Forces.md']]);
 	});
 
-	it('handles an attachment folder at the vault root', () => {
-		expect(inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', attachments('/'))).toBe('Forces.ink');
+	// Obsidian answers with a free name, so once a note's ink file exists
+	// the answer is "Forces 1.ink". Only its folder is taken: a second block
+	// in the same note belongs in the same file.
+	it('keeps the note’s ink file name when the attachment path is numbered', async () => {
+		const numbered = () => Promise.resolve('Attachments/Forces 1.ink');
+		expect(await inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', numbered)).toBe('Attachments/Forces.ink');
 	});
 
-	it('can go beside the note', () => {
-		expect(inkFilePathFor('Physics/Forces.md', 'beside-note', 'Ink', attachments('Attachments'))).toBe('Physics/Forces.ink');
-		expect(inkFilePathFor('Forces.md', 'beside-note', 'Ink', attachments('Attachments'))).toBe('Forces.ink');
+	it('handles an attachment folder at the vault root', async () => {
+		expect(await inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', attachments('/'))).toBe('Forces.ink');
 	});
 
-	it('can go in a named folder', () => {
-		expect(inkFilePathFor('Physics/Forces.md', 'folder', 'Ink/Blocks', attachments('Attachments'))).toBe('Ink/Blocks/Forces.ink');
+	it('handles an attachment folder beside the note', async () => {
+		expect(await inkFilePathFor('Physics/Forces.md', 'attachments', 'Ink', attachments('Physics/assets'))).toBe('Physics/assets/Forces.ink');
+	});
+
+	it('can go beside the note', async () => {
+		expect(await inkFilePathFor('Physics/Forces.md', 'beside-note', 'Ink', attachments('Attachments'))).toBe('Physics/Forces.ink');
+		expect(await inkFilePathFor('Forces.md', 'beside-note', 'Ink', attachments('Attachments'))).toBe('Forces.ink');
+	});
+
+	it('can go in a named folder', async () => {
+		expect(await inkFilePathFor('Physics/Forces.md', 'folder', 'Ink/Blocks', attachments('Attachments'))).toBe('Ink/Blocks/Forces.ink');
 	});
 });
