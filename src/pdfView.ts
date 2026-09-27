@@ -702,7 +702,7 @@ export class PdfAnnotateView extends FileView {
 
 		let pdf: PDFDocumentProxy;
 		try {
-			pdf = await withTimeout(getDocument({ data: displayBytes }).promise, PDF_LOAD_TIMEOUT_MS, 'Inkling: timed out opening this PDF.');
+			pdf = await withTimeout(getDocument({ data: displayBytes, isEvalSupported: false }).promise, PDF_LOAD_TIMEOUT_MS, 'Inkling: timed out opening this PDF.');
 		} catch (error) {
 			console.error('Inkling: failed to open this PDF for rendering.', error);
 			new Notice('Inkling: could not open this PDF for annotating — try again, or reopen it in reading view.');

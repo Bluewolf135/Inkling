@@ -5,9 +5,12 @@ on:
     tags:
       - '*'
 
-# The workflow creates a release, and needs to be allowed to.
+# The workflow creates a release, and needs to be allowed to. The other two
+# let it sign the release files (see "Attest" below).
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -25,6 +28,17 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+      # Signs a provenance statement for each file a user installs, so anyone
+      # can check it was built by this workflow from this commit:
+      #   gh attestation verify main.js --repo Bluewolf135/Inkling
+      - name: Attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       # Draft, not published. A tag should not become an install target
       # before someone has looked at it.
