@@ -103,6 +103,30 @@ Built mobile-first, and tested on a Samsung tablet with an S Pen.
   reports it.
 - **No desktop-only APIs.** Everything runs on mobile.
 
+## Privacy
+
+**Inkling makes no network requests.** Everything it reads and writes is a
+file in your vault, through Obsidian's own API. No accounts, no telemetry,
+nothing sent anywhere.
+
+Obsidian's plugin review lists a few things in the bundle worth explaining:
+
+- **Network calls.** They are in the bundled PDF library, pdf.js. Most are
+  not network code at all: `xref.fetch` looks up an object inside the PDF.
+  The real ones download extra fonts, character maps or decoders, and pdf.js
+  makes them only when given a URL to fetch from. Inkling hands it the
+  file's bytes and never sets one.
+- **Base64 (`atob`/`btoa`).** An ink block's strokes are compressed and
+  stored in its `.ink` file as base64 text, which these encode and decode.
+  They carry drawing data only. pdf.js also uses them for font data.
+- **WebAssembly (`qcms_bg.wasm`, `openjpeg.wasm`).** pdf.js's optional
+  colour-management and JPEG 2000 modules. Inkling does not ship them and
+  never tells pdf.js where to find them, so they are never loaded. Without
+  the first, pages use the PDF's plain fallback colours instead of its
+  embedded colour profiles. Without the second, see Limitations.
+- **No dynamic code.** The build removes pdf.js's `eval` and
+  `new Function`, and fails if any come back.
+
 ## Limitations
 
 **Some PDFs open read-only, on purpose.** Inkling rewrites a PDF through
@@ -124,6 +148,11 @@ verified against the document it came from before a byte is written.
 
 **Extraction is one-directional.** Editing an extracted note does not
 change the PDF.
+
+**JPEG 2000 images do not display.** A few PDFs, mostly scanned books,
+store pages or pictures as JPEG 2000. pdf.js decodes those with a
+WebAssembly module Inkling does not ship, so those images are left blank.
+The rest of the page, and any ink on it, is unaffected.
 
 **Ink blocks render only inside Obsidian**, so a note holding one is less
 portable than one holding an image.
