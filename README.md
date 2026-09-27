@@ -1,3 +1,11 @@
+
+
+https://github.com/user-attachments/assets/f55a433e-ef7c-4e35-8456-6de9dec51359
+
+
+
+https://github.com/user-attachments/assets/40446953-9efd-4fca-be6c-e2305961d351
+
 # Inkling
 
 Handwritten and text annotation for PDFs and Markdown notes in Obsidian,
