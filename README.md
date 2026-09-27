@@ -1,11 +1,3 @@
-
-
-https://github.com/user-attachments/assets/f55a433e-ef7c-4e35-8456-6de9dec51359
-
-
-
-https://github.com/user-attachments/assets/40446953-9efd-4fca-be6c-e2305961d351
-
 # Inkling
 
 Handwritten and text annotation for PDFs and Markdown notes in Obsidian,
@@ -22,8 +14,13 @@ everything else you know — without leaving the app you keep it all in.
   <img src="docs/demo-materials/markdown-blocks.png" width="49%" alt="A physics exercise note with an ink block holding a handwritten worked solution between the problem text and the next exercise">
 </p>
 
-Videos: [writing on a textbook page](docs/demo-materials/writing.mp4) ·
-[extracting annotations to a note](docs/demo-materials/extracting-annotations.mp4)
+**Writing on a textbook page**
+
+https://github.com/user-attachments/assets/f55a433e-ef7c-4e35-8456-6de9dec51359
+
+**Extracting annotations to a note**
+
+https://github.com/user-attachments/assets/40446953-9efd-4fca-be6c-e2305961d351
 
 ## What it does
 
