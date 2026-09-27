@@ -9,13 +9,6 @@ the point you should use one of them. The point is that a highlight in a
 textbook becomes a searchable, linkable Markdown note sitting beside
 everything else you know — without leaving the app you keep it all in.
 
-> **Screenshots needed.** These need a real device and a stylus, so they
-> are not in the repo yet:
->
-> - `docs/images/writing.gif` — writing on a textbook page with a stylus
-> - `docs/images/annotate-view.png` — the annotate view with the toolbar
-> - `docs/images/extracted-note.png` — an extracted annotations note
-
 ## What it does
 
 **Annotate PDFs.** Pen, highlighter, eraser, shapes, and lasso selection,
@@ -108,11 +101,13 @@ existing annotations display but drawing is turned off, with a banner
 saying why. Filling in a form and saving it through here would lose the
 form; re-serializing a signed document invalidates the signature.
 
-**Every save rewrites the whole file.** `pdf-lib` has no incremental save.
-Inkling scales how often it saves to the file's size — ten seconds under
-5 MB, thirty up to 25 MB, a minute above — so a large textbook is not
-rewritten every few seconds. Every save is structurally verified against
-the document it came from before a byte is written.
+**Some PDFs are rewritten whole on every save.** Most saves append only
+what changed to the end of the file — a kilobyte or two, however large the
+book — so sync uploads the change rather than the textbook. A file whose
+structure Inkling cannot safely append to is rewritten whole instead, and
+for those it scales how often it saves to the file's size: ten seconds
+under 5 MB, thirty up to 25 MB, a minute above. Either way, every save is
+verified against the document it came from before a byte is written.
 
 **Extraction is one-directional.** Editing an extracted note does not
 change the PDF.
