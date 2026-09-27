@@ -9,6 +9,14 @@ the point you should use one of them. The point is that a highlight in a
 textbook becomes a searchable, linkable Markdown note sitting beside
 everything else you know — without leaving the app you keep it all in.
 
+<p>
+  <img src="docs/demo-materials/annotate-view.png" width="49%" alt="A textbook page in Inkling's annotate view on a tablet: the toolbar across the top, a highlighted sentence, and handwritten notes in the margin">
+  <img src="docs/demo-materials/markdown-blocks.png" width="49%" alt="A physics exercise note with an ink block holding a handwritten worked solution between the problem text and the next exercise">
+</p>
+
+Videos: [writing on a textbook page](docs/demo-materials/writing.mp4) ·
+[extracting annotations to a note](docs/demo-materials/extracting-annotations.mp4)
+
 ## What it does
 
 **Annotate PDFs.** Pen, highlighter, eraser, shapes, and lasso selection,
