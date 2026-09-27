@@ -150,6 +150,8 @@ recorded at the top of `src/pdfView.ts`. Don't bump them without reading
 that comment.
 
 Design documents and implementation plans live in `docs/superpowers/`.
+Branches, commit messages and releases are described in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
