@@ -235,7 +235,7 @@ async function fillMissingQuotes(bytes: ArrayBuffer, byPage: Map<number, Pending
 
 	let pdf: PDFDocumentProxy | null = null;
 	try {
-		pdf = await getDocument({ data: bytes }).promise;
+		pdf = await getDocument({ data: bytes, isEvalSupported: false }).promise;
 		for (const pageNumber of pages) {
 			if (pageNumber > pdf.numPages) continue;
 			const lines = await pageLines(await pdf.getPage(pageNumber));
