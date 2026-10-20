@@ -58,6 +58,18 @@ PDF sticky note — which means other readers show it too.
 **Handwritten notes.** Create a blank, lined, or dot-grid PDF and write
 straight into it, adding pages as you fill them.
 
+**Import.** The toolbar's import button inserts the pages of another PDF
+after the one you are on, or places a picture on the page — from the
+vault, or from the device's own file picker, photos and camera included.
+A picture lies under the ink, so you can write on it, and moves, scales
+and deletes with the lasso. Other PDF readers show it too.
+
+**Two devices at once.** Open the same PDF on a tablet and a laptop and
+write on both: each one's ink appears on the other as soon as your sync
+(Obsidian Sync, Syncthing, …) brings the file over, merged stroke by
+stroke with anything not yet saved, rather than one device's save
+overwriting the other's.
+
 **Infinite canvas.** Pick "Infinite canvas" as the paper when creating a
 note, and it starts as one sheet that grows in whichever direction you
 write: ink near an edge pushes that edge out by a page, and scrolling up
@@ -116,6 +128,13 @@ Built mobile-first, and tested on a Samsung tablet with an S Pen.
 
 - **Palm rejection.** Pen and mouse draw; touch scrolls in any direction
   and pinch-zooms, and two fingers zoom and pan at once.
+- **Stylus buttons.** Hold the side button of an S Pen — or of most Android,
+  Windows and Wacom pens — to erase (or highlight, or lasso: a setting); an
+  eraser end always erases. Apple Pencil's gestures are not available to
+  apps running in Obsidian.
+- **Drawing with a finger.** For a stylus that reports itself as a finger,
+  or a phone with no stylus: the finger button in the toolbar makes one
+  finger draw, while two still zoom and pan.
   Touch panning is hand-rolled rather than left to the browser, because
   relying on `touch-action` let a downward pen stroke get taken over
   mid-draw on real hardware.
@@ -146,6 +165,12 @@ verified against the document it came from before a byte is written.
 page other PDF readers open. A
 very large canvas is drawn with fewer pixels than a small one, because a
 phone or tablet browser refuses a single canvas past about 16 megapixels.
+
+**Live only as fast as your sync.** Two devices exchange ink through the
+file and nothing else — the plugin makes no network connections — so it
+arrives when the sync delivers it. On Android, Obsidian notices a file
+changed by another app (Syncthing, say) only when it looks again, which
+Obsidian Sync does not wait for.
 
 **Extraction is one-directional.** Editing an extracted note does not
 change the PDF.

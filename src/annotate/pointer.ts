@@ -27,6 +27,22 @@ export interface GestureHandlers {
 	// is then left to bubble up to the host's attachViewNavigation, which
 	// sees them wherever they land rather than only over a page.
 	viewZoom?: ViewZoom;
+	// Whether a finger draws, as a pen does, rather than moving the page.
+	// See ToolState.isTouchDrawing. A second finger still means a pinch:
+	// the stroke the first one began is given up (onAbandon) and the two
+	// zoom and pan together.
+	touchDraws?(): boolean;
+	onAbandon?(): void;
+}
+
+// Fingers that are drawing, by pointer id. Module scope because two
+// listeners need to agree on them: a page's, which draws with them, and a
+// view's navigation (attachViewNavigation), which must not also scroll the
+// page under them — but must count them when a second finger makes a pinch.
+const drawingTouches = new Set<number>();
+
+export function isDrawingTouch(pointerId: number): boolean {
+	return drawingTouches.has(pointerId);
 }
 
 // A zoom of everything the host scrolls: every page grows or shrinks
@@ -414,10 +430,34 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 		// under the tip.
 		stopMomentum();
 
+		const handlers = getHandlers();
+		const viewZoomed = !!handlers?.viewZoom;
+		const touchDraws = event.pointerType === 'touch' && (handlers?.touchDraws?.() ?? false);
+
+		if (touchDraws) {
+			// A first finger draws.
+			if (activePointerId === null && touches.size === 0 && !pinch && handlers) {
+				touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+				drawingTouches.add(event.pointerId);
+				activePointerId = event.pointerId;
+				capturePointer(el, event.pointerId);
+				event.preventDefault();
+				handlers.onStart(toPoint(event), event);
+				return;
+			}
+			// A second turns the gesture into a pinch, and what the first had
+			// begun to draw is dropped: it was the start of a zoom, not ink.
+			if (activePointerId !== null && drawingTouches.has(activePointerId)) {
+				drawingTouches.delete(activePointerId);
+				activePointerId = null;
+				handlers?.onAbandon?.();
+			}
+		}
+
 		// Moving about is the host's, in a view that zooms as a whole. Left
 		// alone here — no capture, no preventDefault — so it bubbles to
 		// attachViewNavigation.
-		if (getHandlers()?.viewZoom && (event.pointerType === 'touch' || event.button === 1)) return;
+		if (viewZoomed && (event.pointerType === 'touch' || event.button === 1)) return;
 
 		// The middle mouse button drags the view about, the way it does in
 		// most drawing programs — the one way to move around with a mouse
@@ -426,6 +466,9 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 			startTouchPan(event);
 			return;
 		}
+		// A mouse's other buttons draw nothing: a right-click is a request
+		// for a menu, not a dot of ink.
+		if (event.pointerType === 'mouse' && event.button !== 0) return;
 
 		if (event.pointerType === 'touch') {
 			touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -443,7 +486,6 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 		// palm registering as a second, spurious pointer mid-stroke) —
 		// ignore it rather than hijacking the active one.
 		if (activePointerId !== null) return;
-		const handlers = getHandlers();
 		if (!handlers) return;
 
 		activePointerId = event.pointerId;
@@ -526,6 +568,7 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 
 	const endGesture = (event: PointerEvent, cancelled: boolean) => {
 		if (event.pointerType === 'touch') touches.delete(event.pointerId);
+		drawingTouches.delete(event.pointerId);
 
 		// Ends the whole pinch as soon as either finger lifts, rather than
 		// trying to seamlessly hand off to single-finger pan with the other —
@@ -624,7 +667,14 @@ export function attachPointerGestures(el: HTMLCanvasElement, getHandlers: () => 
 	el.addEventListener('gesturechange', onGestureChange);
 	el.addEventListener('gestureend', onGestureEnd);
 
+	// No menu over the page. A stylus's side button is a right button as far
+	// as the browser is concerned, and pressing it — or a long press of a
+	// finger — opened the context menu over what was being drawn.
+	const onContextMenu = (event: Event) => event.preventDefault();
+	el.addEventListener('contextmenu', onContextMenu);
+
 	return () => {
+		el.removeEventListener('contextmenu', onContextMenu);
 		stopMomentum();
 		if (wheelSettleHandle !== null) window.clearTimeout(wheelSettleHandle);
 		el.removeEventListener('gesturestart', onGestureStart);
@@ -655,6 +705,9 @@ export interface ViewNavigationOptions {
 	// Whether a pen or mouse is drawing right now. A touch landing then is a
 	// hand resting on the glass, and moves nothing.
 	isBusy(): boolean;
+	// A pinch is starting — for whatever a finger had begun to draw to be
+	// dropped (see GestureHandlers.touchDraws).
+	onPinchStart?(): void;
 }
 
 // Everything that moves a whole view about, attached once to its scroll
@@ -724,10 +777,20 @@ export function attachViewNavigation(scroller: HTMLElement, zoom: ViewZoom, opti
 			if (!pan) startPan(event);
 			return;
 		}
-		if (options.isBusy()) return;
+		// A finger the page is drawing with: counted, so a second finger can
+		// make a pinch with it, but it does not move the view.
+		if (isDrawingTouch(event.pointerId)) {
+			touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+			return;
+		}
+		// Busy with a pen: a touch now is the hand holding it. Busy with a
+		// drawing finger is different — a second finger means a pinch.
+		if (options.isBusy() && drawingTouches.size === 0 && !touches.size) return;
 
 		touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (touches.size === 2 && !pinch) {
+			drawingTouches.clear();
+			options.onPinchStart?.();
 			// A second finger turns a drag into a pinch. The drag stops where
 			// it is, without a glide.
 			if (pan) release(pan.pointerId);

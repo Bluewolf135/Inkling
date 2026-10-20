@@ -30,6 +30,7 @@ export interface ToolStateSnapshot {
 	chosen: boolean;
 	brush: PenBrush;
 	pressure: Record<PenBrush, boolean>;
+	touchDrawing: boolean;
 	// Keyed by tool, and for the pen by nib as well (see styleKey).
 	styles: Record<string, ToolStyle>;
 }
@@ -96,6 +97,11 @@ export class ToolState {
 	// hand does — and the sharp pen with; either can be switched in the pen
 	// picker.
 	private readonly pressure: Record<PenBrush, boolean> = { pen: false, sharp: true };
+	// Whether a finger draws rather than scrolls. Off, which is palm
+	// rejection: the pen draws and the hand moves the page. On for a stylus
+	// that reports itself as a finger — passive styluses, and some Android
+	// tablets' own — and for drawing on a phone with no stylus at all.
+	private touchDrawing = false;
 	// Whether the tool strip is collapsed to a single row. Lives here
 	// rather than in a toolbar, for the same reason the pen does: an ink
 	// block's toolbar is destroyed and rebuilt on every save, so a strip
@@ -173,7 +179,7 @@ export class ToolState {
 	snapshot(): ToolStateSnapshot {
 		const styles: Record<string, ToolStyle> = {};
 		for (const [key, style] of this.styles) styles[key] = { ...style };
-		return { tool: this.tool, chosen: this.toolChosen, brush: this.brush, pressure: { ...this.pressure }, styles };
+		return { tool: this.tool, chosen: this.toolChosen, brush: this.brush, pressure: { ...this.pressure }, touchDrawing: this.touchDrawing, styles };
 	}
 
 	// Puts back a snapshot read from storage. Whatever is stored was written
@@ -198,6 +204,7 @@ export class ToolState {
 			}
 		}
 		this.brush = isPenBrush(stored.brush) ? stored.brush : 'pen';
+		this.touchDrawing = (raw as { touchDrawing?: unknown }).touchDrawing === true;
 
 		const tool = (TOOLS as readonly string[]).includes(stored.tool as string) ? (stored.tool as ToolType) : this.tool;
 		this.tool = tool;
@@ -210,6 +217,23 @@ export class ToolState {
 			this.width = style.width;
 		}
 		this.notify('tool');
+	}
+
+	// A tool's own colour and width, whichever tool is in hand — for a
+	// stroke drawn with a stylus button held, which borrows another tool for
+	// just that stroke.
+	styleOf(tool: ToolType): ToolStyle {
+		return { ...this.styleFor(tool) };
+	}
+
+	isTouchDrawing(): boolean {
+		return this.touchDrawing;
+	}
+
+	setTouchDrawing(on: boolean): void {
+		if (on === this.touchDrawing) return;
+		this.touchDrawing = on;
+		this.notify('style');
 	}
 
 	getToolbarLayout(): ToolbarLayout {

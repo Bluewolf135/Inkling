@@ -367,6 +367,7 @@ class InkBlockView implements StorageHost {
 		private readonly storage: InkBlockStorage,
 		toolState: ToolState,
 		private readonly captionsEnabled: () => boolean,
+		penButton?: () => 'eraser' | 'highlighter' | 'select' | 'none',
 	) {
 		this.blockId = storage.blockId;
 		// Until the storage shows something. Its size is what the block holds
@@ -392,6 +393,7 @@ class InkBlockView implements StorageHost {
 			// same line zoomed in or out.
 			getInkScale: () => this.scale / this.baseScale,
 			onZoomSettled: () => this.onZoomSettled(),
+			getPenButtonAction: penButton,
 		});
 		// No pages to add or remove inside a note — that's a handwritten-note
 		// concept, and the toolbar hides the control when this is false.
@@ -1179,6 +1181,8 @@ class InkBlockChild extends MarkdownRenderChild {
 
 export interface InkBlockOptions {
 	captionsEnabled: () => boolean;
+	/** What holding a stylus's side button does (see the setting). */
+	penButton?: () => 'eraser' | 'highlighter' | 'select' | 'none';
 	/** Where a new block's ink file goes, for a note at this path. */
 	inkFilePathFor: (notePath: string) => Promise<string>;
 }
@@ -1262,7 +1266,7 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, options: 
 				const storage = isInkFileFence(source)
 					? new InkFileStorage(stores, parseInkFence(source))
 					: new InNoteStorage(plugin, ctx, el, source);
-				return new InkBlockView(plugin, ctx, el, storage, toolState, options.captionsEnabled);
+				return new InkBlockView(plugin, ctx, el, storage, toolState, options.captionsEnabled, options.penButton);
 			}),
 		);
 	});

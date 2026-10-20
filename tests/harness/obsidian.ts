@@ -154,6 +154,51 @@ export class Modal {
 	}
 }
 
+// Obsidian's quick-switcher dialog, as far as the import flow reaches into
+// it: opening is recorded, like any modal, and nothing is ever chosen.
+export class FuzzySuggestModal<T> extends Modal {
+	placeholder = '';
+	setPlaceholder(placeholder: string): void {
+		this.placeholder = placeholder;
+	}
+	getItems(): T[] {
+		return [];
+	}
+}
+
+// A context menu: its items, recorded so a test can read and press them.
+export interface MenuItemRecord {
+	title: string;
+	icon: string;
+	click: () => void;
+}
+export const shownMenus: MenuItemRecord[][] = [];
+
+export class Menu {
+	private readonly items: MenuItemRecord[] = [];
+	addItem(build: (item: { setTitle(t: string): unknown; setIcon(i: string): unknown; setWarning(w: boolean): unknown; onClick(f: () => void): unknown }) => unknown): this {
+		const record: MenuItemRecord = { title: '', icon: '', click: () => undefined };
+		const item = {
+			setTitle: (title: string) => ((record.title = title), item),
+			setIcon: (icon: string) => ((record.icon = icon), item),
+			setWarning: () => item,
+			onClick: (click: () => void) => ((record.click = click), item),
+		};
+		build(item);
+		this.items.push(record);
+		return this;
+	}
+	addSeparator(): this {
+		return this;
+	}
+	showAtPosition(): void {
+		shownMenus.push(this.items);
+	}
+	showAtMouseEvent(): void {
+		shownMenus.push(this.items);
+	}
+}
+
 export class Setting {
 	constructor(public containerEl: HTMLElement) {}
 }
@@ -268,5 +313,6 @@ export function normalizePath(path: string): string {
 export function resetObsidianStubs(): void {
 	notices.length = 0;
 	openedModals.length = 0;
+	shownMenus.length = 0;
 	iconRequests.length = 0;
 }

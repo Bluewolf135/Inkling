@@ -10,6 +10,8 @@ import { compactInkBlocks } from './markdown/compactInkBlocks';
 import { registerInkBlock } from './markdown/inkBlock';
 import { inkFilePathFor } from './markdown/inkFilePath';
 import { registerNoteCreation } from './noteCreation';
+import { attachThumbnailMenu } from './pageMenu';
+import { startStylusCheck } from './stylusCheck';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
 import { CORE_PDF_VIEW_TYPE, PdfAnnotateView, VIEW_TYPE_PDF } from './pdfView';
 import { defaultSettings, normalizeSettings, type InklingSettings } from './settings';
@@ -89,6 +91,7 @@ export default class InklingPlugin extends Plugin {
 		}));
 		registerInkBlock(this, this.toolState, {
 			captionsEnabled: () => this.settings.blockCaptions,
+			penButton: () => this.settings.penButton,
 			inkFilePathFor: (notePath) =>
 				inkFilePathFor(
 					notePath,
@@ -135,6 +138,18 @@ export default class InklingPlugin extends Plugin {
 			id: 'undo-annotation',
 			name: 'Undo annotation',
 			checkCallback: (checking) => this.withAnnotateView(checking, (view) => view.undoAnnotation()),
+		});
+
+		this.addCommand({
+			id: 'check-stylus-input',
+			name: 'Check stylus input (side button, eraser, pressure)',
+			callback: () => startStylusCheck(activeWindow),
+		});
+
+		this.addCommand({
+			id: 'toggle-touch-drawing',
+			name: 'Toggle drawing with finger',
+			callback: () => this.toolState.setTouchDrawing(!this.toolState.isTouchDrawing()),
 		});
 
 		this.addCommand({
@@ -371,6 +386,11 @@ export default class InklingPlugin extends Plugin {
 			if (action && !action.isConnected) this.actions.splice(i, 1);
 		}
 		this.actions.push(view.addAction('pencil', 'Annotate with Inkling', () => void this.switchToInkling(leaf)));
+		// A long press or right-click on a page thumbnail: copy a link to the
+		// page, or delete it. See pageMenu.ts.
+		if (view instanceof FileView) {
+			attachThumbnailMenu(this.app, view, (el, handler) => this.registerDomEvent(el, 'contextmenu', handler, { capture: true }));
+		}
 	}
 
 	private async switchToInkling(leaf: WorkspaceLeaf): Promise<void> {

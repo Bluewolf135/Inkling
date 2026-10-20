@@ -13,6 +13,7 @@ import type { ToolType } from './types';
 
 export type ToolbarItemId =
 	| ToolType
+	| 'touch-draw'
 	| 'colors'
 	| 'width'
 	| 'undo'
@@ -20,6 +21,7 @@ export type ToolbarItemId =
 	| 'delete'
 	| 'clear-page'
 	| 'add-page'
+	| 'import'
 	| 'invert'
 	| 'outline'
 	| 'page'
@@ -52,6 +54,8 @@ export const TOOLBAR_ITEMS: readonly ToolbarItemSpec[] = [
 	{ id: 'rectangle', label: 'Rectangle', icon: 'square', fallback: '▭' },
 	{ id: 'oval', label: 'Oval', icon: 'circle', fallback: '◯' },
 	{ id: 'arrow', label: 'Arrow', icon: 'arrow-up-right', fallback: '↗' },
+	// Whether a finger draws. Shown only on a screen that takes touch.
+	{ id: 'touch-draw', label: 'Draw with finger', icon: 'pointer', fallback: '☝' },
 	{ id: 'separator-1', label: 'Divider', icon: 'separator-vertical', fallback: '|' },
 	{ id: 'colors', label: 'Colors', icon: 'palette', fallback: '●' },
 	{ id: 'separator-2', label: 'Divider', icon: 'separator-vertical', fallback: '|' },
@@ -63,6 +67,7 @@ export const TOOLBAR_ITEMS: readonly ToolbarItemSpec[] = [
 	{ id: 'delete', label: 'Delete selection', icon: 'trash-2', fallback: '␡' },
 	{ id: 'clear-page', label: 'Clear page', icon: 'file-x', fallback: '⌧' },
 	{ id: 'add-page', label: 'Add page', icon: 'file-plus', fallback: '＋' },
+	{ id: 'import', label: 'Import a PDF or picture', icon: 'image-plus', fallback: '⤓' },
 	{ id: 'invert', label: 'Invert page', icon: 'contrast', fallback: '◐' },
 	{ id: 'outline', label: 'Outline and find', icon: 'panel-left', fallback: '☰' },
 	// Pushes everything after it to the far end of the strip, which is

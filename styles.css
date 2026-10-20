@@ -93,12 +93,6 @@
 	left: 0;
 }
 
-/* The outline and find panel stays centred, as it was before the view
-   was laid out from the start edge. */
-.view-content.inkling-pdf-view > .inkling-nav-panel {
-	align-self: center;
-}
-
 /* These scroll by themselves under a finger, as they always did. */
 .inkling-pdf-view .inkling-nav-panel,
 .inkling-pdf-view .inkling-note-editor {
@@ -680,29 +674,90 @@
 	display: flex;
 	flex-direction: column;
 	gap: var(--size-4-2);
-	width: min(280px, 80vw);
+	width: min(320px, calc(100% - 16px));
 	/* The nudge clear of the marker lives in pdfView.ts (NOTE_POPOVER_MARGIN)
 	   rather than here. As a margin it was invisible to the arithmetic that
 	   keeps this popover inside its clipping parent, which measured the box
 	   and not the space around it. */
 	padding: var(--size-4-3);
 	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m);
+	border-radius: var(--radius-l);
 	background-color: var(--background-primary);
-	box-shadow: var(--shadow-s);
+	box-shadow: var(--shadow-l);
+	animation: inkling-pop-in 140ms ease-out;
+}
+
+.inkling-note-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	min-height: 24px;
+}
+
+.inkling-note-title {
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
 }
 
 .inkling-note-text {
 	width: 100%;
-	min-height: 5em;
-	resize: vertical;
+	/* Set from pdfView.ts as the text grows; capped so a long note scrolls
+	   inside the card rather than running off the page. */
+	height: var(--inkling-note-height, auto);
+	min-height: 4.5em;
+	max-height: 40vh;
+	resize: none;
+	padding: var(--size-4-2);
+	border-radius: var(--radius-m);
 	font-family: inherit;
+	font-size: var(--font-ui-medium);
+	line-height: var(--line-height-normal);
+}
+
+.inkling-note-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+}
+
+.inkling-note-hint {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
 }
 
 .inkling-note-buttons {
 	display: flex;
-	justify-content: flex-end;
 	gap: var(--size-4-2);
+	margin-left: auto;
+}
+
+.is-mobile .inkling-note-button {
+	min-height: 40px;
+	padding: 0 var(--size-4-4);
+}
+
+/* One entrance for every card this plugin opens — the note editor, the
+   outline panel, the pen picker: a short rise and fade, so a card arrives
+   rather than appears. Not at all where motion is turned down. */
+@keyframes inkling-pop-in {
+	from {
+		opacity: 0;
+		transform: translateY(-4px) scale(0.98);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.inkling-note-editor,
+	.inkling-nav-panel,
+	.inkling-pen-picker {
+		animation: none;
+	}
 }
 
 /* ---------------------------------------------------------------------
@@ -715,16 +770,45 @@
    exactly the layout they saw before it existed.
    --------------------------------------------------------------------- */
 
-.inkling-nav-panel {
-	flex: 0 0 auto;
+.inkling-toolbar > .inkling-nav-panel {
+	/* Hung from the bottom of the tool strip, over the pages: it stays put
+	   while they scroll under it, and opening it moves nothing. */
+	position: absolute;
+	top: calc(100% + 6px);
+	left: var(--size-4-2);
+	z-index: 2;
 	display: flex;
 	flex-direction: column;
 	gap: var(--size-4-2);
-	padding: var(--size-4-3);
-	max-height: 40vh;
+	width: min(380px, calc(100% - 2 * var(--size-4-2)));
+	max-height: min(65vh, 600px);
 	overflow-y: auto;
-	border-bottom: 1px solid var(--background-modifier-border);
-	background-color: var(--background-secondary);
+	overscroll-behavior: contain;
+	padding: var(--size-4-2) var(--size-4-3) var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-l);
+	background-color: var(--background-primary);
+	box-shadow: var(--shadow-l);
+	font-size: var(--font-ui-small);
+	animation: inkling-pop-in 140ms ease-out;
+}
+
+.is-phone .inkling-toolbar > .inkling-nav-panel {
+	left: var(--size-4-2);
+	right: var(--size-4-2);
+	width: auto;
+	max-height: 70vh;
+}
+
+.inkling-nav-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.inkling-nav-title {
+	font-weight: var(--font-semibold);
+	color: var(--text-normal);
 }
 
 .inkling-nav-find-input {
@@ -740,6 +824,7 @@
 }
 
 .inkling-nav-heading {
+	margin-top: var(--size-4-1);
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
 	font-weight: var(--font-semibold);
@@ -752,43 +837,63 @@
 	display: flex;
 	flex-direction: column;
 	align-items: stretch;
-	gap: var(--size-2-1);
+	gap: 1px;
 }
 
 .inkling-nav-panel .inkling-nav-entry {
-	box-shadow: none;
-	border: none;
-	background: transparent;
 	/* An entry is a <button>, and Obsidian styles every button as a centred
-	   flex container. That one inherited declaration silently defeated three
-	   of the ones below: justify-content centred the text so `text-align`
-	   never applied, the depth indent shifted a centred box instead of a left
-	   edge, and `text-overflow: ellipsis` has nothing to clip on a flex line.
-	   A 900-page book's table of contents came out centred like a poem, with
-	   its hierarchy invisible.
-	   Declaring `display` is the whole fix — this rule already outranks
-	   Obsidian's bare `button`, it simply never said anything about layout. */
-	display: block;
+	   flex container; this one is a row: the title, then its page number
+	   pushed to the far end. */
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	width: 100%;
+	height: auto;
 	/* Indented by how deep the entry sat in the outline tree, so a
 	   flattened list still reads as the hierarchy it came from. */
-	padding: var(--size-2-1) var(--size-4-2);
+	padding: var(--size-4-1) var(--size-4-2);
 	padding-left: calc(var(--size-4-2) + var(--inkling-nav-depth, 0) * var(--size-4-3));
+	border: none;
+	border-radius: var(--radius-s);
+	background: transparent;
+	box-shadow: none;
 	color: var(--text-normal);
 	font-family: inherit;
 	font-size: var(--font-ui-small);
 	text-align: left;
-	width: 100%;
+	cursor: var(--cursor);
+}
+
+.inkling-nav-entry-title {
+	min-width: 0;
 	/* An outline entry is a title, and titles run long. One line with an
-	   ellipsis keeps the list scannable; the tooltip is not needed because
-	   the row is the title. */
-	white-space: nowrap;
+	   ellipsis keeps the list scannable. */
 	overflow: hidden;
 	text-overflow: ellipsis;
-	cursor: var(--cursor);
+	white-space: nowrap;
+}
+
+.inkling-nav-entry-page {
+	flex: none;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
 }
 
 .inkling-nav-panel .inkling-nav-entry:hover {
 	background-color: var(--background-modifier-hover);
+}
+
+/* The chapter being read. */
+.inkling-nav-panel .inkling-nav-entry.is-current {
+	background-color: var(--background-modifier-active-hover);
+	color: var(--text-accent);
+}
+
+.is-mobile .inkling-nav-panel .inkling-nav-entry {
+	min-height: 40px;
+	align-items: center;
 }
 
 .inkling-page-box {
@@ -1138,15 +1243,110 @@
 }
 
 /* ---------------------------------------------------------------------
-   Create-handwritten-note modal (see src/noteCreation.ts)
+   New handwritten note
+
+   A name, then the paper and the background as tiles to tap, each showing
+   what it is: an icon for the paper, a sample of the ruling for the
+   background.
    --------------------------------------------------------------------- */
 
-/* Obsidian's setting rows carry a top border to separate stacked settings.
-   In a two-row dialog that draws a line above the first row, right under the
-   title, which reads as a stray rule rather than a divider. */
-.inkling-create-note-modal .setting-item:first-child {
-	border-top: none;
-	padding-top: 0;
+.modal.inkling-create-note {
+	width: min(520px, calc(100vw - 32px));
+}
+
+.inkling-create-note-modal {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-4);
+}
+
+.inkling-create-field {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.inkling-create-label {
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+}
+
+.inkling-create-name {
+	width: 100%;
+	font-size: var(--font-ui-medium);
+}
+
+.inkling-create-hint {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+.inkling-choice-row {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+	gap: var(--size-4-2);
+}
+
+.inkling-create-note-modal button.inkling-choice {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: var(--size-2-2);
+	height: auto;
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	box-shadow: none;
+	color: var(--text-normal);
+	text-align: left;
+	cursor: var(--cursor);
+	transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.inkling-create-note-modal button.inkling-choice:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.inkling-create-note-modal button.inkling-choice.is-chosen {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+/* A strip of paper: blank, ruled, or dotted the way the template is. */
+.inkling-choice-preview {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 52px;
+	border-radius: var(--radius-s);
+	background-color: #ffffff;
+	color: #5c6370;
+	--icon-size: 26px;
+}
+
+.inkling-choice-preview.is-lined {
+	background-image: repeating-linear-gradient(to bottom, transparent 0 9px, rgba(120, 150, 210, 0.7) 9px 10px);
+}
+
+.inkling-choice-preview.is-dot-grid {
+	background-image: radial-gradient(circle, rgba(110, 110, 125, 0.9) 1px, transparent 1.3px);
+	background-size: 9px 9px;
+}
+
+.inkling-choice-label {
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-medium);
+}
+
+.inkling-choice-hint {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+.is-mobile .inkling-choice-preview {
+	height: 64px;
 }
 
 /* ---------------------------------------------------------------------
@@ -1159,6 +1359,7 @@
    --------------------------------------------------------------------- */
 
 .inkling-pen-picker {
+	animation: inkling-pop-in 140ms ease-out;
 	position: fixed;
 	left: var(--inkling-picker-left);
 	top: var(--inkling-picker-top);

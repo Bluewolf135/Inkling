@@ -18,6 +18,10 @@ export type { PageSizeName };
 export type SaveCadence = 'auto' | 'frequent';
 export type ShapeRecognition = 'off' | 'hold';
 export type DarkInversion = 'off' | 'on' | 'follow-theme';
+// What holding the side button of a stylus does while it draws: a
+// temporary eraser, highlighter or lasso, for that stroke, or nothing.
+export type PenButtonAction = 'eraser' | 'highlighter' | 'select' | 'none';
+export const PEN_BUTTON_ACTIONS: readonly PenButtonAction[] = ['eraser', 'highlighter', 'select', 'none'];
 
 export interface InklingSettings {
 	defaultTemplate: TemplateStyle;
@@ -26,10 +30,10 @@ export interface InklingSettings {
 	// reads as it always did until someone chooses otherwise.
 	defaultCanvasMode: CanvasMode;
 	saveCadence: SaveCadence;
-	smoothing: boolean;
 	shapeRecognition: ShapeRecognition;
 	darkInversion: DarkInversion;
 	toolbarStartsCollapsed: boolean;
+	penButton: PenButtonAction;
 	// Whether an ink block offers a caption to write.
 	//
 	// Off by default and deliberately so: a block that already has one always
@@ -60,7 +64,6 @@ export function defaultSettings(): InklingSettings {
 		pageSize: 'letter',
 		defaultCanvasMode: 'pages',
 		saveCadence: 'auto',
-		smoothing: true,
 		shapeRecognition: 'hold',
 		// Off, not 'follow-theme'. A scan opens looking like the paper it was
 		// scanned from; inverting it is a choice about one unreadable document,
@@ -68,6 +71,9 @@ export function defaultSettings(): InklingSettings {
 		// toolbar's contrast button flips it for the session either way.
 		darkInversion: 'off',
 		toolbarStartsCollapsed: false,
+		// The eraser, as on Samsung's own S Pen: hold the button, rub out,
+		// let go and write on.
+		penButton: 'eraser',
 		blockCaptions: false,
 		// Wherever the vault's images already go, so ink lands somewhere
 		// sensible without anyone configuring anything.
@@ -126,10 +132,10 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 		pageSize: pick(source.pageSize, ['letter', 'a4'] as const, defaults.pageSize),
 		defaultCanvasMode: pick(source.defaultCanvasMode, CANVAS_MODES, defaults.defaultCanvasMode),
 		saveCadence: pick(source.saveCadence, ['auto', 'frequent'] as const, defaults.saveCadence),
-		smoothing: bool(source.smoothing, defaults.smoothing),
 		shapeRecognition: pick(source.shapeRecognition, ['off', 'hold'] as const, defaults.shapeRecognition),
 		darkInversion: pick(source.darkInversion, ['off', 'on', 'follow-theme'] as const, defaults.darkInversion),
 		toolbarStartsCollapsed: bool(source.toolbarStartsCollapsed, defaults.toolbarStartsCollapsed),
+		penButton: pick(source.penButton, PEN_BUTTON_ACTIONS, defaults.penButton),
 		blockCaptions: bool(source.blockCaptions, defaults.blockCaptions),
 		inkFileLocation: pick(source.inkFileLocation, INK_FILE_LOCATIONS, defaults.inkFileLocation),
 		inkFileFolder,

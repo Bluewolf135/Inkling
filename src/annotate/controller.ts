@@ -15,7 +15,7 @@ import { attachPointerGestures, contentZoom, currentZoom, GestureHandlers, MAX_Z
 import { recognizeShape } from './recognize';
 import { SIMPLIFY_EPSILON, simplifyPoints } from './simplify';
 import { prepareStroke } from './stroke';
-import { drawInk, drawOverlay, handleAt, isHighlight, renderBase, renderHighlights, renderOverlay, selectionFrame, type HandleName, type OverlayOptions } from './render';
+import { drawInk, drawOverlay, handleAt, isHighlight, lockButtonAt, onPictureDecoded, renderBase, renderHighlights, renderOverlay, selectionFrame, type HandleName, type OverlayOptions } from './render';
 import { AnnotationStore } from './store';
 import { HistoryStack } from './history';
 import type { ToolbarLayout } from './toolbarLayout';
@@ -32,6 +32,7 @@ import {
 	ShapeToolType,
 	StrokeAnnotation,
 	ToolType,
+	isLockedPicture,
 } from './types';
 
 // The eraser reuses the shared width control as its size/radius (per the
@@ -47,6 +48,12 @@ const MIN_SELECTION_SIZE = 12;
 
 // How far, in screen pixels, a lasso may wander and still count as a tap.
 const TAP_SLOP = 6;
+
+// Pressing on a picture and holding still this long picks it up, whatever
+// tool is in hand — the way to get back to a picture placed some time ago,
+// with the pen still in hand and ink all over it.
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP = 8;
 
 function isTap(points: Point[], slop: number): boolean {
 	const [first] = points;
@@ -199,6 +206,12 @@ export interface AnnotationControllerOptions {
 	// there works the way it does in Obsidian's own reader; an ink block
 	// has no view of its own to zoom and omits it.
 	viewZoom?: ViewZoom;
+	// Opens the host's import menu, from the toolbar's import button. A
+	// surface without one has no import, which is how ink blocks stay out.
+	onImport?: (anchor: HTMLElement) => void;
+	// What the side button of a stylus does while held (see the setting).
+	// Omitted, it erases.
+	getPenButtonAction?: () => 'eraser' | 'highlighter' | 'select' | 'none';
 	// Told whenever a page's ink, or its live layer (the stroke being drawn,
 	// a lasso, a selection), has been painted again. The PDF view draws both
 	// a second time, magnified, wherever it is zoomed in past what a whole
@@ -225,7 +238,17 @@ export class AnnotationController {
 	private readonly listeners = new Set<() => void>();
 
 	private readonly toolState: ToolState;
+	// The tool a stroke begun with a stylus button held is drawn with,
+	// with that tool's own colour and width, for that stroke alone. Null
+	// the rest of the time, when the tool in hand is the one in use.
+	private gestureTool: { tool: ToolType; color: string; width: number } | null = null;
+	// A press on a picture that may yet turn into picking it up. See
+	// LONG_PRESS_MS.
+	private longPress: { pageNumber: number; at: Point; timer: number } | null = null;
 	private readonly unsubscribeToolState: () => void;
+	// A picture finished decoding: it can be drawn now where it was a
+	// placeholder. See render.ts.
+	private readonly unsubscribePictures: () => void;
 
 	private selection: { pageNumber: number; ids: Set<string> } = { pageNumber: -1, ids: new Set() };
 	private drag: { pageNumber: number; mode: DragMode } | null = null;
@@ -276,6 +299,9 @@ export class AnnotationController {
 			this.notify();
 			this.redrawAllOverlay();
 		});
+		this.unsubscribePictures = onPictureDecoded(() => {
+			for (const pageNumber of this.pages.keys()) this.redrawBase(pageNumber);
+		});
 	}
 
 	// ---- Page lifecycle ----
@@ -322,6 +348,22 @@ export class AnnotationController {
 
 	getPageAnnotations(pageNumber: number): Annotation[] {
 		return this.store.getPage(pageNumber);
+	}
+
+	// Replaces a page's annotations with ones that came from somewhere else
+	// — another device's save, merged in (see pdfView.ts). Not an edit made
+	// here, so it is no step of undo; and the page's undo history goes,
+	// since every entry in it is a whole page as it was before, and undoing
+	// one now would take the other device's ink off with it.
+	replacePage(pageNumber: number, annotations: Annotation[]): void {
+		if (this.drag?.pageNumber === pageNumber) this.drag = null;
+		if (this.selection.pageNumber === pageNumber) this.selection = { pageNumber: -1, ids: new Set() };
+		const { undo, redo } = this.history.snapshot();
+		const elsewhere = (entry: { pageNumber: number }) => entry.pageNumber !== pageNumber;
+		this.history.restore({ undo: undo.filter(elsewhere), redo: redo.filter(elsewhere) });
+		this.store.setPageLive(pageNumber, annotations);
+		this.redrawOverlay(pageNumber);
+		this.notify();
 	}
 
 	// Re-backs a page's annotation canvases at a new resolution and swaps in
@@ -406,6 +448,7 @@ export class AnnotationController {
 
 	unmountAll(): void {
 		this.cancelScheduledOverlayRedraw();
+		this.cancelLongPress();
 		for (const pageNumber of [...this.pages.keys()]) this.unmountPage(pageNumber);
 		this.selection = { pageNumber: -1, ids: new Set() };
 		this.drag = null;
@@ -428,6 +471,7 @@ export class AnnotationController {
 	destroy(): void {
 		this.unmountAll();
 		this.unsubscribeToolState();
+		this.unsubscribePictures();
 		this.listeners.clear();
 	}
 
@@ -472,7 +516,13 @@ export class AnnotationController {
 	// What every stroke, shape and eraser on that page is made with; the
 	// toolbar and the shared state keep the unscaled number.
 	private inkWidth(pageNumber: number): number {
-		return this.getWidth() * (this.options.getInkScale?.(pageNumber) ?? 1);
+		return (this.gestureTool?.width ?? this.getWidth()) * (this.options.getInkScale?.(pageNumber) ?? 1);
+	}
+
+	// The colour a stroke being drawn is made in: the tool in hand's, or,
+	// for a stroke begun with a stylus button held, the borrowed tool's.
+	private inkColor(): string {
+		return this.gestureTool?.color ?? this.getColor();
 	}
 
 	setWidth(width: number): void {
@@ -691,9 +741,10 @@ export class AnnotationController {
 		if (this.selection.ids.size === 0) return;
 		const { pageNumber, ids } = this.selection;
 		const before = this.store.getPage(pageNumber);
+		// A locked picture stays: unlock it first.
 		this.store.setPageLive(
 			pageNumber,
-			before.filter((a) => !ids.has(a.id)),
+			before.filter((a) => !ids.has(a.id) || isLockedPicture(a)),
 		);
 		this.store.commitGesture(pageNumber, before);
 		this.selection = { pageNumber: -1, ids: new Set() };
@@ -716,7 +767,7 @@ export class AnnotationController {
 
 	private getHandlersFor(pageNumber: number): GestureHandlers {
 		return {
-			onStart: (point) => this.handleStart(pageNumber, point),
+			onStart: (point, event) => this.handleStart(pageNumber, point, event),
 			onMove: (point) => this.handleMove(pageNumber, point),
 			onEnd: (point) => this.handleEnd(pageNumber, point),
 			onCancel: () => this.handleCancel(pageNumber),
@@ -730,6 +781,8 @@ export class AnnotationController {
 			},
 			onZoomEnd: (scale) => this.options.onZoomSettled?.(pageNumber, scale),
 			viewZoom: this.options.viewZoom,
+			touchDraws: () => this.toolState.isTouchDrawing() && !this.readOnly,
+			onAbandon: () => this.abandonGesture(),
 		};
 	}
 
@@ -745,11 +798,20 @@ export class AnnotationController {
 		this.redrawOverlay(pageNumber);
 	}
 
-	private handleStart(pageNumber: number, point: Point): void {
+	private handleStart(pageNumber: number, point: Point, event?: PointerEvent): void {
 		if (this.readOnly) return;
+		this.gestureTool = null;
+		const bound = this.stylusBinding(event);
+		if (bound === 'select') {
+			// The lasso is more than one gesture — draw round, then drag — so
+			// the button picks it up rather than lending it for one stroke.
+			this.setTool('select');
+		} else if (bound) {
+			this.gestureTool = { tool: bound, ...this.toolState.styleOf(bound) };
+		}
 		// Bound once so the switch below narrows it — a getter call in each
 		// case would be opaque to the narrowing and force a cast.
-		const tool = this.getTool();
+		const tool = this.gestureTool?.tool ?? this.getTool();
 		switch (tool) {
 			case 'pen':
 			case 'highlighter':
@@ -780,7 +842,89 @@ export class AnnotationController {
 				this.handleSelectStart(pageNumber, point);
 				break;
 		}
+		if (tool !== 'select' && tool !== 'note') this.watchForLongPress(pageNumber, point);
 		this.redrawOverlay(pageNumber);
+	}
+
+	private watchForLongPress(pageNumber: number, point: Point): void {
+		this.cancelLongPress();
+		const picture = [...this.store.getPage(pageNumber)]
+			.reverse()
+			.find((a) => a.kind === 'image' && pointInRect(point, boundingBox(a)));
+		if (!picture) return;
+		const timer = window.setTimeout(() => {
+			this.longPress = null;
+			// Still down, and still where it started: not ink after all. What
+			// it had begun to draw goes, and the picture is picked up.
+			if (this.drag?.pageNumber !== pageNumber) return;
+			this.drag = null;
+			this.gestureTool = null;
+			this.setTool('select');
+			this.selection = { pageNumber, ids: new Set([picture.id]) };
+			this.redrawOverlay(pageNumber);
+			this.notify();
+		}, LONG_PRESS_MS);
+		this.longPress = { pageNumber, at: point, timer };
+	}
+
+	private cancelLongPress(): void {
+		if (this.longPress) window.clearTimeout(this.longPress.timer);
+		this.longPress = null;
+	}
+
+	// Locks a picture in place, or frees it — one step of undo, and saved.
+	toggleLock(pageNumber: number, id: string): void {
+		if (this.readOnly) return;
+		const before = this.store.getPage(pageNumber);
+		this.store.setPageLive(
+			pageNumber,
+			before.map((a) => (a.id === id && a.kind === 'image' ? { ...a, locked: !a.locked } : a)),
+		);
+		this.store.commitGesture(pageNumber, before);
+		this.redrawOverlay(pageNumber);
+		this.notify();
+	}
+
+	// What a stylus's own controls ask for at the start of a stroke. An
+	// eraser end (button 5) always erases, the way it does on paper. The
+	// side button (button 2, held while the tip touches) does what the
+	// settings say. Read from `buttons` as well as `button`: a pen touching
+	// down with the side button already held reports the tip as the button
+	// that changed and the side button only among those held.
+	//
+	// A pen only. A mouse's right button is not a stylus button, and is left
+	// to do nothing here.
+	private stylusBinding(event: PointerEvent | undefined): 'eraser' | 'highlighter' | 'select' | null {
+		if (!event || event.pointerType !== 'pen') return null;
+		if (event.button === 5 || (event.buttons & 32) !== 0) return 'eraser';
+		if (event.button === 2 || (event.buttons & 2) !== 0) {
+			const action = this.options.getPenButtonAction?.() ?? 'eraser';
+			return action === 'none' ? null : action;
+		}
+		return null;
+	}
+
+	// Drops the gesture under way without committing any of it — a finger
+	// that began to draw and turned out to be one of two starting a pinch.
+	abandonGesture(): void {
+		this.cancelLongPress();
+		const drag = this.drag;
+		if (!drag) return;
+		if (drag.mode.kind === 'erase' || drag.mode.kind === 'move' || drag.mode.kind === 'resize') {
+			this.store.setPageLive(drag.pageNumber, drag.mode.before);
+		}
+		this.drag = null;
+		this.gestureTool = null;
+		this.redrawOverlay(drag.pageNumber);
+		this.notify();
+	}
+
+	isTouchDrawing(): boolean {
+		return this.toolState.isTouchDrawing();
+	}
+
+	setTouchDrawing(on: boolean): void {
+		this.toolState.setTouchDrawing(on);
 	}
 
 	private handleSelectStart(pageNumber: number, point: Point): void {
@@ -788,8 +932,21 @@ export class AnnotationController {
 
 		if (this.selection.pageNumber === pageNumber && this.selection.ids.size > 0) {
 			const ids = [...this.selection.ids];
-			const boxes = annotations.filter((a) => this.selection.ids.has(a.id)).map(boundingBox);
+			const selected = annotations.filter((a) => this.selection.ids.has(a.id));
+			const boxes = selected.map(boundingBox);
+			const [only] = selected;
 			if (boxes.length > 0) {
+				const box = unionBoundingBox(boxes);
+				const chrome = this.chromeScale(pageNumber);
+				if (selected.length === 1 && only?.kind === 'image' && lockButtonAt(box, chrome, point)) {
+					this.toggleLock(pageNumber, only.id);
+					return;
+				}
+			}
+			// A locked picture stays put: a press inside its frame begins a
+			// lasso like a press anywhere else, which is what lets the writing
+			// on a locked picture be picked up without it.
+			if (boxes.length > 0 && !selected.some(isLockedPicture)) {
 				const box = unionBoundingBox(boxes);
 				const chrome = this.chromeScale(pageNumber);
 				const handle = handleAt(box, chrome, point);
@@ -901,6 +1058,10 @@ export class AnnotationController {
 
 	private handleMove(pageNumber: number, point: Point): void {
 		if (this.readOnly) return;
+		const press = this.longPress;
+		if (press && Math.hypot(point.x - press.at.x, point.y - press.at.y) > LONG_PRESS_SLOP * this.chromeScale(pageNumber)) {
+			this.cancelLongPress();
+		}
 		if (!this.drag || this.drag.pageNumber !== pageNumber) return;
 		const mode = this.drag.mode;
 
@@ -962,6 +1123,7 @@ export class AnnotationController {
 	}
 
 	private handleEnd(pageNumber: number, point: Point): void {
+		this.cancelLongPress();
 		if (this.readOnly) return;
 		if (!this.drag || this.drag.pageNumber !== pageNumber) return;
 		const mode = this.drag.mode;
@@ -1009,6 +1171,7 @@ export class AnnotationController {
 		}
 
 		this.drag = null;
+		this.gestureTool = null;
 		this.redrawOverlay(pageNumber);
 		this.notify();
 	}
@@ -1022,6 +1185,7 @@ export class AnnotationController {
 	// on cancel, since a mutation of *existing* annotations being cut short
 	// is safer to undo than to risk half-applying.
 	private handleCancel(pageNumber: number): void {
+		this.cancelLongPress();
 		// Included deliberately: this is the path a palm rejection or a lost
 		// pointer takes, and for a draw gesture it *commits* what was drawn
 		// rather than discarding it. Leaving it ungated would let a stroke
@@ -1045,6 +1209,7 @@ export class AnnotationController {
 		}
 
 		this.drag = null;
+		this.gestureTool = null;
 		this.redrawOverlay(pageNumber);
 		this.notify();
 	}
@@ -1080,7 +1245,7 @@ export class AnnotationController {
 						id: createId(),
 						kind: 'shape',
 						tool: recognized.tool,
-						color: this.getColor(),
+						color: this.inkColor(),
 						width: this.inkWidth(pageNumber),
 						start: recognized.start,
 						end: recognized.end,
@@ -1091,7 +1256,7 @@ export class AnnotationController {
 		}
 
 		if (mode.tool === 'highlighter') {
-			const snapped = this.options.onSnapHighlighterStroke?.(pageNumber, mode.points, this.getColor());
+			const snapped = this.options.onSnapHighlighterStroke?.(pageNumber, mode.points, this.inkColor());
 			if (snapped && snapped.length > 0) {
 				this.commitNew(pageNumber, snapped);
 				return;
@@ -1172,7 +1337,7 @@ export class AnnotationController {
 			id: createId(),
 			kind: 'stroke',
 			tool: mode.tool,
-			color: this.getColor(),
+			color: this.inkColor(),
 			width: this.inkWidth(pageNumber),
 			points,
 			...(brush !== 'pen' ? { brush } : {}),
@@ -1207,6 +1372,29 @@ export class AnnotationController {
 		return this.toolState.getBrush();
 	}
 
+	// Puts an annotation the host made — an imported picture — onto a page
+	// as one step of undo, and hands it over selected, with the lasso in
+	// hand, so it can be moved and sized into place straight away.
+	place(pageNumber: number, annotation: Annotation): void {
+		if (this.readOnly) return;
+		this.setTool('select');
+		this.commitNew(pageNumber, annotation);
+		this.selection = { pageNumber, ids: new Set([annotation.id]) };
+		this.redrawOverlay(pageNumber);
+		this.notify();
+	}
+
+	// Whether the host can import into this surface, and asking it to: the
+	// toolbar's import button. The host owns the menu and the file picking,
+	// as it owns everything else outside the drawing.
+	canImport(): boolean {
+		return !!this.options.onImport;
+	}
+
+	openImport(anchor: HTMLElement): void {
+		if (!this.readOnly) this.options.onImport?.(anchor);
+	}
+
 	setBrush(brush: PenBrush): void {
 		this.toolState.setBrush(brush);
 	}
@@ -1216,7 +1404,7 @@ export class AnnotationController {
 			id: createId(),
 			kind: 'shape',
 			tool: mode.tool,
-			color: this.getColor(),
+			color: this.inkColor(),
 			width: this.inkWidth(pageNumber),
 			start: mode.start,
 			end: mode.end,
@@ -1402,7 +1590,7 @@ export class AnnotationController {
 				id: DRAFT_ID,
 				kind: 'stroke',
 				tool: mode.tool,
-				color: this.getColor(),
+				color: this.inkColor(),
 				width: this.inkWidth(pageNumber),
 				points: this.inkPoints(mode),
 				...(brush !== 'pen' ? { brush } : {}),
@@ -1413,7 +1601,7 @@ export class AnnotationController {
 				id: DRAFT_ID,
 				kind: 'shape',
 				tool: mode.tool,
-				color: this.getColor(),
+				color: this.inkColor(),
 				width: this.inkWidth(pageNumber),
 				start: mode.start,
 				end: mode.end,
@@ -1421,6 +1609,10 @@ export class AnnotationController {
 		}
 		return null;
 	}
+}
+
+function pointInRect(point: Point, rect: Rect): boolean {
+	return point.x >= rect.minX && point.x <= rect.maxX && point.y >= rect.minY && point.y <= rect.maxY;
 }
 
 // The corner of a box across from a handle — the one that stays put while

@@ -72,7 +72,38 @@ export interface ShapeAnnotation extends BaseAnnotation {
 	end: Point;
 }
 
-export type Annotation = StrokeAnnotation | ShapeAnnotation | NoteAnnotation;
+// A picture's pixels, as a page holds them. JPEG bytes for a picture with
+// nothing see-through in it, which is nearly every photo and keeps one
+// small; raw RGBA otherwise, so a transparent PNG keeps its transparency.
+// Either way exactly what goes into the PDF, so reading one back out of a
+// file gives back what was put in.
+export interface PicturePixels {
+	format: 'jpeg' | 'rgba';
+	width: number;
+	height: number;
+	data: Uint8Array;
+}
+
+// A picture placed on a page: an image imported from the vault or the
+// device, which can be moved, scaled and deleted like a drawing, and is
+// drawn beneath the ink so it can be written on. `start` and `end` are
+// opposite corners of the box it fills.
+export interface ImageAnnotation extends BaseAnnotation {
+	kind: 'image';
+	start: Point;
+	end: Point;
+	picture: PicturePixels;
+	// Locked in place: it can still be selected — which is how it is
+	// unlocked again — but not moved, sized or deleted, and a lasso drawn
+	// round the writing on it leaves it where it is.
+	locked?: boolean;
+}
+
+export function isLockedPicture(annotation: Annotation): boolean {
+	return annotation.kind === 'image' && annotation.locked === true;
+}
+
+export type Annotation = StrokeAnnotation | ShapeAnnotation | NoteAnnotation | ImageAnnotation;
 
 // The marker a note annotation draws, in the surface’s own coordinate
 // space. Fixed rather than derived from stroke width: a note has no

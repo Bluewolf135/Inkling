@@ -71,7 +71,7 @@ export function hitTestAnnotation(annotation: Annotation, point: Point): boolean
 		return distanceToPolyline(point, annotation.points) <= tolerance;
 	}
 
-	if (annotation.tool === 'line' || annotation.tool === 'arrow') {
+	if (annotation.kind === 'shape' && (annotation.tool === 'line' || annotation.tool === 'arrow')) {
 		return distanceToSegment(point, annotation.start, annotation.end) <= tolerance;
 	}
 
@@ -112,7 +112,7 @@ export function pointInPolygon(point: Point, polygon: Point[]): boolean {
 function extentPoints(annotation: Annotation): Point[] {
 	if (annotation.kind === 'note') return [annotation.at];
 	if (annotation.kind === 'stroke') return annotation.points;
-	if (annotation.tool === 'line' || annotation.tool === 'arrow') return [annotation.start, annotation.end];
+	if (annotation.kind === 'shape' && (annotation.tool === 'line' || annotation.tool === 'arrow')) return [annotation.start, annotation.end];
 	const box = boundingBox(annotation);
 	return [
 		{ x: box.minX, y: box.minY },
@@ -140,6 +140,9 @@ export const LASSO_COVERAGE = 0.6;
 // For a stroke that is most of its samples, which sit along it evenly
 // enough to stand for its length.
 export function polygonSelectsAnnotation(annotation: Annotation, polygon: Point[]): boolean {
+	// A locked picture is the page's background, not something to pick up
+	// with the writing on it.
+	if (annotation.kind === 'image' && annotation.locked) return false;
 	const points = extentPoints(annotation);
 	if (points.length === 0) return false;
 	let inside = 0;

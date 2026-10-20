@@ -36,7 +36,9 @@ describe('normalizeToolbarLayout', () => {
 		const moved = [...order.filter((id) => id !== 'clear-page' && id !== 'add-page'), 'clear-page', 'add-page'] as ToolbarItemId[];
 		const layout = normalizeToolbarLayout({ order: moved, hidden: [] });
 		expect(layout.order).toHaveLength(ALL.length);
-		expect(layout.order.indexOf('invert')).toBe(layout.order.indexOf('add-page') + 1);
+		// Whatever comes before it by default, wherever that has moved to.
+		const neighbour = ALL[ALL.indexOf('invert') - 1] as ToolbarItemId;
+		expect(layout.order.indexOf('invert')).toBe(layout.order.indexOf(neighbour) + 1);
 	});
 
 	it('puts a missing first item at the start', () => {

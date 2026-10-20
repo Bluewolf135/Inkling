@@ -1,6 +1,6 @@
 import { boundingBox, unionBoundingBox } from './geometry';
 import { isOutlined, isSharp, SHARP_MITRE_LIMIT, smoothedPath, strokeCentreline, strokeOutline, type PathSegment } from './stroke';
-import { Annotation, NOTE_MARKER_SIZE, Point, Rect, StrokeAnnotation } from './types';
+import { Annotation, ImageAnnotation, isLockedPicture, NOTE_MARKER_SIZE, PicturePixels, Point, Rect, StrokeAnnotation } from './types';
 
 const SELECTION_COLOR = '#1971c2';
 
@@ -175,7 +175,64 @@ function drawNoteMarker(ctx: CanvasRenderingContext2D, at: Point, color: string)
 	ctx.restore();
 }
 
+// ---- Pictures ----
+//
+// A picture is decoded once into a bitmap and drawn from that. Decoding is
+// asynchronous, and a frame cannot wait for it, so a picture not decoded
+// yet draws as a pale placeholder and whoever is listening (the
+// controller) repaints when it is ready.
+
+const pictures = new WeakMap<PicturePixels, ImageBitmap | 'decoding' | 'failed'>();
+const pictureListeners = new Set<() => void>();
+
+export function onPictureDecoded(listener: () => void): () => void {
+	pictureListeners.add(listener);
+	return () => pictureListeners.delete(listener);
+}
+
+function pictureBitmap(picture: PicturePixels): ImageBitmap | null {
+	const known = pictures.get(picture);
+	if (known && known !== 'decoding' && known !== 'failed') return known;
+	if (known || typeof createImageBitmap !== 'function') return null;
+	pictures.set(picture, 'decoding');
+	const source =
+		picture.format === 'jpeg'
+			? new Blob([new Uint8Array(picture.data)], { type: 'image/jpeg' })
+			: new ImageData(new Uint8ClampedArray(picture.data), picture.width, picture.height);
+	createImageBitmap(source).then(
+		(bitmap) => {
+			pictures.set(picture, bitmap);
+			for (const listener of pictureListeners) listener();
+		},
+		(error: unknown) => {
+			pictures.set(picture, 'failed');
+			console.error('Inkling: could not decode a picture.', error);
+		},
+	);
+	return null;
+}
+
+function drawPicture(ctx: CanvasRenderingContext2D, annotation: ImageAnnotation): void {
+	const box = boundingBox(annotation);
+	const width = box.maxX - box.minX;
+	const height = box.maxY - box.minY;
+	const bitmap = pictureBitmap(annotation.picture);
+	ctx.save();
+	if (bitmap) {
+		ctx.imageSmoothingQuality = 'high';
+		ctx.drawImage(bitmap, box.minX, box.minY, width, height);
+	} else {
+		ctx.fillStyle = 'rgba(128, 128, 128, 0.15)';
+		ctx.fillRect(box.minX, box.minY, width, height);
+	}
+	ctx.restore();
+}
+
 function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, cache: boolean): void {
+	if (annotation.kind === 'image') {
+		drawPicture(ctx, annotation);
+		return;
+	}
 	ctx.save();
 	ctx.strokeStyle = annotation.color;
 	ctx.lineWidth = annotation.width;
@@ -328,6 +385,11 @@ function drawSelectionRings(ctx: CanvasRenderingContext2D, selected: Annotation[
 			ctx.fillRect(annotation.at.x - half, annotation.at.y - half, half * 2, half * 2);
 			return;
 		}
+		if (annotation.kind === 'image') {
+			const box = boundingBox(annotation);
+			ctx.fillRect(box.minX - grow, box.minY - grow, box.maxX - box.minX + grow * 2, box.maxY - box.minY + grow * 2);
+			return;
+		}
 		if (annotation.kind === 'stroke') {
 			const path = strokePath(annotation, true);
 			if (isTapered(annotation)) {
@@ -355,7 +417,51 @@ function drawSelectionRings(ctx: CanvasRenderingContext2D, selected: Annotation[
 	ctx.restore();
 }
 
-function drawSelectionFrame(ctx: CanvasRenderingContext2D, box: Rect, chrome: number): void {
+// The lock button, on a picture selected on its own: centred above the
+// frame, sized in screen pixels like the handles.
+const LOCK_RADIUS = 13;
+const LOCK_GAP = 10;
+
+export function lockButtonCentre(box: Rect, chrome: number): Point {
+	const frame = selectionFrame(box, chrome);
+	return { x: (frame.minX + frame.maxX) / 2, y: frame.minY - (LOCK_GAP + LOCK_RADIUS) * chrome };
+}
+
+export function lockButtonAt(box: Rect, chrome: number, point: Point): boolean {
+	const centre = lockButtonCentre(box, chrome);
+	return Math.hypot(point.x - centre.x, point.y - centre.y) <= (LOCK_RADIUS + 6) * chrome;
+}
+
+// A padlock in a round button, closed or open.
+function drawLockButton(ctx: CanvasRenderingContext2D, box: Rect, chrome: number, locked: boolean): void {
+	const { x, y } = lockButtonCentre(box, chrome);
+	const unit = chrome;
+	ctx.save();
+	ctx.beginPath();
+	ctx.arc(x, y, LOCK_RADIUS * unit, 0, Math.PI * 2);
+	ctx.fillStyle = locked ? SELECTION_COLOR : '#ffffff';
+	ctx.fill();
+	ctx.lineWidth = 1.5 * unit;
+	ctx.strokeStyle = SELECTION_COLOR;
+	ctx.stroke();
+
+	const colour = locked ? '#ffffff' : SELECTION_COLOR;
+	// The body.
+	ctx.fillStyle = colour;
+	ctx.fillRect(x - 5.5 * unit, y - 1 * unit, 11 * unit, 8 * unit);
+	// The shackle: closed over the body, or swung open to one side.
+	ctx.beginPath();
+	ctx.lineWidth = 2 * unit;
+	ctx.strokeStyle = colour;
+	const shackleX = locked ? x : x + 4 * unit;
+	ctx.arc(shackleX, y - 1 * unit, 3.5 * unit, Math.PI, 0);
+	ctx.moveTo(shackleX - 3.5 * unit, y - 1 * unit);
+	ctx.lineTo(shackleX - 3.5 * unit, y + (locked ? 0 : -1) * unit);
+	ctx.stroke();
+	ctx.restore();
+}
+
+function drawSelectionFrame(ctx: CanvasRenderingContext2D, box: Rect, chrome: number, handles = true): void {
 	const frame = selectionFrame(box, chrome);
 	withHalo(
 		ctx,
@@ -368,6 +474,7 @@ function drawSelectionFrame(ctx: CanvasRenderingContext2D, box: Rect, chrome: nu
 		FRAME_DASH.map((length) => length * chrome),
 	);
 
+	if (!handles) return;
 	ctx.save();
 	ctx.fillStyle = '#ffffff';
 	ctx.strokeStyle = SELECTION_COLOR;
@@ -452,8 +559,13 @@ export function renderBase(ctx: CanvasRenderingContext2D, annotations: Annotatio
 // detail layer, which draws the same ink again magnified onto a canvas of
 // its own (see pdfView.ts).
 export function drawInk(ctx: CanvasRenderingContext2D, annotations: Annotation[]): void {
+	// Pictures first, beneath everything: a photo of a whiteboard is
+	// something to write on, not something to cover what was written.
 	for (const annotation of annotations) {
-		if (!isHighlight(annotation)) drawAnnotation(ctx, annotation, true);
+		if (annotation.kind === 'image') drawAnnotation(ctx, annotation, true);
+	}
+	for (const annotation of annotations) {
+		if (annotation.kind !== 'image' && !isHighlight(annotation)) drawAnnotation(ctx, annotation, true);
 	}
 }
 
@@ -507,7 +619,12 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, options: OverlayOptio
 	const selected = options.selected;
 	if (selected && selected.length > 0) {
 		drawSelectionRings(ctx, selected, chrome);
-		drawSelectionFrame(ctx, unionBoundingBox(selected.map(boundingBox)), chrome);
+		const box = unionBoundingBox(selected.map(boundingBox));
+		// Nothing to size on a selection that cannot move.
+		const locked = selected.some(isLockedPicture);
+		drawSelectionFrame(ctx, box, chrome, !locked);
+		const [only] = selected;
+		if (selected.length === 1 && only?.kind === 'image') drawLockButton(ctx, box, chrome, locked);
 	}
 
 	if (options.draft) drawAnnotation(ctx, options.draft, false);

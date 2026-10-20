@@ -23,7 +23,7 @@ describe('normalizeSettings', () => {
 			defaultTemplate: 'dot-grid',
 			pageSize: 'a4',
 			saveCadence: 'frequent',
-			smoothing: false,
+			blockCaptions: true,
 			shapeRecognition: 'off',
 			darkInversion: 'on',
 			toolbarStartsCollapsed: true,
@@ -31,7 +31,7 @@ describe('normalizeSettings', () => {
 		expect(settings.defaultTemplate).toBe('dot-grid');
 		expect(settings.pageSize).toBe('a4');
 		expect(settings.saveCadence).toBe('frequent');
-		expect(settings.smoothing).toBe(false);
+		expect(settings.blockCaptions).toBe(true);
 		expect(settings.shapeRecognition).toBe('off');
 		expect(settings.darkInversion).toBe('on');
 		expect(settings.toolbarStartsCollapsed).toBe(true);
@@ -54,17 +54,18 @@ describe('normalizeSettings', () => {
 	});
 
 	it('falls back for a value of the wrong type', () => {
-		const settings = normalizeSettings({ smoothing: 'yes', toolbarStartsCollapsed: 1, defaultTemplate: 7 });
-		expect(settings.smoothing).toBe(true);
+		const settings = normalizeSettings({ blockCaptions: 'yes', toolbarStartsCollapsed: 1, defaultTemplate: 7 });
+		expect(settings.blockCaptions).toBe(false);
 		expect(settings.toolbarStartsCollapsed).toBe(false);
 		expect(settings.defaultTemplate).toBe('blank');
 	});
 
 	it('drops keys it does not know', () => {
-		// `pressure` included: it was a setting once, and is a per-pen switch
-		// in the pen picker now, so a data.json from before carries one.
-		const settings = normalizeSettings({ smoothing: false, pressure: false, somethingFromTheFuture: { deeply: 'nested' } });
-		expect(settings).toEqual({ ...defaultSettings(), smoothing: false });
+		// `pressure` and `smoothing` included: both were settings once — the
+		// one is a per-pen switch in the pen picker now, the other was never
+		// wired to anything — so a data.json from before carries them.
+		const settings = normalizeSettings({ blockCaptions: true, pressure: false, smoothing: false, somethingFromTheFuture: { deeply: 'nested' } });
+		expect(settings).toEqual({ ...defaultSettings(), blockCaptions: true });
 	});
 
 	it('refuses an extraction pattern that would collapse every book into one note', () => {

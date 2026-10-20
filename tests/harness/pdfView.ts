@@ -54,9 +54,19 @@ export function openPdfView(options: { toolState?: ToolState; writeDone?: () => 
 			terminated = true;
 		}),
 	};
+	// File events the view listens to, kept so a test can fire one — a sync
+	// landing another device's save, say.
+	const vaultListeners = new Map<string, Array<(file: unknown) => void>>();
 	const vault = {
 		modifyBinary: vi.fn(async () => {}),
 		adapter: { stat: vi.fn(async () => ({ size: 400 })) },
+		on: (name: string, listener: (file: unknown) => void) => {
+			vaultListeners.set(name, [...(vaultListeners.get(name) ?? []), listener]);
+			return {};
+		},
+		trigger: (name: string, file: unknown) => {
+			for (const listener of vaultListeners.get(name) ?? []) listener(file);
+		},
 	};
 	const leaf = { app: { vault, workspace: { on: () => ({}) } } };
 	const view = new PdfAnnotateView(leaf as never, options.toolState ?? new ToolState());

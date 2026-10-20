@@ -133,6 +133,14 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		toolButtons.set(tool, button);
 		items.set(tool, button);
 	}
+	// Draw with a finger. Offered only where there is a touch screen to draw
+	// on: a desktop with a mouse would have a button that does nothing.
+	const touchScreen = (host.ownerDocument.defaultView?.navigator.maxTouchPoints ?? 0) > 0;
+	const touchDrawButton = itemButton('inkling-tool-button', 'touch-draw', () =>
+		controller.setTouchDrawing(!controller.isTouchDrawing()),
+	);
+	if (touchScreen) items.set('touch-draw', touchDrawButton);
+
 	const penButton = toolButtons.get('pen');
 	penButton?.setAttribute('aria-haspopup', 'dialog');
 	penButton?.setAttribute('aria-expanded', 'false');
@@ -219,6 +227,8 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	// imported PDFs (books, papers, ...) via the refresh() below, since
 	// there's no notion of "add a blank/lined/dot-grid page" to a book.
 	const addPageButton = itemButton('inkling-tool-button', 'add-page', () => controller.addPage());
+	// PDF pages and pictures, into a PDF. Only where the host offers it.
+	const importButton: HTMLButtonElement = itemButton('inkling-tool-button', 'import', () => controller.openImport(importButton));
 	// Darkens the page under the ink. A reading action like zoom, so it
 	// stays available on a document that cannot be written to.
 	const invertButton = itemButton('inkling-tool-button', 'invert', () => controller.toggleInversion());
@@ -230,6 +240,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	items.set('delete', deleteButton);
 	items.set('clear-page', clearPageButton);
 	items.set('add-page', addPageButton);
+	items.set('import', importButton);
 	items.set('invert', invertButton);
 	items.set('outline', navButton);
 
@@ -361,7 +372,12 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		const noteButton = toolButtons.get('note');
 		if (noteButton && !controller.canTakeNotes()) noteButton.hidden = true;
 		for (const group of [colorGroup, widthGroup, pageGroup, zoomGroup, spacer, ...separators]) group.hidden = collapsed;
-		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, invertButton, navButton]) button.hidden = collapsed;
+		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, importButton, invertButton, navButton, touchDrawButton]) {
+			button.hidden = collapsed;
+		}
+		const touchDrawing = controller.isTouchDrawing();
+		touchDrawButton.toggleClass('is-active', touchDrawing);
+		touchDrawButton.setAttribute('aria-pressed', String(touchDrawing));
 		if (layoutButton) layoutButton.hidden = collapsed;
 		setIconOrText(collapseButton, collapsed ? 'chevrons-down' : 'chevrons-up', collapsed ? '⌄' : '⌃');
 		setTooltip(collapseButton, collapsed ? 'Show tools' : 'Collapse tools');
@@ -448,11 +464,13 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		// the second has to win whenever the strip is open.
 		if (!collapsed) {
 			addPageButton.hidden = !controller.getCanManagePages();
+			importButton.hidden = !controller.canImport();
 			navButton.hidden = !controller.canToggleNavigation();
 			invertButton.hidden = !controller.canInvert();
 		}
 		invertButton.toggleClass('is-active', controller.isInverted());
 		addPageButton.disabled = readOnly;
+		importButton.disabled = readOnly;
 	};
 	refresh();
 
