@@ -85,6 +85,7 @@ export interface PointerOptions {
 	pointerType?: string;
 	pressure?: number;
 	isPrimary?: boolean;
+	button?: number;
 }
 
 class FakePointerEvent extends Event {
@@ -92,6 +93,7 @@ class FakePointerEvent extends Event {
 	pointerType: string;
 	pressure: number;
 	isPrimary: boolean;
+	button: number;
 	width = 1;
 	height = 1;
 	clientX: number;
@@ -103,6 +105,7 @@ class FakePointerEvent extends Event {
 		this.pointerType = init.pointerType ?? 'pen';
 		this.pressure = init.pressure ?? 0.5;
 		this.isPrimary = init.isPrimary ?? true;
+		this.button = init.button ?? 0;
 		this.clientX = init.clientX;
 		this.clientY = init.clientY;
 	}

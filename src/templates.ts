@@ -1,4 +1,5 @@
-import { PDFDocument, PDFPage, PageSizes, rgb } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFNumber, PDFOperator, PDFOperatorNames, PDFPage, PageSizes, popGraphicsState, pushGraphicsState, rgb } from 'pdf-lib';
+import { INFINITE_BASE_HEIGHT, INFINITE_BASE_WIDTH, INFINITE_CANVAS_KEYWORD, MAX_COORDINATE, type PdfBox } from './pdf/infiniteCanvas';
 
 export type TemplateStyle = 'blank' | 'lined' | 'dot-grid';
 
@@ -16,6 +17,17 @@ export const PAGE_SIZE = PageSizes.Letter;
 // rather than a constant since Track D — the original plan flagged Letter
 // as an unconfirmed guess, and it is wrong for most of the world.
 export type PageSizeName = 'letter' | 'a4';
+
+// Pages of a fixed size, or one page that grows as it is written on (see
+// pdf/infiniteCanvas.ts).
+export type CanvasMode = 'pages' | 'infinite';
+
+export const CANVAS_MODES: readonly CanvasMode[] = ['pages', 'infinite'];
+
+export const CANVAS_MODE_LABELS: Record<CanvasMode, string> = {
+	pages: 'Pages',
+	infinite: 'Infinite canvas',
+};
 
 export function pageSizeFor(name: PageSizeName): [number, number] {
 	return name === 'a4' ? PageSizes.A4 : PageSizes.Letter;
@@ -91,14 +103,117 @@ export function readTemplateStyle(pdf: PDFDocument): TemplateStyle {
 	return parseTemplateStyleFromKeywords(pdf.getKeywords()) ?? 'blank';
 }
 
-function writeTemplateStyle(pdf: PDFDocument, style: TemplateStyle): void {
-	pdf.setKeywords([`${TEMPLATE_KEYWORD_PREFIX}${style}`]);
+function writeTemplateStyle(pdf: PDFDocument, style: TemplateStyle, mode: CanvasMode): void {
+	const keywords = [`${TEMPLATE_KEYWORD_PREFIX}${style}`];
+	if (mode === 'infinite') keywords.push(INFINITE_CANVAS_KEYWORD);
+	pdf.setKeywords(keywords);
 }
 
-export async function createHandwrittenNoteBytes(style: TemplateStyle, size: PageSizeName = 'letter'): Promise<Uint8Array> {
+export async function createHandwrittenNoteBytes(
+	style: TemplateStyle,
+	size: PageSizeName = 'letter',
+	mode: CanvasMode = 'pages',
+): Promise<Uint8Array> {
 	const pdf = await PDFDocument.create();
-	const page = pdf.addPage(pageSizeFor(size));
-	applyTemplateStyle(page, style);
-	writeTemplateStyle(pdf, style);
+	if (mode === 'infinite') {
+		const page = pdf.addPage([INFINITE_BASE_WIDTH, INFINITE_BASE_HEIGHT]);
+		fillInfiniteBackground(pdf, page, style);
+	} else {
+		const page = pdf.addPage(pageSizeFor(size));
+		applyTemplateStyle(page, style);
+	}
+	writeTemplateStyle(pdf, style, mode);
 	return pdf.save();
+}
+
+// ---- Infinite canvas background ----
+//
+// The ruling of a page that grows is drawn once, as a PDF tiling pattern
+// filled over the whole area the page is ever allowed to reach, and the
+// MediaBox decides how much of it shows. So growing a canvas changes its
+// box and nothing else: no new content, no seams where one stretch of
+// ruling meets the next, and a file the same size at 2 feet as at 11
+// inches. Drawing the dots one by one, the way a fixed page does, would
+// have cost a few hundred bytes per dot — megabytes for a large canvas.
+//
+// Pattern space is the page's default user space, whatever the box, so
+// the grid is anchored to the same origin however far the box has moved.
+
+const BACKGROUND_PATTERN = 'InklingBackground';
+// Lines tile in long strips, so that a renderer which leaves a hairline
+// where tiles meet leaves as few of them as possible.
+const LINE_TILE_WIDTH = 288;
+// The four-Bézier circle approximation's control distance.
+const CIRCLE_KAPPA = 0.5522847498;
+
+function num(value: number): string {
+	return Number(value.toFixed(4)).toString();
+}
+
+function colorOperands(color: ReturnType<typeof rgb>): string {
+	return `${num(color.red)} ${num(color.green)} ${num(color.blue)}`;
+}
+
+function dotTile(): string {
+	const c = DOT_SPACING / 2;
+	const r = DOT_RADIUS;
+	const k = r * CIRCLE_KAPPA;
+	return [
+		`${colorOperands(DOT_COLOR)} rg`,
+		`${num(c + r)} ${num(c)} m`,
+		`${num(c + r)} ${num(c + k)} ${num(c + k)} ${num(c + r)} ${num(c)} ${num(c + r)} c`,
+		`${num(c - k)} ${num(c + r)} ${num(c - r)} ${num(c + k)} ${num(c - r)} ${num(c)} c`,
+		`${num(c - r)} ${num(c - k)} ${num(c - k)} ${num(c - r)} ${num(c)} ${num(c - r)} c`,
+		`${num(c + k)} ${num(c - r)} ${num(c + r)} ${num(c - k)} ${num(c + r)} ${num(c)} c`,
+		'f',
+	].join('\n');
+}
+
+function lineTile(): string {
+	const y = RULE_SPACING / 2;
+	return [`${colorOperands(RULE_COLOR)} RG`, `${num(RULE_THICKNESS)} w`, `0 ${num(y)} m ${LINE_TILE_WIDTH} ${num(y)} l S`].join('\n');
+}
+
+function fillInfiniteBackground(pdf: PDFDocument, page: PDFPage, style: TemplateStyle): void {
+	if (style === 'blank') return;
+	const [width, height, content] =
+		style === 'lined' ? [LINE_TILE_WIDTH, RULE_SPACING, lineTile()] : [DOT_SPACING, DOT_SPACING, dotTile()];
+
+	const context = pdf.context;
+	const pattern = context.flateStream(content, {
+		Type: 'Pattern',
+		PatternType: 1,
+		// Coloured: the tile carries its own colour.
+		PaintType: 1,
+		// Constant spacing, so a grid never drifts by a pixel between tiles.
+		TilingType: 1,
+		BBox: [0, 0, width, height],
+		XStep: width,
+		YStep: height,
+		Resources: {},
+	});
+	const { Resources } = page.node.normalizedEntries();
+	Resources.set(PDFName.of('Pattern'), context.obj({ [BACKGROUND_PATTERN]: context.register(pattern) }));
+
+	const extent = MAX_COORDINATE;
+	page.pushOperators(
+		pushGraphicsState(),
+		PDFOperator.of(PDFOperatorNames.NonStrokingColorspace, [PDFName.of('Pattern')]),
+		PDFOperator.of(PDFOperatorNames.NonStrokingColorN, [PDFName.of(BACKGROUND_PATTERN)]),
+		PDFOperator.of(
+			PDFOperatorNames.AppendRectangle,
+			[-extent, -extent, extent * 2, extent * 2].map((value) => PDFNumber.of(value)),
+		),
+		PDFOperator.of(PDFOperatorNames.FillNonZero),
+		popGraphicsState(),
+	);
+}
+
+// Gives an infinite canvas's page a new box. The CropBox follows if the
+// file has one, since a reader shows the smaller of the two.
+export function setInfiniteCanvasBox(page: PDFPage, box: PdfBox): void {
+	const width = box.right - box.left;
+	const height = box.top - box.bottom;
+	page.setMediaBox(box.left, box.bottom, width, height);
+	if (page.node.get(PDFName.of('CropBox'))) page.setCropBox(box.left, box.bottom, width, height);
 }

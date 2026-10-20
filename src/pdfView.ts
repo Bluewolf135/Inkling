@@ -1,19 +1,34 @@
 import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
-import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
+import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy, type RenderTask } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { AnnotationController, buildToolbar, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
+import { AnnotationController, buildToolbar, HistoryStack, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
+import { attachViewNavigation, type ViewZoom } from './annotate/pointer';
 import { createId } from './annotate/id';
-import { AnnotationWriterClient } from './pdf/annotationWriterClient';
+import { AnnotationWriterClient, type OpenResult } from './pdf/annotationWriterClient';
 import { toArrayBuffer } from './binary';
 import { appendBinarySafely, canAppendBinary, writeBinarySafely } from './vaultWrite';
 import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
 import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
 import { BASELINE_DESCENT_RATIO, groupIntoLines, highlightBarHeight, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
-import { RENDER_SCALE, baseRenderScale, layoutRenderScale, zoomedRenderScale } from './pdf/renderScale';
+import { MAX_CANVAS_PIXELS, RENDER_SCALE, baseRenderScale, capToPixelBudget, layoutRenderScale, zoomedRenderScale } from './pdf/renderScale';
+import {
+	EDGE_ZONE,
+	GROW_STEP_X,
+	GROW_STEP_Y,
+	INFINITE_BASE_WIDTH,
+	boundsOf,
+	boxFromView,
+	edgesNear,
+	growBox,
+	isInfiniteCanvasKeywords,
+	type Edge,
+	type Growth,
+	type PdfBox,
+} from './pdf/infiniteCanvas';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { placeWithin } from './pdf/popoverPlacement';
 import { defaultSettings, type InklingSettings } from './settings';
-import { applyTemplateStyle, pageSizeFor, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
+import { applyTemplateStyle, pageSizeFor, parseTemplateStyleFromKeywords, readTemplateStyle, setInfiniteCanvasBox } from './templates';
 
 // pdfjs-dist is pinned to an exact version (see package.json) — 5.4.624+
 // calls Uint8Array.prototype.toHex() unconditionally when computing a PDF's
@@ -56,6 +71,71 @@ const WRITE_DEBOUNCE_MS = 1500;
 // accounts for the same offset that nudges it clear of the marker. As a
 // margin it was invisible to that arithmetic.
 const NOTE_POPOVER_MARGIN = 8;
+
+// How long after the last stroke an infinite canvas checks whether its ink
+// has come near an edge, and how long a scroll has to have stopped before
+// it counts as having arrived at one.
+const GROW_AFTER_INK_MS = 1200;
+const GROW_AFTER_SCROLL_MS = 400;
+// How often a grown page, rendered and ready, checks whether the pen has
+// lifted so it can be swapped in.
+const GROW_IDLE_POLL_MS = 50;
+// Scrolling the view itself — restoring the position after a growth, or
+// jumping to a page — is not the reader moving towards an edge. Scroll
+// events this soon after a load are not taken as one.
+const SCROLL_GROWTH_SETTLE_MS = 800;
+
+// How far the whole view can be zoomed: out far enough to see a spread of
+// pages at once, in as far as a page can usefully be rendered (see
+// MAX_RENDER_SCALE) — the same kind of range Obsidian's own reader has.
+const VIEW_MIN_ZOOM = 0.25;
+const VIEW_MAX_ZOOM = 5;
+
+// What a view zoom holds still: a point on one page, as a fraction of its
+// size, which is the one description of "this spot" that is still true
+// after every page has changed size.
+interface ViewAnchorPoint {
+	page: HTMLElement | null;
+	fx: number;
+	fy: number;
+}
+
+// The detail layer (see renderDetail): how far past the edges of the view a
+// sharp region reaches, as a share of the view's size, so that a short
+// scroll stays sharp; and how long scrolling has to pause before the region
+// is drawn again where the view has moved to.
+const DETAIL_MARGIN = 0.15;
+const DETAIL_DELAY_MS = 120;
+// How much sharper a page has to need to be than its canvas is before the
+// detail layer is worth drawing.
+const DETAIL_THRESHOLD = 1.1;
+
+// A page's sharp region, and the three canvases that draw it: the page
+// itself, its ink, and the stroke being drawn. Placed by fractions of the
+// page, which stay true however the view zooms afterwards.
+interface PageDetail {
+	left: number;
+	top: number;
+	right: number;
+	bottom: number;
+	// The page's full width, and the region's offset into it, in the detail
+	// canvases' pixels — what maps the page's canvas space onto them.
+	pageWidth: number;
+	offsetX: number;
+	offsetY: number;
+	pdf: HTMLCanvasElement | null;
+	ink: HTMLCanvasElement | null;
+	overlay: HTMLCanvasElement | null;
+	task: RenderTask | null;
+	generation: number;
+	inkFrame: number | null;
+	overlayFrame: number | null;
+}
+
+// Parts of the view a finger should work in rather than move the view by:
+// the tool strip, the outline and find panel (which scrolls by itself), and
+// a note being typed.
+const NAVIGATION_EXEMPT = '.inkling-toolbar, .inkling-nav-panel, .inkling-note-editor';
 
 // One press of a zoom key. Matches the step the toolbar buttons use, so
 // the two agree about what "zoom in once" means.
@@ -308,6 +388,11 @@ export class PdfAnnotateView extends FileView {
 	// pane resize, say) would put every stroke on that page in the wrong
 	// place — the same reason renderedScales is reused rather than reset.
 	private baseScales = new Map<number, number>();
+	// The base scale before capToPixelBudget lowered it, where it did. Pen
+	// width is measured against this, so that a canvas too large to back at
+	// full density still takes ink at the width the pen says — just drawn
+	// with fewer pixels — rather than ink that thickens as the canvas grows.
+	private inkBaseScales = new Map<number, number>();
 	// The scale each page is laid out at — fitted to the pane, the way the
 	// core PDF view fits its own (see pdf/renderScale.ts). Kept per page
 	// rather than recomputed, for the same reason baseScales is: a page's
@@ -382,6 +467,40 @@ export class PdfAnnotateView extends FileView {
 	// it can arrive before onLoadFile has finished creating them, in which
 	// case scrollToPage would have nothing to find yet.
 	private pendingScrollToPage: number | null = null;
+	// The undo history, owned here rather than by the controller so that it
+	// can be carried into the new coordinate space an infinite canvas's page
+	// has each time it grows. Cleared on every load, as the controller's own
+	// was.
+	private readonly history = new HistoryStack();
+	// The open file's page box in PDF space, when it is an infinite canvas
+	// (see pdf/infiniteCanvas.ts); null for every other PDF.
+	private infiniteBox: PdfBox | null = null;
+	private growing = false;
+	private growAfterInkHandle: number | null = null;
+	private growAfterScrollHandle: number | null = null;
+	// Where the current scroll gesture started, for which way it went.
+	private scrollGestureStart: { left: number; top: number } | null = null;
+	private scrollGrowthArmedAt = 0;
+	private reportedCanvasLimit = false;
+	// How far the whole view is zoomed, 1 being every page fitted to the
+	// pane. Applied as a multiplier on every page's laid-out size (see
+	// --inkling-view-zoom in styles.css), so the pages grow and the view
+	// scrolls across them, as it does in Obsidian's own reader.
+	private viewZoomLevel = 1;
+	// Sharp regions of pages zoomed in past what their canvas can hold. See
+	// renderDetail.
+	private readonly details = new Map<number, PageDetail>();
+	private detailHandle: number | null = null;
+	private detailGeneration = 0;
+	private readonly viewZoom: ViewZoom = {
+		min: VIEW_MIN_ZOOM,
+		max: VIEW_MAX_ZOOM,
+		get: () => this.viewZoomLevel,
+		anchorAt: (at) => this.viewAnchorAt(at),
+		zoomTo: (scale, anchor, at) => this.zoomViewTo(scale, anchor as ViewAnchorPoint, at),
+		centre: () => this.viewCentre(),
+		settle: () => this.settleViewZoom(),
+	};
 	// The "opening…" placeholder, held so it can be taken down again from
 	// either of the two places that end the wait (pages ready, or a failure).
 	private loadingEl: HTMLElement | null = null;
@@ -397,6 +516,7 @@ export class PdfAnnotateView extends FileView {
 			// Shared with every other annotating surface, so the pen you set
 			// up in a note is the pen you get in a PDF (see annotate/toolState).
 			toolState,
+			history: this.history,
 			onAddPage: () => void this.addPage(),
 			getCurrentPage: () => this.currentPageNumber,
 			onAnnotationsChanged: (pageNumber) => this.markPageDirty(pageNumber),
@@ -406,7 +526,7 @@ export class PdfAnnotateView extends FileView {
 			// since re-backed denser draws the same width in PDF space rather
 			// than a thinner one.
 			getInkScale: (pageNumber) => {
-				const base = this.baseScales.get(pageNumber);
+				const base = this.inkBaseScales.get(pageNumber) ?? this.baseScales.get(pageNumber);
 				const rendered = this.renderedScales.get(pageNumber);
 				return base && rendered ? rendered / base : 1;
 			},
@@ -414,10 +534,11 @@ export class PdfAnnotateView extends FileView {
 			onGoToPage: (pageNumber) => this.scrollToPage(pageNumber),
 			onToggleNavigation: () => this.toggleNavigationPanel(),
 			onEditNote: (pageNumber, point, existing) => this.editNote(pageNumber, point, existing),
-			isPressureEnabled: () => getSettings().pressure,
 			isShapeRecognitionEnabled: () => getSettings().shapeRecognition === 'hold',
 			onToggleInversion: () => this.toggleInversion(),
 			isInverted: () => this.isInverted(),
+			viewZoom: this.viewZoom,
+			onPageRepainted: (pageNumber, layer) => this.repaintDetail(pageNumber, layer),
 		});
 	}
 
@@ -457,7 +578,19 @@ export class PdfAnnotateView extends FileView {
 		this.registerDomEvent(document, 'keydown', (event) => this.handleKey(event));
 		// contentEl is the scroll container, and outlives every file shown
 		// in it, so this is registered once here rather than per load.
-		this.registerDomEvent(this.contentEl, 'scroll', () => this.scheduleCurrentPageUpdate());
+		// Dragging, pinching and trackpad zoom, anywhere in the view — over a
+		// page, between pages, or beside them. See attachViewNavigation.
+		this.register(
+			attachViewNavigation(this.contentEl, this.viewZoom, {
+				ignore: (target) => target instanceof Element && target.closest(NAVIGATION_EXEMPT) !== null,
+				isBusy: () => this.controller.isGestureActive(),
+			}),
+		);
+		this.registerDomEvent(this.contentEl, 'scroll', () => {
+			this.scheduleCurrentPageUpdate();
+			this.onScrollForGrowth();
+			this.scheduleDetails();
+		});
 		// Obsidian fires this on a theme switch, which is what follow-theme
 		// has to react to.
 		this.registerEvent(this.app.workspace.on('css-change', () => this.applyInversion()));
@@ -612,7 +745,7 @@ export class PdfAnnotateView extends FileView {
 		// A new document is a new question about legibility.
 		this.sessionInversion = null;
 		this.applyInversion();
-		this.disposeToolbar = buildToolbar(this.contentEl, this.controller);
+		this.disposeToolbar = buildToolbar(this.contentEl, this.controller, { app: this.app });
 		this.buildNavigationPanel();
 
 		// Everything below this point is asynchronous — reading the file,
@@ -756,8 +889,18 @@ export class PdfAnnotateView extends FileView {
 		}
 		if (token !== this.renderToken) return;
 		const keywords = (metadata.info as { Keywords?: string }).Keywords;
-		this.controller.setCanManagePages(parseTemplateStyleFromKeywords(keywords) !== null);
-		const estimatedViewport = firstPage.getViewport({ scale: RENDER_SCALE });
+		// One page, or it is not a canvas whatever its keywords say: the
+		// growth below only ever reasons about page 1.
+		this.infiniteBox = isInfiniteCanvasKeywords(keywords) && pdf.numPages === 1 ? boxFromView(firstPage.view) : null;
+		this.contentEl.toggleClass('is-infinite', this.infiniteBox !== null);
+		// "Add page" means nothing on a sheet that grows by itself.
+		this.controller.setCanManagePages(parseTemplateStyleFromKeywords(keywords) !== null && this.infiniteBox === null);
+		// A canvas is laid out at its real size from the start rather than at
+		// an estimate: it is usually far from the size of a page, and an
+		// estimate would jump when the real one arrived.
+		const estimatedViewport = firstPage.getViewport({
+			scale: this.infiniteBox ? this.layoutScaleFor(1, INFINITE_BASE_WIDTH) : RENDER_SCALE,
+		});
 
 		// Stays subscribed to every placeholder for the life of the view
 		// (never unobserved) — it doubles as the "which page is the user
@@ -804,6 +947,8 @@ export class PdfAnnotateView extends FileView {
 			this.scrollToPage(this.pendingScrollToPage);
 			this.pendingScrollToPage = null;
 		}
+
+		this.scrollGrowthArmedAt = performance.now() + SCROLL_GROWTH_SETTLE_MS;
 	}
 
 	async onUnloadFile(): Promise<void> {
@@ -848,6 +993,19 @@ export class PdfAnnotateView extends FileView {
 		this.pageCanvases.clear();
 		this.renderedScales.clear();
 		this.baseScales.clear();
+		this.inkBaseScales.clear();
+		this.history.clear();
+		this.infiniteBox = null;
+		this.contentEl.classList.remove('is-infinite');
+		this.cancelGrowthChecks();
+		this.reportedCanvasLimit = false;
+		for (const pageNumber of [...this.details.keys()]) this.removeDetail(pageNumber);
+		if (this.detailHandle !== null) window.clearTimeout(this.detailHandle);
+		this.detailHandle = null;
+		if (this.viewZoomLevel !== 1) {
+			this.viewZoomLevel = 1;
+			this.contentEl.setCssProps({ '--inkling-view-zoom': '1' });
+		}
 		this.layoutScales.clear();
 		this.upgradingPages.clear();
 		this.textLines.clear();
@@ -973,6 +1131,7 @@ export class PdfAnnotateView extends FileView {
 		const placeholder = this.contentEl.querySelector<HTMLElement>(
 			`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
 		);
+		this.removeDetail(pageNumber);
 		placeholder?.querySelector('.inkling-page-content')?.remove();
 
 		this.controller.unmountPage(pageNumber);
@@ -1005,11 +1164,22 @@ export class PdfAnnotateView extends FileView {
 		// upgradeResolution sharpen a pinch-zoomed page by raising only the
 		// backing store, with no reflow.
 		const pagePointWidth = page.getViewport({ scale: 1 }).width;
-		const layoutScale = this.layoutScaleFor(pageNumber, pagePointWidth);
+		// A canvas keeps the zoom its starting page was fitted at, however wide
+		// it has grown, so that growing never shrinks the ink already on it.
+		const layoutScale = this.layoutScaleFor(pageNumber, this.infiniteBox ? INFINITE_BASE_WIDTH : pagePointWidth);
 		const layoutViewport = page.getViewport({ scale: layoutScale });
 		sizePlaceholder(placeholder, layoutViewport.width, layoutViewport.height);
 
-		const scale = this.renderedScales.get(pageNumber) ?? this.baseScaleFor(pageNumber, layoutViewport.width, pagePointWidth);
+		const pagePointHeight = page.getViewport({ scale: 1 }).height;
+		// A page rendered for the first time while the view is zoomed is
+		// rendered for the zoom, not for its fitted size and then again.
+		const scale =
+			this.renderedScales.get(pageNumber) ??
+			capToPixelBudget(
+				zoomedRenderScale(this.baseScaleFor(pageNumber, layoutViewport.width, pagePointWidth, pagePointHeight), this.viewZoomLevel),
+				pagePointWidth,
+				pagePointHeight,
+			);
 		const viewport = page.getViewport({ scale });
 
 		// A separate transformable layer inside the placeholder's fixed-size
@@ -1068,6 +1238,10 @@ export class PdfAnnotateView extends FileView {
 				this.controller.seedPage(pageNumber, saved.map((a) => toCanvasSpace(a, viewport)));
 			}
 		}
+		// A recycled page comes back at the scale it left at, which the view
+		// may since have been zoomed well away from.
+		void this.upgradeResolution(pageNumber, this.viewZoomLevel);
+		this.scheduleDetails();
 
 		// Not awaited — a highlighter stroke drawn before this resolves just
 		// falls back to committing as freehand (see snapHighlighterStroke),
@@ -1098,12 +1272,14 @@ export class PdfAnnotateView extends FileView {
 	// narrow pane is rendered for the size it is really displayed at instead
 	// of the size it would have liked to be — the memory saved there is what
 	// pays for the density.
-	private baseScaleFor(pageNumber: number, layoutWidth: number, pagePointWidth: number): number {
+	private baseScaleFor(pageNumber: number, layoutWidth: number, pagePointWidth: number, pagePointHeight: number): number {
 		const existing = this.baseScales.get(pageNumber);
 		if (existing !== undefined) return existing;
 
-		const scale = baseRenderScale(layoutWidth, pagePointWidth, window.devicePixelRatio || 1);
+		const ideal = baseRenderScale(layoutWidth, pagePointWidth, window.devicePixelRatio || 1);
+		const scale = capToPixelBudget(ideal, pagePointWidth, pagePointHeight);
 		this.baseScales.set(pageNumber, scale);
+		this.inkBaseScales.set(pageNumber, ideal);
 		return scale;
 	}
 
@@ -1149,14 +1325,21 @@ export class PdfAnnotateView extends FileView {
 		// constant, so zooming in keeps the one-canvas-pixel-per-device-pixel
 		// relationship the unzoomed page already has instead of dropping back
 		// to it.
-		const targetScale = zoomedRenderScale(base, zoomScale);
-		// Not worth a re-render for a marginal gain — and never for one that
-		// would make things *blurrier* (e.g. the user zoomed back out).
-		if (targetScale <= currentScale * 1.15) return;
-
 		const canvas = this.pageCanvases.get(pageNumber);
 		const oldViewport = this.viewports.get(pageNumber);
 		if (!canvas || !oldViewport) return;
+		// And never past what one canvas can hold, which a large page — an
+		// infinite canvas especially — reaches long before MAX_RENDER_SCALE.
+		const targetScale = capToPixelBudget(
+			zoomedRenderScale(base, zoomScale),
+			oldViewport.width / oldViewport.scale,
+			oldViewport.height / oldViewport.scale,
+		);
+		// Not worth a re-render for a marginal gain. Downwards only once the
+		// page is backed far denser than it is now shown: a page zoomed in on
+		// and then zoomed back out from would otherwise keep its large canvas,
+		// and with the whole view zoomed out there can be many of them.
+		if (targetScale <= currentScale * 1.15 && targetScale >= currentScale / 1.5) return;
 
 		this.upgradingPages.add(pageNumber);
 		const token = this.renderToken;
@@ -1193,6 +1376,7 @@ export class PdfAnnotateView extends FileView {
 			}
 		} finally {
 			this.upgradingPages.delete(pageNumber);
+			this.scheduleDetails();
 		}
 	}
 
@@ -1257,6 +1441,7 @@ export class PdfAnnotateView extends FileView {
 
 	private markPageDirty(pageNumber: number): void {
 		this.dirtyPages.add(pageNumber);
+		if (this.infiniteBox) this.scheduleGrowthFromInk();
 
 		if (this.writeDebounceHandle !== null) window.clearTimeout(this.writeDebounceHandle);
 		this.writeDebounceHandle = window.setTimeout(() => this.flushCurrentFileIfAny(), WRITE_DEBOUNCE_MS);
@@ -1429,6 +1614,547 @@ export class PdfAnnotateView extends FileView {
 			new Notice('Inkling: could not add a page to this note.');
 		} finally {
 			this.addingPage = false;
+		}
+	}
+
+	// ---- View zoom ----
+
+	private viewAnchorAt(at: Point): ViewAnchorPoint {
+		// The page under the point, or failing that the nearest one above or
+		// below it — a pinch can start in the gap between two pages.
+		let best: { page: HTMLElement; rect: DOMRect } | null = null;
+		let bestDistance = Infinity;
+		for (const page of Array.from(this.contentEl.querySelectorAll<HTMLElement>('.inkling-pdf-page-placeholder'))) {
+			const rect = page.getBoundingClientRect();
+			const distance = at.y < rect.top ? rect.top - at.y : at.y > rect.bottom ? at.y - rect.bottom : 0;
+			if (distance < bestDistance) {
+				best = { page, rect };
+				bestDistance = distance;
+			}
+			if (distance === 0) break;
+		}
+		if (!best || best.rect.width === 0 || best.rect.height === 0) return { page: null, fx: 0, fy: 0 };
+		return { page: best.page, fx: (at.x - best.rect.left) / best.rect.width, fy: (at.y - best.rect.top) / best.rect.height };
+	}
+
+	private zoomViewTo(scale: number, anchor: ViewAnchorPoint, at: Point): void {
+		const next = Math.min(Math.max(scale, VIEW_MIN_ZOOM), VIEW_MAX_ZOOM);
+		if (next !== this.viewZoomLevel) {
+			this.viewZoomLevel = next;
+			this.contentEl.setCssProps({ '--inkling-view-zoom': String(next) });
+			// The toolbar's readout, kept current through the whole gesture.
+			this.controller.refreshUi();
+		}
+		// Measured after the change, which lays the pages out at their new
+		// size, so the scroll lands the anchor exactly under the point.
+		if (!anchor.page?.isConnected) return;
+		const rect = anchor.page.getBoundingClientRect();
+		this.contentEl.scrollLeft += rect.left + anchor.fx * rect.width - at.x;
+		this.contentEl.scrollTop += rect.top + anchor.fy * rect.height - at.y;
+	}
+
+	private viewCentre(): Point {
+		const rect = this.contentEl.getBoundingClientRect();
+		return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+	}
+
+	// Every page on screen re-rendered for the zoom it is now shown at:
+	// sharper zoomed in, smaller zoomed back out.
+	private settleViewZoom(): void {
+		for (const pageNumber of this.renderedPages) void this.upgradeResolution(pageNumber, this.viewZoomLevel);
+		this.scheduleDetails();
+	}
+
+	// ---- Detail layer ----
+	//
+	// A page is one canvas, and a canvas has a ceiling: MAX_RENDER_SCALE, and
+	// MAX_CANVAS_PIXELS, past which Safari on an iPhone or iPad leaves it
+	// blank. A Letter page at 500% on a tablet would need well over a hundred
+	// megapixels, so zoomed in that far the page's canvas is stretched, and
+	// the text and the ink on it break up into visible pixels.
+	//
+	// The detail layer is what Obsidian's own reader (pdf.js) does about the
+	// same thing: just the part of the page on screen, drawn again at the
+	// screen's own resolution, over the stretched page. Only ever about a
+	// screenful of pixels, so it fits on every device at any zoom. Three
+	// canvases — the page, its ink, and the stroke being drawn — so that
+	// drawing stays as cheap as it is on the page's own layers: a pen moving
+	// repaints only the stroke, not every stroke on the page. The stretched
+	// ink and live layers underneath are hidden where the sharp copies are.
+
+	private scheduleDetails(): void {
+		if (this.detailHandle !== null) window.clearTimeout(this.detailHandle);
+		this.detailHandle = window.setTimeout(() => {
+			this.detailHandle = null;
+			this.updateDetails();
+		}, DETAIL_DELAY_MS);
+	}
+
+	private updateDetails(): void {
+		for (const pageNumber of this.renderedPages) {
+			if (this.detailNeeded(pageNumber)) void this.renderDetail(pageNumber);
+			else this.removeDetail(pageNumber);
+		}
+		for (const pageNumber of [...this.details.keys()]) {
+			if (!this.renderedPages.has(pageNumber)) this.removeDetail(pageNumber);
+		}
+	}
+
+	// Whether the page's canvas falls short of the screen at this zoom.
+	private detailNeeded(pageNumber: number): boolean {
+		const rendered = this.renderedScales.get(pageNumber);
+		const ideal = this.inkBaseScales.get(pageNumber) ?? this.baseScales.get(pageNumber);
+		if (!rendered || !ideal) return false;
+		return ideal * this.viewZoomLevel > rendered * DETAIL_THRESHOLD;
+	}
+
+	private async renderDetail(pageNumber: number): Promise<void> {
+		const pdf = this.pdf;
+		const placeholder = this.contentEl.querySelector<HTMLElement>(`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`);
+		const viewport = this.viewports.get(pageNumber);
+		if (!pdf || !placeholder || !viewport) return;
+
+		const page = placeholder.getBoundingClientRect();
+		const view = this.contentEl.getBoundingClientRect();
+		const marginX = view.width * DETAIL_MARGIN;
+		const marginY = view.height * DETAIL_MARGIN;
+		const left = Math.max(page.left, view.left - marginX);
+		const right = Math.min(page.right, view.right + marginX);
+		const top = Math.max(page.top, view.top - marginY);
+		const bottom = Math.min(page.bottom, view.bottom + marginY);
+		if (right <= left || bottom <= top || page.width === 0 || page.height === 0) {
+			this.removeDetail(pageNumber);
+			return;
+		}
+
+		// The screen's own density, unless a very large screen would take the
+		// region past what one canvas may hold.
+		const dpr = window.devicePixelRatio || 1;
+		const pixels = (right - left) * dpr * (bottom - top) * dpr;
+		const density = pixels > MAX_CANVAS_PIXELS ? dpr * Math.sqrt(MAX_CANVAS_PIXELS / pixels) : dpr;
+
+		const detail = this.details.get(pageNumber) ?? this.createDetail(pageNumber);
+		detail.task?.cancel();
+		const generation = ++this.detailGeneration;
+		detail.generation = generation;
+		const token = this.renderToken;
+
+		const canvas = createEl('canvas', { cls: 'inkling-detail-layer inkling-pdf-detail' });
+		canvas.width = Math.ceil((right - left) * density);
+		canvas.height = Math.ceil((bottom - top) * density);
+		const pageWidth = page.width * density;
+		const offsetX = (left - page.left) * density;
+		const offsetY = (top - page.top) * density;
+		try {
+			const pdfPage = await pdf.getPage(pageNumber);
+			if (detail.generation !== generation || token !== this.renderToken) return;
+			const pointWidth = viewport.width / viewport.scale;
+			const task = pdfPage.render({
+				canvas,
+				viewport: pdfPage.getViewport({ scale: pageWidth / pointWidth }),
+				// Just the region: everything else lands off the canvas.
+				transform: [1, 0, 0, 1, -offsetX, -offsetY],
+				annotationMode: AnnotationMode.ENABLE,
+			});
+			detail.task = task;
+			await task.promise;
+		} catch (error) {
+			if (!(error instanceof RenderingCancelledException)) console.error(`Inkling: failed to draw page ${pageNumber} sharp.`, error);
+			return;
+		}
+		if (detail.generation !== generation || token !== this.renderToken || this.details.get(pageNumber) !== detail) return;
+
+		// Everything below swaps in together, so the sharp page, the sharp
+		// ink and the hole cut in the stretched ink always agree.
+		detail.task = null;
+		Object.assign(detail, {
+			left: (left - page.left) / page.width,
+			top: (top - page.top) / page.height,
+			right: (right - page.left) / page.width,
+			bottom: (bottom - page.top) / page.height,
+			pageWidth,
+			offsetX,
+			offsetY,
+		});
+		const content = placeholder.querySelector<HTMLElement>('.inkling-page-content');
+		const pageCanvas = this.pageCanvases.get(pageNumber);
+		const base = content?.querySelector<HTMLCanvasElement>('.inkling-annotation-base');
+		const overlay = content?.querySelector<HTMLCanvasElement>('.inkling-annotation-overlay');
+		if (!content || !pageCanvas || !base || !overlay) return;
+
+		if (detail.pdf) detail.pdf.replaceWith(canvas);
+		else pageCanvas.after(canvas);
+		detail.pdf = canvas;
+		detail.ink ??= createEl('canvas', { cls: 'inkling-detail-layer inkling-ink-detail' });
+		if (!detail.ink.isConnected) base.after(detail.ink);
+		detail.overlay ??= createEl('canvas', { cls: 'inkling-detail-layer inkling-overlay-detail' });
+		if (!detail.overlay.isConnected) overlay.after(detail.overlay);
+		for (const layer of [detail.ink, detail.overlay]) {
+			layer.width = canvas.width;
+			layer.height = canvas.height;
+		}
+
+		const place = {
+			'--inkling-detail-left': `${detail.left * 100}%`,
+			'--inkling-detail-top': `${detail.top * 100}%`,
+			'--inkling-detail-right': `${detail.right * 100}%`,
+			'--inkling-detail-bottom': `${detail.bottom * 100}%`,
+		};
+		for (const layer of [detail.pdf, detail.ink, detail.overlay]) layer.setCssProps(place);
+		base.setCssProps(place);
+		base.addClass('has-detail-hole');
+		overlay.addClass('is-detailed');
+		this.paintDetail(pageNumber, 'ink');
+		this.paintDetail(pageNumber, 'overlay');
+	}
+
+	private createDetail(pageNumber: number): PageDetail {
+		const detail: PageDetail = {
+			left: 0,
+			top: 0,
+			right: 0,
+			bottom: 0,
+			pageWidth: 0,
+			offsetX: 0,
+			offsetY: 0,
+			pdf: null,
+			ink: null,
+			overlay: null,
+			task: null,
+			generation: 0,
+			inkFrame: null,
+			overlayFrame: null,
+		};
+		this.details.set(pageNumber, detail);
+		return detail;
+	}
+
+	private removeDetail(pageNumber: number): void {
+		const detail = this.details.get(pageNumber);
+		if (!detail) return;
+		this.details.delete(pageNumber);
+		detail.task?.cancel();
+		if (detail.inkFrame !== null) window.cancelAnimationFrame(detail.inkFrame);
+		if (detail.overlayFrame !== null) window.cancelAnimationFrame(detail.overlayFrame);
+		const content = detail.pdf?.parentElement;
+		detail.pdf?.remove();
+		detail.ink?.remove();
+		detail.overlay?.remove();
+		content?.querySelector('.inkling-annotation-base')?.removeClass('has-detail-hole');
+		content?.querySelector('.inkling-annotation-overlay')?.removeClass('is-detailed');
+	}
+
+	// The page's ink or live layer changed: the sharp copy follows, once a
+	// frame at most, however many samples a fast pen delivers in one.
+	private repaintDetail(pageNumber: number, layer: 'ink' | 'overlay'): void {
+		const detail = this.details.get(pageNumber);
+		if (!detail?.pdf) return;
+		const frame = layer === 'ink' ? 'inkFrame' : 'overlayFrame';
+		if (detail[frame] !== null) return;
+		detail[frame] = window.requestAnimationFrame(() => {
+			detail[frame] = null;
+			if (this.details.get(pageNumber) === detail) this.paintDetail(pageNumber, layer);
+		});
+	}
+
+	private paintDetail(pageNumber: number, layer: 'ink' | 'overlay'): void {
+		const detail = this.details.get(pageNumber);
+		const canvas = layer === 'ink' ? detail?.ink : detail?.overlay;
+		const viewport = this.viewports.get(pageNumber);
+		const ctx = canvas?.getContext('2d');
+		if (!detail || !canvas || !viewport || !ctx) return;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		// The page's canvas space onto this region of the sharp copy. Worked
+		// out from the page's canvas as it is now rather than as it was when
+		// the region was drawn, since sharpening the page re-backs it.
+		const scale = detail.pageWidth / viewport.width;
+		ctx.setTransform(scale, 0, 0, scale, -detail.offsetX, -detail.offsetY);
+		if (layer === 'ink') this.controller.drawInkTo(pageNumber, ctx);
+		else this.controller.drawOverlayTo(pageNumber, ctx);
+	}
+
+	// ---- Infinite canvas ----
+	//
+	// A canvas grows when ink comes near one of its edges, or when the reader
+	// scrolls up against an edge with ink near it — which is how you make
+	// room before writing somewhere new. Never on its own: a canvas with no
+	// ink near an edge stays the size it is however much it is scrolled, so
+	// panning around cannot leave it ballooning with empty space.
+	//
+	// Growing never reloads the view. The file is rewritten with the new box
+	// and a fresh writer opened on it (see writeGrownBox) — the old one holds
+	// its own parsed copy of the document and verifies every save against
+	// it, so it cannot simply be told the file changed. Then the grown page
+	// is rendered out of sight and swapped in for the old one in a single
+	// frame (see showGrownPage). Writing carries on throughout.
+
+	private scheduleGrowthFromInk(): void {
+		if (this.growAfterInkHandle !== null) window.clearTimeout(this.growAfterInkHandle);
+		this.growAfterInkHandle = window.setTimeout(() => {
+			this.growAfterInkHandle = null;
+			const box = this.infiniteBox;
+			if (!box) return;
+			void this.growInfiniteCanvas(edgesNear(box, this.inkBounds(), EDGE_ZONE));
+		}, GROW_AFTER_INK_MS);
+	}
+
+	private onScrollForGrowth(): void {
+		if (!this.infiniteBox || performance.now() < this.scrollGrowthArmedAt) return;
+		this.scrollGestureStart ??= { left: this.contentEl.scrollLeft, top: this.contentEl.scrollTop };
+		if (this.growAfterScrollHandle !== null) window.clearTimeout(this.growAfterScrollHandle);
+		this.growAfterScrollHandle = window.setTimeout(() => {
+			this.growAfterScrollHandle = null;
+			const start = this.scrollGestureStart;
+			this.scrollGestureStart = null;
+			if (start) void this.growInfiniteCanvas(this.edgesScrolledInto(start));
+		}, GROW_AFTER_SCROLL_MS);
+	}
+
+	// The edges the reader has just scrolled up against: moved towards, and
+	// now on screen. Only those with ink within a step of them, so the room
+	// made is room next to something rather than room next to more room.
+	private edgesScrolledInto(start: { left: number; top: number }): Edge[] {
+		const box = this.infiniteBox;
+		const placeholder = this.contentEl.querySelector<HTMLElement>('.inkling-pdf-page-placeholder');
+		if (!box || !placeholder) return [];
+		const page = placeholder.getBoundingClientRect();
+		const view = this.contentEl.getBoundingClientRect();
+		const dx = this.contentEl.scrollLeft - start.left;
+		const dy = this.contentEl.scrollTop - start.top;
+
+		const reached: Edge[] = [];
+		if (dx < 0 && page.left >= view.left - 1) reached.push('left');
+		if (dx > 0 && page.right <= view.right + 1) reached.push('right');
+		if (dy < 0 && page.top >= view.top - 1) reached.push('top');
+		if (dy > 0 && page.bottom <= view.bottom + 1) reached.push('bottom');
+		if (reached.length === 0) return [];
+
+		const ink = this.inkBounds();
+		const near = [
+			...edgesNear(box, ink, GROW_STEP_X).filter((edge) => edge === 'left' || edge === 'right'),
+			...edgesNear(box, ink, GROW_STEP_Y).filter((edge) => edge === 'top' || edge === 'bottom'),
+		];
+		return reached.filter((edge) => near.includes(edge));
+	}
+
+	// Everything on the canvas, as one box in PDF space.
+	private inkBounds(): PdfBox | null {
+		const viewport = this.viewports.get(1);
+		if (!viewport) return null;
+		const points: Point[] = [];
+		for (const annotation of this.controller.getPageAnnotations(1).map((a) => toPdfSpace(a, viewport))) {
+			// The pen's half-width beyond its centreline, so a thick stroke
+			// along an edge counts as reaching it.
+			const reach = annotation.width / 2;
+			const centres =
+				annotation.kind === 'stroke' ? annotation.points : annotation.kind === 'shape' ? [annotation.start, annotation.end] : [annotation.at];
+			for (const { x, y } of centres) {
+				points.push({ x: x - reach, y: y - reach }, { x: x + reach, y: y + reach });
+			}
+		}
+		return boundsOf(points);
+	}
+
+	private cancelGrowthChecks(): void {
+		if (this.growAfterInkHandle !== null) window.clearTimeout(this.growAfterInkHandle);
+		if (this.growAfterScrollHandle !== null) window.clearTimeout(this.growAfterScrollHandle);
+		this.growAfterInkHandle = null;
+		this.growAfterScrollHandle = null;
+		this.scrollGestureStart = null;
+	}
+
+	private async growInfiniteCanvas(edges: Edge[]): Promise<void> {
+		const file = this.currentFile;
+		const box = this.infiniteBox;
+		if (edges.length === 0 || !file || !box || !this.writer || !this.pdf) return;
+		if (this.growing || this.addingPage || this.controller.isReadOnly()) return;
+
+		const growth = growBox(box, edges);
+		if (!growth) {
+			if (!this.reportedCanvasLimit) {
+				this.reportedCanvasLimit = true;
+				new Notice('Inkling: this canvas has reached the largest size a PDF page can be.');
+			}
+			return;
+		}
+
+		this.growing = true;
+		const token = this.renderToken;
+		try {
+			const opened = await this.writeGrownBox(file, growth.box, token);
+			if (!opened || token !== this.renderToken) return;
+			await this.showGrownPage(opened, growth, token);
+		} catch (error) {
+			console.error('Inkling: failed to grow the canvas.', error);
+			new Notice('Inkling: could not make this canvas larger.');
+		} finally {
+			this.growing = false;
+		}
+		// Ink drawn while the page was growing can have reached the new edge
+		// already.
+		if (token === this.renderToken) this.scheduleGrowthFromInk();
+	}
+
+	// The file half of a growth: the new box written into the PDF, and a
+	// writer opened on the result in place of the old one, whose parsed copy
+	// of the document no longer matches what is on disk.
+	//
+	// Takes the save slot for as long as that lasts. A save already in flight
+	// finishes first, and one asked for meanwhile waits behind this — so no
+	// save is ever built against the document as it was before the box
+	// changed, and none is lost either: ink drawn during it is still dirty,
+	// and goes to the new writer.
+	//
+	// Nothing on screen changes here. Ink is converted to PDF space through
+	// the page's viewport when it is saved, and PDF space is the one thing a
+	// growth leaves alone, so the old viewport keeps saving correctly until
+	// the grown page is shown.
+	private async writeGrownBox(file: TFile, box: PdfBox, token: number): Promise<OpenResult | null> {
+		while (this.saving) await this.saving.catch(() => undefined);
+		if (token !== this.renderToken) return null;
+
+		let release: () => void = () => undefined;
+		this.saving = new Promise<void>((resolve) => (release = resolve));
+		const slot = this.saving;
+		try {
+			const original = await this.app.vault.readBinary(file);
+			const pdfDoc = await PDFDocument.load(original);
+			setInfiniteCanvasBox(pdfDoc.getPage(0), box);
+			const grown = toArrayBuffer(await pdfDoc.save());
+			await writeBinarySafely(this.app.vault, file, grown);
+
+			const writer = new AnnotationWriterClient();
+			let opened: OpenResult;
+			try {
+				// A copy: open() hands its buffer to the worker.
+				opened = await writer.open(grown.slice(0));
+			} catch (error) {
+				writer.terminate();
+				// The old writer is still the one in charge, and it believes
+				// the file is what it was. Making that true again is what keeps
+				// its next save from undoing the growth or landing at an offset
+				// that is no longer the end of the file.
+				await writeBinarySafely(this.app.vault, file, original);
+				throw error;
+			}
+			if (token !== this.renderToken) {
+				writer.terminate();
+				return null;
+			}
+
+			this.writer?.terminate();
+			this.writer = writer;
+			this.infiniteBox = box;
+			this.maxWriteInterval = maxWriteIntervalMs(
+				this.getSettings().saveCadence === 'frequent' ? 0 : grown.byteLength,
+				opened.incremental && canAppendBinary(this.app.vault),
+			);
+			return opened;
+		} finally {
+			release();
+			if (this.saving === slot) this.saving = null;
+		}
+	}
+
+	// The screen half: the grown page rendered out of sight, then swapped in
+	// for the old one in a single frame — canvas, annotation layers and
+	// scroll position together — so the page simply has more room around it
+	// and nothing visibly reloads. The stroke being drawn finishes first.
+	private async showGrownPage(opened: OpenResult, growth: Growth, token: number): Promise<void> {
+		const pdf = await withTimeout(
+			getDocument({ data: opened.displayBytes, isEvalSupported: false }).promise,
+			PDF_LOAD_TIMEOUT_MS,
+			'Inkling: timed out opening this PDF.',
+		);
+		let swapped = false;
+		try {
+			const page = await pdf.getPage(1);
+			let refusal: string | null = opened.risky.length > 0 ? `it contains ${opened.risky.join(' and ')}` : null;
+			refusal ??= compareProfiles(opened.profile, await profileFromPdfJs(pdf));
+			if (token !== this.renderToken) return;
+
+			const points = page.getViewport({ scale: 1 });
+			const layoutScale = this.layoutScaleFor(1, INFINITE_BASE_WIDTH);
+			const layoutViewport = page.getViewport({ scale: layoutScale });
+			const ideal = baseRenderScale(layoutViewport.width, points.width, window.devicePixelRatio || 1);
+			const base = capToPixelBudget(ideal, points.width, points.height);
+			const scale = capToPixelBudget(zoomedRenderScale(base, this.viewZoomLevel), points.width, points.height);
+			const viewport = page.getViewport({ scale });
+
+			const canvas = createEl('canvas', { cls: 'inkling-pdf-page' });
+			canvas.width = viewport.width;
+			canvas.height = viewport.height;
+			await page.render({ canvas, viewport, annotationMode: AnnotationMode.ENABLE }).promise;
+
+			await this.untilPageIsIdle(1, token);
+			if (token !== this.renderToken) return;
+
+			const placeholder = this.contentEl.querySelector<HTMLElement>('.inkling-pdf-page-placeholder[data-page-number="1"]');
+			const oldCanvas = this.pageCanvases.get(1);
+			const oldViewport = this.viewports.get(1);
+			if (!placeholder || !oldCanvas || !oldViewport || !oldCanvas.parentElement) {
+				throw new Error('the page is not on screen to be swapped');
+			}
+
+			// From here to the end of the block is one synchronous run, so the
+			// browser paints either the old page or the new one, never a mix.
+			this.closeNoteEditor();
+			// Placed by fractions of the old page, which the new one is not.
+			this.removeDetail(1);
+			const reproject = (annotation: Annotation) => toCanvasSpace(toPdfSpace(annotation, oldViewport), viewport);
+			const annotations = this.controller.getPageAnnotations(1).map(reproject);
+			this.history.restore(this.history.snapshot(), (entry) =>
+				entry.pageNumber === 1 ? { ...entry, before: entry.before.map(reproject), after: entry.after.map(reproject) } : entry,
+			);
+
+			sizePlaceholder(placeholder, layoutViewport.width, layoutViewport.height);
+			oldCanvas.replaceWith(canvas);
+			this.controller.resizePage(1, viewport.width, viewport.height, annotations);
+			this.viewports.set(1, viewport);
+			this.pageCanvases.set(1, canvas);
+			this.renderedScales.set(1, scale);
+			this.baseScales.set(1, base);
+			this.inkBaseScales.set(1, ideal);
+			// Growing left or up puts new canvas in front of what was on
+			// screen; scrolling on by the same amount keeps it there. Not the
+			// reader moving towards an edge, so not a reason to grow again.
+			this.scrollGrowthArmedAt = performance.now() + SCROLL_GROWTH_SETTLE_MS;
+			this.contentEl.scrollLeft += growth.addedLeft * layoutScale * this.viewZoomLevel;
+			this.contentEl.scrollTop += growth.addedTop * layoutScale * this.viewZoomLevel;
+
+			const previous = this.pdf;
+			this.pdf = pdf;
+			swapped = true;
+			void previous?.destroy();
+			this.textLines.delete(1);
+			computeTextLines(page, viewport)
+				.then((lines) => {
+					if (token === this.renderToken) this.textLines.set(1, lines);
+				})
+				.catch((error: unknown) => console.error('Inkling: failed to read text content for the canvas.', error));
+
+			if (refusal) {
+				this.controller.setReadOnly(true);
+				this.showReadOnlyBanner(refusal);
+			}
+			this.controller.refreshUi();
+			this.scheduleDetails();
+		} finally {
+			if (!swapped) void pdf.destroy();
+		}
+	}
+
+	// Resolves once nothing is happening on the page that swapping it would
+	// break: no stroke or drag in progress, no pinch-zoom (whose transform is
+	// in the old page's pixels), and no sharpening render still writing into
+	// the old canvas. Or once the view has moved on to something else.
+	private async untilPageIsIdle(pageNumber: number, token: number): Promise<void> {
+		while (
+			token === this.renderToken &&
+			(this.controller.isGestureActive() || this.controller.getPageZoom(pageNumber) !== 1 || this.upgradingPages.has(pageNumber))
+		) {
+			await new Promise((resolve) => window.setTimeout(resolve, GROW_IDLE_POLL_MS));
 		}
 	}
 

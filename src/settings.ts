@@ -5,7 +5,7 @@
 import { ALL_PRESET_COLORS } from './annotate/types';
 import { isVaultPath } from './markdown/inkFence';
 import { INK_FILE_LOCATIONS, trimFolder, type InkFileLocation } from './markdown/inkFilePath';
-import { TEMPLATE_STYLES, type PageSizeName, type TemplateStyle } from './templates';
+import { CANVAS_MODES, TEMPLATE_STYLES, type CanvasMode, type PageSizeName, type TemplateStyle } from './templates';
 
 export type { PageSizeName };
 
@@ -22,8 +22,10 @@ export type DarkInversion = 'off' | 'on' | 'follow-theme';
 export interface InklingSettings {
 	defaultTemplate: TemplateStyle;
 	pageSize: PageSizeName;
+	// Which paper the new-note dialog opens on. Pages, so the dialog
+	// reads as it always did until someone chooses otherwise.
+	defaultCanvasMode: CanvasMode;
 	saveCadence: SaveCadence;
-	pressure: boolean;
 	smoothing: boolean;
 	shapeRecognition: ShapeRecognition;
 	darkInversion: DarkInversion;
@@ -56,8 +58,8 @@ export function defaultSettings(): InklingSettings {
 	return {
 		defaultTemplate: 'blank',
 		pageSize: 'letter',
+		defaultCanvasMode: 'pages',
 		saveCadence: 'auto',
-		pressure: true,
 		smoothing: true,
 		shapeRecognition: 'hold',
 		// Off, not 'follow-theme'. A scan opens looking like the paper it was
@@ -122,8 +124,8 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 	return {
 		defaultTemplate: pick(source.defaultTemplate, TEMPLATE_STYLES, defaults.defaultTemplate),
 		pageSize: pick(source.pageSize, ['letter', 'a4'] as const, defaults.pageSize),
+		defaultCanvasMode: pick(source.defaultCanvasMode, CANVAS_MODES, defaults.defaultCanvasMode),
 		saveCadence: pick(source.saveCadence, ['auto', 'frequent'] as const, defaults.saveCadence),
-		pressure: bool(source.pressure, defaults.pressure),
 		smoothing: bool(source.smoothing, defaults.smoothing),
 		shapeRecognition: pick(source.shapeRecognition, ['off', 'hold'] as const, defaults.shapeRecognition),
 		darkInversion: pick(source.darkInversion, ['off', 'on', 'follow-theme'] as const, defaults.darkInversion),

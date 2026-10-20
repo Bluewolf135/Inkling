@@ -30,9 +30,17 @@ annotations, so it shows up in Obsidian's own reader, in Xodo, in Acrobat —
 anywhere.
 
 **Feels like ink.** Every stylus sample is captured, not just the one per
-frame the browser volunteers; strokes are curve-fitted rather than joined
-with straight lines; and a pen that reports pressure draws a stroke that
-tapers with it.
+frame the browser volunteers; the hand's tremor and the stylus's noisy
+pressure are steadied out without the line lagging behind the tip; and
+every stroke, pressure strokes included, is a smooth curve with round ends
+rather than a run of straight edges.
+
+**Two pens.** Press the pen again while it is in hand to choose between a
+round pen — smooth, with round ends — and a sharp pen that follows your
+hand exactly, corners and all, and ends square. Each has its own switch
+for pressure: on, a harder press draws a thicker line; off, the line stays
+one width however hard you press. Each also remembers its own colour and
+width.
 
 **Highlights become notes.** Drag the highlighter over text and it snaps to
 the lines it swept — and remembers the words it covered. "Extract
@@ -50,6 +58,14 @@ PDF sticky note — which means other readers show it too.
 **Handwritten notes.** Create a blank, lined, or dot-grid PDF and write
 straight into it, adding pages as you fill them.
 
+**Infinite canvas.** Pick "Infinite canvas" as the paper when creating a
+note, and it starts as one sheet that grows in whichever direction you
+write: ink near an edge pushes that edge out by a page, and scrolling up
+against an edge next to your ink makes room there before you start. It is
+still an ordinary one-page PDF — the ruling is a repeating pattern, so the
+file stays a kilobyte or two however large the sheet gets — and it opens in
+any other PDF reader.
+
 **Ink blocks in Markdown.** A ```` ```inkling ```` block is a drawing
 surface inside an ordinary note, for a diagram in the middle of a page of
 typing. "Insert ink annotation block" leaves a three-line fence in the note
@@ -57,8 +73,11 @@ and keeps the strokes in an `.ink` file beside your other attachments, one
 per note, so the note stays readable and small. Where those files go is a
 setting.
 
-**Getting around.** Outline, page jump, find-in-document, per-page zoom
-(pinch, Ctrl+wheel, or the toolbar), a collapsible toolbar, and dark-mode
+**Getting around.** Move about while annotating the way you do while
+reading: zoom the whole document from 25% to 500% (pinch, Ctrl+wheel, a
+trackpad pinch, or the toolbar) and scroll it in both directions — one
+finger, the trackpad, or dragging with the middle mouse button. Plus an
+outline, page jump, find-in-document, a collapsible toolbar, and dark-mode
 page inversion that darkens the page without touching the colour of your
 ink.
 
@@ -89,13 +108,14 @@ Not in the community catalogue yet. Install with
 3. Enable **Inkling** in Community Plugins.
 
 Or manually: download `main.js`, `manifest.json` and `styles.css` from a
-release into `<vault>/.obsidian/plugins/inkling/`.
+release into `<vault>/.obsidian/plugins/inkling-expanded/`.
 
 ## Mobile and stylus
 
 Built mobile-first, and tested on a Samsung tablet with an S Pen.
 
-- **Palm rejection.** Pen and mouse draw; touch scrolls and pinch-zooms.
+- **Palm rejection.** Pen and mouse draw; touch scrolls in any direction
+  and pinch-zooms, and two fingers zoom and pan at once.
   Touch panning is hand-rolled rather than left to the browser, because
   relying on `touch-action` let a downward pen stroke get taken over
   mid-draw on real hardware.
@@ -121,6 +141,11 @@ structure Inkling cannot safely append to is rewritten whole instead, and
 for those it scales how often it saves to the file's size: ten seconds
 under 5 MB, thirty up to 25 MB, a minute above. Either way, every save is
 verified against the document it came from before a byte is written.
+
+**An infinite canvas stops growing at 200 inches a side**, the largest
+page other PDF readers open. A
+very large canvas is drawn with fewer pixels than a small one, because a
+phone or tablet browser refuses a single canvas past about 16 megapixels.
 
 **Extraction is one-directional.** Editing an extracted note does not
 change the PDF.

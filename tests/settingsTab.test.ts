@@ -52,10 +52,10 @@ describe('the settings tab', () => {
 	});
 
 	it('shows what is stored', () => {
-		const { tab } = openTab({ pageSize: 'a4', pressure: false, colorLabels: { ...defaultSettings().colorLabels, '#e03131': 'Exam' } });
+		const { tab } = openTab({ pageSize: 'a4', smoothing: false, colorLabels: { ...defaultSettings().colorLabels, '#e03131': 'Exam' } });
 
 		expect(tab.getControlValue('pageSize')).toBe('a4');
-		expect(tab.getControlValue('pressure')).toBe(false);
+		expect(tab.getControlValue('smoothing')).toBe(false);
 		expect(tab.getControlValue('colorLabels.#e03131')).toBe('Exam');
 	});
 

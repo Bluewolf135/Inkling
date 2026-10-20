@@ -121,7 +121,31 @@ export class Plugin extends Component {}
 export const openedModals: Modal[] = [];
 
 export class Modal {
+	// The dialog's own elements, as Obsidian gives a modal them — detached,
+	// and only built when something asks, so a test that never opens a
+	// dialog's contents needs no DOM at all.
+	private elements: { modalEl: HTMLElement; contentEl: HTMLElement } | null = null;
 	constructor(public app: unknown) {}
+	get modalEl(): HTMLElement {
+		return this.dom().modalEl;
+	}
+	get contentEl(): HTMLElement {
+		return this.dom().contentEl;
+	}
+	private dom(): { modalEl: HTMLElement; contentEl: HTMLElement } {
+		if (!this.elements) {
+			const modalEl = document.createElement('div');
+			modalEl.className = 'modal';
+			const contentEl = modalEl.appendChild(document.createElement('div'));
+			contentEl.className = 'modal-content';
+			this.elements = { modalEl, contentEl };
+		}
+		return this.elements;
+	}
+	setTitle(title: string): this {
+		this.modalEl.setAttribute('data-title', title);
+		return this;
+	}
 	open(): void {
 		openedModals.push(this);
 	}

@@ -1,14 +1,15 @@
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import { boundingBox } from '../annotate/geometry';
-import { hasPressure, outlinePath, smoothedPath } from '../annotate/stroke';
-import { ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY } from './annotationFormat';
+import { hasPressure, isOutlined, isSharp, SHARP_MITRE_LIMIT, strokeCentreline, strokeOutline } from '../annotate/stroke';
+import { BRUSH_KEY, ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY } from './annotationFormat';
 import type { TouchFn } from './changeSet';
-import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, polygonOps, rectangleOps } from './contentStream';
+import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, rectangleOps } from './contentStream';
 import {
 	Annotation,
 	DEFAULT_COLOR,
 	DEFAULT_WIDTH,
 	HIGHLIGHTER_OPACITY,
+	isPenBrush,
 	NOTE_MARKER_SIZE,
 	NoteAnnotation,
 	Point,
@@ -83,9 +84,12 @@ const HIGHLIGHTER_OPACITY_MAX = (HIGHLIGHTER_OPACITY + 1) / 2;
 // a round cap adds a bulge of half that height past the first and last
 // glyph. Round for everything else, where it is what stops a polyline
 // looking chipped at its ends.
-function strokeHeader(color: string, width: number, flatCap = false): string[] {
+// `sharp` is the sharp pen's square ends and mitred corners (see
+// annotate/stroke.ts); otherwise round joins, with round or flat ends.
+function strokeHeader(color: string, width: number, flatCap = false, sharp = false): string[] {
 	const [r, g, b] = hexToRgb(color);
-	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} RG`, `${width.toFixed(2)} w`, `${flatCap ? 0 : 1} J 1 j`];
+	const ends = sharp ? `0 J 0 j ${SHARP_MITRE_LIMIT} M` : `${flatCap ? 0 : 1} J 1 j`;
+	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} RG`, `${width.toFixed(2)} w`, ends];
 }
 
 // The annotation dict's own `/CA` entry (below) is the spec-correct way to
@@ -126,7 +130,10 @@ function buildAppearanceStream(
 		resources = { ExtGState: { GS0: gsRef } };
 		body = `/GS0 gs\n${content}`;
 	}
-	const stream = pdfDoc.context.stream(body, {
+	// Deflated. An appearance is a run of path coordinates — a page of
+	// handwriting is hundreds of them — and coordinates compress to a
+	// fraction of their text.
+	const stream = pdfDoc.context.flateStream(body, {
 		Type: 'XObject',
 		Subtype: 'Form',
 		FormType: 1,
@@ -193,13 +200,15 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 	// never carries pressure — recording any for one would be dead weight in
 	// every file that has one.
 	const varying = stroke.tool === 'pen' && hasPressure(stroke.points);
-	// Filled outline for a pressure stroke, stroked path for everything else:
-	// no PDF stroking operator can vary a line's width along its length.
-	// Either way the geometry comes from the same shared module the canvas
-	// draws from, so the file matches what the user watched themselves draw.
-	const content = varying
-		? [...fillHeader(stroke.color), polygonOps(outlinePath(stroke.points, stroke.width)), 'f'].join('\n')
-		: [...strokeHeader(stroke.color, stroke.width, isHighlight), pathOps(smoothedPath(stroke.points)), 'S'].join('\n');
+	const brush = stroke.tool === 'pen' && stroke.brush && stroke.brush !== 'pen' ? stroke.brush : null;
+	// Filled outline for a pressure stroke or a nib, stroked path for
+	// everything else: no PDF stroking operator can vary a line's width along
+	// its length. Either way the geometry comes from the same shared module
+	// the canvas draws from, so the file matches what the user watched
+	// themselves draw.
+	const content = isOutlined(stroke)
+		? [...fillHeader(stroke.color), pathOps(strokeOutline(stroke)), 'f'].join('\n')
+		: [...strokeHeader(stroke.color, stroke.width, isHighlight, isSharp(stroke)), pathOps(strokeCentreline(stroke)), 'S'].join('\n');
 	const apRef = buildAppearanceStream(pdfDoc, bbox, content, opacity, isHighlight ? 'Multiply' : undefined);
 
 	const fields: PdfLiteralObject = {
@@ -216,10 +225,11 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 		F: 4,
 		AP: { N: apRef },
 	};
-	if (varying) {
-		fields[INKLING_EXTRAS] = {
-			[PRESSURE_KEY]: stroke.points.map((p) => Math.round(Math.min(Math.max(p.p ?? 1, 0), 1) * 255)),
-		};
+	if (varying || brush) {
+		const extras: PdfLiteralObject = {};
+		if (varying) extras[PRESSURE_KEY] = stroke.points.map((p) => Math.round(Math.min(Math.max(p.p ?? 1, 0), 1) * 255));
+		if (brush) extras[BRUSH_KEY] = brush;
+		fields[INKLING_EXTRAS] = extras;
 	}
 
 	tagAndAdd(pdfDoc, page, stroke.id, withSharedFields(fields, stroke));
@@ -434,6 +444,7 @@ function sameAsWritten(existing: Annotation, incoming: Annotation): boolean {
 
 	if (existing.kind === 'stroke' && incoming.kind === 'stroke') {
 		if (existing.tool !== incoming.tool || existing.points.length !== incoming.points.length) return false;
+		if ((existing.brush ?? 'pen') !== (incoming.brush ?? 'pen')) return false;
 		if (!existing.points.every((point, index) => nearPoint(point, incoming.points[index] ?? { x: NaN, y: NaN }))) return false;
 		return JSON.stringify(storedPressures(existing)) === JSON.stringify(storedPressures(incoming));
 	}
@@ -643,8 +654,16 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 		}
 		if (points.length < 2) return null;
 
+		const extras = dict.lookupMaybe(PDFName.of(INKLING_EXTRAS), PDFDict);
+		// A nib name, if one of ours. Anything else in the key — a newer
+		// build's nib, a hand edit — reads as the plain pen rather than as
+		// nothing at all.
+		const brushName = extras?.lookupMaybe(PDFName.of(BRUSH_KEY), PDFName)?.decodeText();
+		const brush = isPenBrush(brushName) && brushName !== 'pen' ? brushName : undefined;
 		const opacity = dict.lookupMaybe(PDFName.of('CA'), PDFNumber)?.asNumber() ?? 1;
-		const tool = opacity <= HIGHLIGHTER_OPACITY_MAX ? 'highlighter' : 'pen';
+		// A nib means a pen, whatever its opacity says: a pencil's graphite is
+		// translucent too, and must not come back as a highlighter.
+		const tool = !brush && opacity <= HIGHLIGHTER_OPACITY_MAX ? 'highlighter' : 'pen';
 
 		// Applied only when it describes exactly these points. A length
 		// mismatch means something else edited the path without knowing about
@@ -663,7 +682,7 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 			}
 		}
 
-		return { id, kind: 'stroke', tool, color, width, points };
+		return { id, kind: 'stroke', tool, color, width, points, ...(brush ? { brush } : {}) };
 	}
 
 	if (subtype === 'Line') {

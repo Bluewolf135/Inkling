@@ -12,6 +12,19 @@ export interface Point {
 }
 
 export type DrawToolType = 'pen' | 'highlighter';
+
+// Which pen a pen stroke was drawn with. 'pen' is the round pen, smooth
+// with round ends, which every stroke was drawn with before there was a
+// choice — a stroke with no brush at all is one of those. 'sharp' follows
+// the hand exactly, corners and all, and ends square. How each draws is in
+// annotate/stroke.ts.
+export type PenBrush = 'pen' | 'sharp';
+
+export const PEN_BRUSHES: readonly PenBrush[] = ['pen', 'sharp'];
+
+export function isPenBrush(value: unknown): value is PenBrush {
+	return typeof value === 'string' && (PEN_BRUSHES as readonly string[]).includes(value);
+}
 export type ShapeToolType = 'line' | 'rectangle' | 'oval' | 'arrow';
 export type ToolType = 'select' | DrawToolType | 'eraser' | 'note' | ShapeToolType;
 
@@ -36,6 +49,10 @@ export interface StrokeAnnotation extends BaseAnnotation {
 	kind: 'stroke';
 	tool: DrawToolType;
 	points: Point[];
+	// A pen stroke's nib. Absent for the plain pen, so that every stroke
+	// drawn before nibs existed, and every one drawn with the plain pen
+	// since, is stored exactly as it always was.
+	brush?: PenBrush;
 }
 
 // A comment pinned to a spot on the page. Unlike a stroke or a shape it
@@ -190,9 +207,16 @@ export const MAX_WIDTH = 40;
 // differs: a pen wants a fine dark nib and a highlighter wants a broad pale
 // one, and starting the highlighter on the pen's defaults is what made it
 // draw a hairline black smear the first time anyone reached for it.
-export function defaultStyleFor(tool: ToolType): { color: string; width: number } {
+export function defaultStyleFor(tool: ToolType, brush: PenBrush = 'pen'): { color: string; width: number } {
 	if (tool === 'highlighter') {
 		return { color: HIGHLIGHTER_COLORS[0]?.value ?? DEFAULT_COLOR, width: DEFAULT_HIGHLIGHTER_WIDTH };
 	}
+	if (tool === 'pen') return { color: DEFAULT_COLOR, width: DEFAULT_BRUSH_WIDTHS[brush] };
 	return { color: DEFAULT_COLOR, width: DEFAULT_WIDTH };
 }
+
+// Each pen's starting width.
+const DEFAULT_BRUSH_WIDTHS: Record<PenBrush, number> = {
+	pen: DEFAULT_WIDTH,
+	sharp: DEFAULT_WIDTH,
+};

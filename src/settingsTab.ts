@@ -1,6 +1,6 @@
 import { PluginSettingTab, type App, type Plugin, type SettingDefinitionItem } from 'obsidian';
 import { ALL_PRESET_COLORS } from './annotate';
-import { TEMPLATE_STYLES, TEMPLATE_STYLE_LABELS } from './templates';
+import { CANVAS_MODES, CANVAS_MODE_LABELS, TEMPLATE_STYLES, TEMPLATE_STYLE_LABELS } from './templates';
 import { colorLabelKey, defaultSettings, readSetting, writeSetting, type InklingSettings } from './settings';
 
 // The Obsidian-facing half of the settings. The pure half — the shape,
@@ -43,6 +43,17 @@ export class InklingSettingTab extends PluginSettingTab {
 						},
 					},
 					{
+						name: 'Default paper',
+						desc: 'Whether a new handwritten note starts as fixed-size pages or as an infinite canvas that grows as you write.',
+						aliases: ['infinite', 'canvas', 'whiteboard'],
+						control: {
+							type: 'dropdown',
+							key: 'defaultCanvasMode',
+							defaultValue: defaults.defaultCanvasMode,
+							options: Object.fromEntries(CANVAS_MODES.map((mode) => [mode, CANVAS_MODE_LABELS[mode]])),
+						},
+					},
+					{
 						name: 'Page size',
 						desc: 'The paper size for new handwritten notes and for pages added to them.',
 						control: { type: 'dropdown', key: 'pageSize', defaultValue: defaults.pageSize, options: { letter: 'Letter', a4: 'A4' } },
@@ -53,12 +64,6 @@ export class InklingSettingTab extends PluginSettingTab {
 				type: 'group',
 				heading: 'Pen',
 				items: [
-					{
-						name: 'Pressure sensitivity',
-						desc: 'Vary a pen stroke’s width with how hard the stylus presses. Has no effect on a mouse.',
-						aliases: ['stylus', 'taper'],
-						control: { type: 'toggle', key: 'pressure', defaultValue: defaults.pressure },
-					},
 					{
 						name: 'Stroke smoothing',
 						desc: 'Fit a curve through the pen’s samples instead of joining them with straight lines.',

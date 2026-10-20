@@ -1,7 +1,16 @@
 import { App, Modal, Notice, Plugin, Setting, TFile, TFolder, normalizePath } from 'obsidian';
 import { toArrayBuffer } from './binary';
 import { VIEW_TYPE_PDF } from './pdfView';
-import { createHandwrittenNoteBytes, TEMPLATE_STYLE_LABELS, TEMPLATE_STYLES, TemplateStyle, type PageSizeName } from './templates';
+import {
+	CANVAS_MODE_LABELS,
+	CANVAS_MODES,
+	createHandwrittenNoteBytes,
+	TEMPLATE_STYLE_LABELS,
+	TEMPLATE_STYLES,
+	TemplateStyle,
+	type CanvasMode,
+	type PageSizeName,
+} from './templates';
 
 // The two settings note creation cares about, passed in rather than
 // reached for: this module is handed a Plugin, not the Inkling plugin,
@@ -10,6 +19,7 @@ import { createHandwrittenNoteBytes, TEMPLATE_STYLE_LABELS, TEMPLATE_STYLES, Tem
 export interface NoteCreationDefaults {
 	template: TemplateStyle;
 	pageSize: PageSizeName;
+	canvasMode: CanvasMode;
 }
 
 const DEFAULT_NAME = 'Untitled note';
@@ -18,17 +28,20 @@ const INVALID_FILENAME_CHARS = /[\\/:*?"<>|]/g;
 class CreateHandwrittenNoteModal extends Modal {
 	private name = DEFAULT_NAME;
 	private style: TemplateStyle;
+	private mode: CanvasMode;
 
 	constructor(
 		app: App,
 		defaultStyle: TemplateStyle,
-		private readonly onSubmit: (name: string, style: TemplateStyle) => void,
+		defaultMode: CanvasMode,
+		private readonly onSubmit: (name: string, style: TemplateStyle, mode: CanvasMode) => void,
 	) {
 		super(app);
 		// The dropdown opens on the preferred template, but stays a
 		// dropdown: a default is a starting point, not a decision made on
 		// the user’s behalf every time.
 		this.style = defaultStyle;
+		this.mode = defaultMode;
 	}
 
 	onOpen(): void {
@@ -51,6 +64,14 @@ class CreateHandwrittenNoteModal extends Modal {
 				text.inputEl.addEventListener('keydown', (event) => {
 					if (event.key === 'Enter') this.submit();
 				});
+			});
+
+		new Setting(this.contentEl)
+			.setName('Paper')
+			.setDesc('Fixed-size pages, or one sheet that grows in whichever direction you write.')
+			.addDropdown((dropdown) => {
+				for (const mode of CANVAS_MODES) dropdown.addOption(mode, CANVAS_MODE_LABELS[mode]);
+				dropdown.setValue(this.mode).onChange((value) => (this.mode = value as CanvasMode));
 			});
 
 		new Setting(this.contentEl)
@@ -77,7 +98,7 @@ class CreateHandwrittenNoteModal extends Modal {
 		const name = this.name.trim();
 		if (!name) return;
 		this.close();
-		this.onSubmit(name, this.style);
+		this.onSubmit(name, this.style, this.mode);
 	}
 
 	onClose(): void {
@@ -107,9 +128,10 @@ async function createHandwrittenNote(
 	baseName: string,
 	style: TemplateStyle,
 	pageSize: PageSizeName,
+	mode: CanvasMode,
 ): Promise<TFile> {
 	const path = getUniqueNotePath(app, folder, baseName);
-	const bytes = await createHandwrittenNoteBytes(style, pageSize);
+	const bytes = await createHandwrittenNoteBytes(style, pageSize, mode);
 	return app.vault.createBinary(path, toArrayBuffer(bytes));
 }
 
@@ -118,10 +140,10 @@ function getTargetFolder(app: App): TFolder {
 }
 
 function openCreateNoteModal(app: App, folder: TFolder, defaults: NoteCreationDefaults): void {
-	new CreateHandwrittenNoteModal(app, defaults.template, (name, style) => {
+	new CreateHandwrittenNoteModal(app, defaults.template, defaults.canvasMode, (name, style, mode) => {
 		void (async () => {
 			try {
-				const file = await createHandwrittenNote(app, folder, name, style, defaults.pageSize);
+				const file = await createHandwrittenNote(app, folder, name, style, defaults.pageSize, mode);
 				// A brand-new handwritten note is created specifically to be
 				// written on right away — opened straight into Inkling's edit
 				// view rather than `openFile`'s default extension resolution,

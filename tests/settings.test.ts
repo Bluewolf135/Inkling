@@ -23,7 +23,6 @@ describe('normalizeSettings', () => {
 			defaultTemplate: 'dot-grid',
 			pageSize: 'a4',
 			saveCadence: 'frequent',
-			pressure: false,
 			smoothing: false,
 			shapeRecognition: 'off',
 			darkInversion: 'on',
@@ -32,7 +31,6 @@ describe('normalizeSettings', () => {
 		expect(settings.defaultTemplate).toBe('dot-grid');
 		expect(settings.pageSize).toBe('a4');
 		expect(settings.saveCadence).toBe('frequent');
-		expect(settings.pressure).toBe(false);
 		expect(settings.smoothing).toBe(false);
 		expect(settings.shapeRecognition).toBe('off');
 		expect(settings.darkInversion).toBe('on');
@@ -56,15 +54,17 @@ describe('normalizeSettings', () => {
 	});
 
 	it('falls back for a value of the wrong type', () => {
-		const settings = normalizeSettings({ pressure: 'yes', toolbarStartsCollapsed: 1, defaultTemplate: 7 });
-		expect(settings.pressure).toBe(true);
+		const settings = normalizeSettings({ smoothing: 'yes', toolbarStartsCollapsed: 1, defaultTemplate: 7 });
+		expect(settings.smoothing).toBe(true);
 		expect(settings.toolbarStartsCollapsed).toBe(false);
 		expect(settings.defaultTemplate).toBe('blank');
 	});
 
 	it('drops keys it does not know', () => {
-		const settings = normalizeSettings({ pressure: false, somethingFromTheFuture: { deeply: 'nested' } });
-		expect(settings).toEqual({ ...defaultSettings(), pressure: false });
+		// `pressure` included: it was a setting once, and is a per-pen switch
+		// in the pen picker now, so a data.json from before carries one.
+		const settings = normalizeSettings({ smoothing: false, pressure: false, somethingFromTheFuture: { deeply: 'nested' } });
+		expect(settings).toEqual({ ...defaultSettings(), smoothing: false });
 	});
 
 	it('refuses an extraction pattern that would collapse every book into one note', () => {

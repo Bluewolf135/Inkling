@@ -1,9 +1,8 @@
 import { boundingBox, unionBoundingBox } from './geometry';
-import { hasPressure, outlinePath, smoothedPath } from './stroke';
+import { isOutlined, isSharp, SHARP_MITRE_LIMIT, smoothedPath, strokeCentreline, strokeOutline, type PathSegment } from './stroke';
 import { Annotation, NOTE_MARKER_SIZE, Point, Rect, StrokeAnnotation } from './types';
 
 const SELECTION_COLOR = '#1971c2';
-const HANDLE_SIZE = 10;
 
 // Interactive chrome — the eraser ring, the selection outline, the lasso —
 // is drawn in two passes: a pale halo first, then the real line on top of
@@ -50,17 +49,25 @@ function withHalo(
 	ctx.restore();
 }
 
-const CHROME_DASH = [4, 3];
 
 // Whether this stroke draws as a filled outline rather than a stroked line.
 //
-// A pen that reported pressure is drawn as a tapered outline, since neither
-// a canvas stroke nor a PDF `S` operator can vary a line's width along its
-// length. A highlighter never is — a highlighter that tapered would read as
-// a mistake, and its text-snapped form is a straight segment at line height
+// A pen that reported pressure, and every nib but the plain pen, is drawn
+// as an outline (see annotate/stroke.ts), since neither a canvas stroke nor
+// a PDF `S` operator can vary a line's width along its length. A
+// highlighter never is — a highlighter that tapered would read as a
+// mistake, and its text-snapped form is a straight segment at line height
 // anyway.
 function isTapered(annotation: StrokeAnnotation): boolean {
-	return annotation.tool === 'pen' && hasPressure(annotation.points);
+	return isOutlined(annotation);
+}
+
+function appendSegments(path: Path2D, segments: PathSegment[]): void {
+	for (const segment of segments) {
+		if (segment.kind === 'move') path.moveTo(segment.to.x, segment.to.y);
+		else if (segment.kind === 'line') path.lineTo(segment.to.x, segment.to.y);
+		else path.quadraticCurveTo(segment.control.x, segment.control.y, segment.to.x, segment.to.y);
+	}
 }
 
 // Builds a stroke's canvas path from the shared path description (see
@@ -71,19 +78,12 @@ function buildStrokePath(annotation: StrokeAnnotation): Path2D {
 	const path = new Path2D();
 
 	if (isTapered(annotation)) {
-		const [first, ...rest] = outlinePath(annotation.points, annotation.width);
-		if (!first || rest.length === 0) return path;
-		path.moveTo(first.x, first.y);
-		for (const point of rest) path.lineTo(point.x, point.y);
+		appendSegments(path, strokeOutline(annotation));
 		path.closePath();
 		return path;
 	}
 
-	for (const segment of smoothedPath(annotation.points)) {
-		if (segment.kind === 'move') path.moveTo(segment.to.x, segment.to.y);
-		else if (segment.kind === 'line') path.lineTo(segment.to.x, segment.to.y);
-		else path.quadraticCurveTo(segment.control.x, segment.control.y, segment.to.x, segment.to.y);
-	}
+	appendSegments(path, strokeCentreline(annotation));
 	return path;
 }
 
@@ -187,6 +187,13 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, c
 	// tip stops square, and so does this.
 	ctx.lineCap = isHighlight(annotation) ? 'butt' : 'round';
 	ctx.lineJoin = 'round';
+	// The sharp pen keeps its corners and stops square. Its mitres are kept
+	// short: a hairpin turn would otherwise throw a spike far past the line.
+	if (annotation.kind === 'stroke' && isSharp(annotation)) {
+		ctx.lineCap = 'butt';
+		ctx.lineJoin = 'miter';
+		ctx.miterLimit = SHARP_MITRE_LIMIT;
+	}
 	// Note there is no globalAlpha here any more. A highlighter's
 	// translucency is a property of the *layer* it lands on, which is
 	// composited into the page with mix-blend-mode: multiply (see
@@ -249,45 +256,155 @@ export function isHighlight(annotation: Annotation): boolean {
 	return annotation.kind === 'stroke' && annotation.tool === 'highlighter';
 }
 
-function drawSelectionOutline(ctx: CanvasRenderingContext2D, box: Rect): void {
-	const x = box.minX - 6;
-	const y = box.minY - 6;
-	const w = box.maxX - box.minX + 12;
-	const h = box.maxY - box.minY + 12;
+// ---- Selection ----
+//
+// Everything below is measured in screen pixels, not canvas pixels, and
+// scaled by `chrome` (canvas pixels per screen pixel; see the controller's
+// chromeScale). A selection frame and its handles are chrome, the same size
+// on every screen; measured in canvas pixels they shrank with every rise in
+// pixel density, and on a tablet backed at three canvas pixels to the
+// screen pixel a corner handle was three pixels across and could not be hit.
+
+// The light blue a selected drawing is ringed in, and the deeper blue of
+// the frame round all of it.
+const SELECTION_RING = 'rgba(77, 171, 247, 0.95)';
+const SELECTION_FILL = 'rgba(77, 171, 247, 0.08)';
+
+// How far outside a drawing its ring sits, and the ring's own thickness.
+const RING_WIDTH = 2;
+// The frame stands this far off the selection, so it never sits on ink.
+const FRAME_PAD = 8;
+const FRAME_DASH = [5, 4];
+const HANDLE_RADIUS = 6;
+// A handle takes a press this far from its centre: a fingertip or a pen
+// held at an angle lands near a target, not on it.
+const HANDLE_REACH = 18;
+
+export type HandleName = 'nw' | 'ne' | 'sw' | 'se';
+
+// The frame drawn round a selection, which is also the area a press drags
+// the selection by.
+export function selectionFrame(box: Rect, chrome: number): Rect {
+	const pad = FRAME_PAD * chrome;
+	return { minX: box.minX - pad, minY: box.minY - pad, maxX: box.maxX + pad, maxY: box.maxY + pad };
+}
+
+export function selectionHandles(box: Rect, chrome: number): Record<HandleName, Point> {
+	const frame = selectionFrame(box, chrome);
+	return {
+		nw: { x: frame.minX, y: frame.minY },
+		ne: { x: frame.maxX, y: frame.minY },
+		sw: { x: frame.minX, y: frame.maxY },
+		se: { x: frame.maxX, y: frame.maxY },
+	};
+}
+
+// The handle under a press, if any — the nearest within reach.
+export function handleAt(box: Rect, chrome: number, point: Point): HandleName | null {
+	let found: HandleName | null = null;
+	let nearest = HANDLE_REACH * chrome;
+	for (const [name, centre] of Object.entries(selectionHandles(box, chrome)) as Array<[HandleName, Point]>) {
+		const away = Math.hypot(point.x - centre.x, point.y - centre.y);
+		if (away <= nearest) {
+			found = name;
+			nearest = away;
+		}
+	}
+	return found;
+}
+
+// A thin light-blue ring round each selected drawing, following its shape:
+// the drawing's own shape drawn a little bigger in blue, then the drawing's
+// shape itself cut back out of that, which leaves only the rim. Cut out
+// rather than drawn underneath because this layer sits above the ink, and
+// blue laid over the ink would tint it.
+function drawSelectionRings(ctx: CanvasRenderingContext2D, selected: Annotation[], chrome: number): void {
+	const ring = RING_WIDTH * chrome;
+	const shapeOf = (annotation: Annotation, grow: number, colour: string) => {
+		ctx.strokeStyle = colour;
+		ctx.fillStyle = colour;
+		if (annotation.kind === 'note') {
+			const half = NOTE_MARKER_SIZE / 2 + grow;
+			ctx.fillRect(annotation.at.x - half, annotation.at.y - half, half * 2, half * 2);
+			return;
+		}
+		if (annotation.kind === 'stroke') {
+			const path = strokePath(annotation, true);
+			if (isTapered(annotation)) {
+				ctx.lineWidth = grow * 2;
+				ctx.lineJoin = 'round';
+				if (grow > 0) ctx.stroke(path);
+				ctx.fill(path);
+			} else {
+				ctx.lineWidth = annotation.width + grow * 2;
+				const sharp = isSharp(annotation);
+				ctx.lineCap = isHighlight(annotation) || sharp ? 'butt' : 'round';
+				ctx.lineJoin = sharp ? 'miter' : 'round';
+				ctx.miterLimit = SHARP_MITRE_LIMIT;
+				ctx.stroke(path);
+			}
+			return;
+		}
+		drawAnnotation(ctx, { ...annotation, color: colour, width: annotation.width + grow * 2 }, false);
+	};
+
+	ctx.save();
+	for (const annotation of selected) shapeOf(annotation, ring, SELECTION_RING);
+	ctx.globalCompositeOperation = 'destination-out';
+	for (const annotation of selected) shapeOf(annotation, 0, '#000000');
+	ctx.restore();
+}
+
+function drawSelectionFrame(ctx: CanvasRenderingContext2D, box: Rect, chrome: number): void {
+	const frame = selectionFrame(box, chrome);
 	withHalo(
 		ctx,
-		1,
+		chrome,
 		SELECTION_COLOR,
 		() => {
 			ctx.beginPath();
-			ctx.rect(x, y, w, h);
+			ctx.rect(frame.minX, frame.minY, frame.maxX - frame.minX, frame.maxY - frame.minY);
 		},
-		CHROME_DASH,
+		FRAME_DASH.map((length) => length * chrome),
 	);
-}
 
-export function handleRects(box: Rect): Record<'nw' | 'ne' | 'sw' | 'se', Rect> {
-	const half = HANDLE_SIZE / 2;
-	const corners = {
-		nw: { x: box.minX - 6, y: box.minY - 6 },
-		ne: { x: box.maxX + 6, y: box.minY - 6 },
-		sw: { x: box.minX - 6, y: box.maxY + 6 },
-		se: { x: box.maxX + 6, y: box.maxY + 6 },
-	};
-	const toRect = (p: Point): Rect => ({ minX: p.x - half, minY: p.y - half, maxX: p.x + half, maxY: p.y + half });
-	return { nw: toRect(corners.nw), ne: toRect(corners.ne), sw: toRect(corners.sw), se: toRect(corners.se) };
-}
-
-function drawHandles(ctx: CanvasRenderingContext2D, box: Rect): void {
 	ctx.save();
 	ctx.fillStyle = '#ffffff';
 	ctx.strokeStyle = SELECTION_COLOR;
-	ctx.lineWidth = 1.5;
-	for (const rect of Object.values(handleRects(box))) {
-		ctx.fillRect(rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY);
-		ctx.strokeRect(rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY);
+	ctx.lineWidth = 1.5 * chrome;
+	for (const centre of Object.values(selectionHandles(box, chrome))) {
+		ctx.beginPath();
+		ctx.arc(centre.x, centre.y, HANDLE_RADIUS * chrome, 0, Math.PI * 2);
+		ctx.fill();
+		ctx.stroke();
 	}
 	ctx.restore();
+}
+
+// The loop being drawn: dashed, closed back to where it started so it
+// reads as the area it will take, and faintly filled. Curved through the
+// samples the way a pen stroke is, so it follows the hand as smoothly as
+// the pen does rather than as a run of straight dashes.
+function drawLasso(ctx: CanvasRenderingContext2D, points: Point[], chrome: number): void {
+	if (points.length < 2) return;
+	const segments = smoothedPath(points);
+	const path = () => {
+		ctx.beginPath();
+		for (const segment of segments) {
+			if (segment.kind === 'move') ctx.moveTo(segment.to.x, segment.to.y);
+			else if (segment.kind === 'line') ctx.lineTo(segment.to.x, segment.to.y);
+			else ctx.quadraticCurveTo(segment.control.x, segment.control.y, segment.to.x, segment.to.y);
+		}
+		ctx.closePath();
+	};
+
+	ctx.save();
+	ctx.fillStyle = SELECTION_FILL;
+	path();
+	ctx.fill();
+	ctx.restore();
+
+	withHalo(ctx, 1.5 * chrome, SELECTION_COLOR, path, [6 * chrome, 4 * chrome]);
 }
 
 function drawEraserCursor(ctx: CanvasRenderingContext2D, point: Point, radius: number): void {
@@ -312,6 +429,9 @@ export interface OverlayOptions {
 	draft?: Annotation | null;
 	lassoPath?: Point[] | null;
 	eraserCursor?: { point: Point; radius: number } | null;
+	// Canvas pixels per screen pixel, which every piece of selection chrome
+	// is sized by. 1 where the canvas is shown at its own size.
+	chrome?: number;
 }
 
 // The committed-annotation layer — redrawn only when the store's page
@@ -324,6 +444,14 @@ export interface OverlayOptions {
 export function renderBase(ctx: CanvasRenderingContext2D, annotations: Annotation[]): void {
 	const { canvas } = ctx;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
+	drawInk(ctx, annotations);
+}
+
+// The base layer's ink, drawn under whatever transform `ctx` has and over
+// whatever it already holds. Split out of renderBase for the PDF view's
+// detail layer, which draws the same ink again magnified onto a canvas of
+// its own (see pdfView.ts).
+export function drawInk(ctx: CanvasRenderingContext2D, annotations: Annotation[]): void {
 	for (const annotation of annotations) {
 		if (!isHighlight(annotation)) drawAnnotation(ctx, annotation, true);
 	}
@@ -367,37 +495,23 @@ export function renderHighlights(ctx: CanvasRenderingContext2D, annotations: Ann
 export function renderOverlay(ctx: CanvasRenderingContext2D, options: OverlayOptions = {}): void {
 	const { canvas } = ctx;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
+	drawOverlay(ctx, options);
+}
 
-	if (options.draft) drawAnnotation(ctx, options.draft, false);
+// The overlay's contents without the clear, for the same reason as drawInk.
+export function drawOverlay(ctx: CanvasRenderingContext2D, options: OverlayOptions = {}): void {
+	const chrome = options.chrome ?? 1;
 
+	// The rings first: cutting each drawing's shape out of its ring clears
+	// whatever is on this layer there, which must not include the frame.
 	const selected = options.selected;
 	if (selected && selected.length > 0) {
-		const box = unionBoundingBox(selected.map(boundingBox));
-		drawSelectionOutline(ctx, box);
-		drawHandles(ctx, box);
+		drawSelectionRings(ctx, selected, chrome);
+		drawSelectionFrame(ctx, unionBoundingBox(selected.map(boundingBox)), chrome);
 	}
 
-	const [first, ...rest] = options.lassoPath ?? [];
-	if (first && rest.length > 0) {
-		// closePath (not just stroke) is what draws the straight line back to
-		// the start point too, so the loop reads as a closed selection region
-		// while it's still being drawn, not just once released — and it's
-		// needed for fill() to treat this as an enclosed area at all.
-		const path = () => {
-			ctx.beginPath();
-			ctx.moveTo(first.x, first.y);
-			for (const p of rest) ctx.lineTo(p.x, p.y);
-			ctx.closePath();
-		};
-
-		ctx.save();
-		ctx.fillStyle = 'rgba(25, 113, 194, 0.08)';
-		path();
-		ctx.fill();
-		ctx.restore();
-
-		withHalo(ctx, 1, SELECTION_COLOR, path, CHROME_DASH);
-	}
+	if (options.draft) drawAnnotation(ctx, options.draft, false);
+	if (options.lassoPath) drawLasso(ctx, options.lassoPath, chrome);
 
 	if (options.eraserCursor) drawEraserCursor(ctx, options.eraserCursor.point, options.eraserCursor.radius);
 }

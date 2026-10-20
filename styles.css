@@ -15,7 +15,20 @@
 .view-content.inkling-pdf-view {
 	display: flex;
 	flex-direction: column;
-	align-items: center;
+	/* From the start edge, with the pages centred by their own auto margins
+	   below instead. A centred flex item wider than its container overflows
+	   on both sides, and the part off the left edge is out of reach of any
+	   scrollbar — which every page is, once the view is zoomed in. Auto
+	   margins centre a page narrower than the pane and collapse to nothing
+	   for a wider one. */
+	align-items: flex-start;
+	/* Every touch in the view is the plugin's to interpret, not only one on
+	   a page: dragging and pinching in the gaps between pages and beside
+	   them has to move the view the same way it does over a page, which
+	   the browser's own handling there would not (no pinch at all, and a
+	   scroll that fights the hand-rolled one). See attachViewNavigation in
+	   src/annotate/pointer.ts. */
+	touch-action: none;
 	gap: var(--size-4-3);
 	padding: 0 var(--size-4-3) var(--size-4-6);
 	overflow: auto;
@@ -24,12 +37,17 @@
 
 .inkling-pdf-page-placeholder {
 	position: relative;
-	max-width: 100%;
+	margin-left: auto;
+	margin-right: auto;
+	/* The view zoom (see src/pdfView.ts) multiplies both: a page zoomed to
+	   2x may be twice the pane's width, and one narrowed with the pane keeps
+	   its proportion of it. */
+	max-width: calc(100% * var(--inkling-view-zoom, 1));
 	/* Both fed from src/pdfView.ts, which knows each page's real size from
 	   pdf.js. Height comes from the ratio rather than being set directly, so
 	   a page narrower than its natural width scales down whole instead of
 	   being squashed. */
-	width: var(--inkling-page-width);
+	width: calc(var(--inkling-page-width) * var(--inkling-view-zoom, 1));
 	aspect-ratio: var(--inkling-page-aspect);
 	/* The parent is a flex column, so these shrink by default — and since a
 	   placeholder is an empty div until its page renders, `min-height: auto`
@@ -60,6 +78,31 @@
 	border-radius: var(--radius-s);
 	background-color: #ffffff;
 	box-shadow: var(--shadow-s);
+}
+
+/* An infinite canvas (see src/pdf/infiniteCanvas.ts): one sheet that keeps
+   the zoom it started at as it grows, so it soon becomes wider than the
+   pane whatever the view zoom. */
+.inkling-pdf-view.is-infinite .inkling-pdf-page-placeholder {
+	max-width: none;
+}
+
+/* The tool strip stays in view when the pages are scrolled sideways, the
+   way it already does when they are scrolled down. */
+.inkling-pdf-view .inkling-toolbar {
+	left: 0;
+}
+
+/* The outline and find panel stays centred, as it was before the view
+   was laid out from the start edge. */
+.view-content.inkling-pdf-view > .inkling-nav-panel {
+	align-self: center;
+}
+
+/* These scroll by themselves under a finger, as they always did. */
+.inkling-pdf-view .inkling-nav-panel,
+.inkling-pdf-view .inkling-note-editor {
+	touch-action: pan-y;
 }
 
 .inkling-page-content {
@@ -173,6 +216,50 @@
 	z-index: 1;
 }
 
+/* The detail layer (see renderDetail in src/pdfView.ts): the part of a page
+   on screen, drawn again at the screen's resolution over a page zoomed in
+   past what its own canvas can hold. Placed by fractions of the page, so it
+   stays put on the page while a pinch is still resizing it. Never a pointer
+   target — the overlay underneath still takes every stroke. */
+.inkling-detail-layer {
+	position: absolute;
+	left: var(--inkling-detail-left);
+	top: var(--inkling-detail-top);
+	width: calc(var(--inkling-detail-right) - var(--inkling-detail-left));
+	height: calc(var(--inkling-detail-bottom) - var(--inkling-detail-top));
+	pointer-events: none;
+}
+
+.inkling-overlay-detail {
+	z-index: 2;
+}
+
+/* The stretched ink is cut away where the sharp copy covers it — its soft
+   edges would otherwise show round every sharp stroke — and kept everywhere
+   else, so a quick scroll past the sharp region still shows ink. */
+.inkling-annotation-base.has-detail-hole {
+	clip-path: polygon(
+		evenodd,
+		0 0,
+		100% 0,
+		100% 100%,
+		0 100%,
+		0 0,
+		var(--inkling-detail-left) var(--inkling-detail-top),
+		var(--inkling-detail-right) var(--inkling-detail-top),
+		var(--inkling-detail-right) var(--inkling-detail-bottom),
+		var(--inkling-detail-left) var(--inkling-detail-bottom),
+		var(--inkling-detail-left) var(--inkling-detail-top)
+	);
+}
+
+/* The live layer is still what the pen touches, so it stays in place and
+   takes pointer events; it is only its stretched picture that gives way
+   to the sharp one. */
+.inkling-annotation-overlay.is-detailed {
+	opacity: 0;
+}
+
 /* ---------------------------------------------------------------------
    Toolbar
 
@@ -274,12 +361,19 @@
 	background-color: var(--background-modifier-border);
 }
 
-/* Readouts (page number, zoom), not controls — pushed to the opposite end
-   so the things you press stay grouped together on the left. */
+/* Readouts (page number, zoom), not controls. */
 .inkling-toolbar-status {
-	margin-left: auto;
 	gap: var(--size-4-2);
-	padding-left: var(--size-4-2);
+}
+
+/* Takes whatever room is left on its line, pushing the items after it to
+   the far end of the strip — by default the readouts, so the things you
+   press stay grouped together on the left. Where it sits is the user's to
+   choose in the layout editor. */
+.inkling-toolbar-spacer {
+	flex: 1 1 0;
+	min-width: 0;
+	height: 1px;
 }
 
 .inkling-status-label {
@@ -564,7 +658,8 @@
 
 .inkling-pdf-view.is-inverted .inkling-pdf-page,
 .inkling-pdf-view.is-inverted .inkling-annotation-base,
-.inkling-pdf-view.is-inverted .inkling-annotation-overlay {
+.inkling-pdf-view.is-inverted .inkling-annotation-overlay,
+.inkling-pdf-view.is-inverted .inkling-detail-layer {
 	filter: invert(1) hue-rotate(180deg);
 }
 
@@ -790,10 +885,10 @@
 }
 
 /* The readouts have nothing to say for a single-page block (the toolbar
-   hides both), so don't reserve the space they would have taken. */
-.inkling-ink-block-toolbar-host .inkling-toolbar-status {
-	margin-left: 0;
-	padding-left: 0;
+   hides both), so don't push what is left of them to a far end that is
+   only far because the strip is sized to its contents. */
+.inkling-ink-block-toolbar-host .inkling-toolbar-spacer {
+	display: none;
 }
 
 .inkling-ink-block .inkling-ink-block-toggle {
@@ -1052,6 +1147,281 @@
 .inkling-create-note-modal .setting-item:first-child {
 	border-top: none;
 	padding-top: 0;
+}
+
+/* ---------------------------------------------------------------------
+   Pen picker
+
+   The nibs, hanging from the pen's button (see src/annotate/penPicker.ts):
+   one row each, with its icon, its name and a sample of the ink it makes.
+   Fixed in the window rather than inside the tool strip, which an ink
+   block's note column would clip.
+   --------------------------------------------------------------------- */
+
+.inkling-pen-picker {
+	position: fixed;
+	left: var(--inkling-picker-left);
+	top: var(--inkling-picker-top);
+	z-index: var(--layer-popover, 30);
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 220px;
+	max-width: calc(100vw - 16px);
+	max-height: calc(100vh - var(--inkling-picker-top) - 12px);
+	overflow-y: auto;
+	padding: var(--size-4-1);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	box-shadow: var(--shadow-l);
+}
+
+.inkling-pen-option {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	border-radius: var(--radius-s);
+}
+
+.inkling-pen-option.is-active {
+	background-color: var(--background-modifier-active-hover);
+}
+
+.inkling-pen-picker button.inkling-pen-option-choose,
+.inkling-pen-picker button.inkling-pen-pressure {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	height: auto;
+	padding: var(--size-4-1) var(--size-4-2);
+	border: none;
+	border-radius: var(--radius-s);
+	background: none;
+	box-shadow: none;
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.inkling-pen-picker button.inkling-pen-option-choose {
+	flex: 1 1 auto;
+	text-align: left;
+}
+
+.inkling-pen-picker button.inkling-pen-option-choose:hover,
+.inkling-pen-picker button.inkling-pen-pressure:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.inkling-pen-option.is-active .inkling-pen-option-label {
+	color: var(--text-accent);
+}
+
+.inkling-pen-option-icon {
+	display: flex;
+	flex: none;
+	--icon-size: var(--icon-m, 18px);
+}
+
+.inkling-pen-option-label {
+	flex: 1 1 auto;
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+}
+
+/* The line sample sits on paper, as the ink will. */
+.inkling-pen-option-preview {
+	flex: none;
+	width: 96px;
+	height: 28px;
+	border-radius: var(--radius-s);
+	background-color: #ffffff;
+}
+
+/* The pressure switch: a label and a track with a sliding thumb, drawn the
+   way Obsidian draws its own setting toggles. */
+.inkling-pen-pressure-label {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.inkling-pen-pressure-track {
+	position: relative;
+	flex: none;
+	width: 32px;
+	height: 18px;
+	border-radius: 9px;
+	background-color: var(--background-modifier-border-hover);
+	transition: background-color 120ms ease;
+}
+
+.inkling-pen-pressure-thumb {
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	background-color: #ffffff;
+	box-shadow: var(--shadow-s);
+	transition: transform 120ms ease;
+}
+
+.inkling-pen-pressure.is-on .inkling-pen-pressure-track {
+	background-color: var(--interactive-accent);
+}
+
+.inkling-pen-pressure.is-on .inkling-pen-pressure-thumb {
+	transform: translateX(14px);
+}
+
+.is-mobile .inkling-pen-picker button.inkling-pen-option-choose,
+.is-mobile .inkling-pen-picker button.inkling-pen-pressure {
+	min-height: 44px;
+}
+
+/* ---------------------------------------------------------------------
+   Toolbar layout editor
+
+   A list of the strip's items, one row each: a handle (grip and the
+   item's own icon) to drag it by, its name, and an eye to show or hide it.
+   --------------------------------------------------------------------- */
+
+.inkling-layout-hint {
+	flex: none;
+	margin-top: 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+/* The dialog is a column — title, hint, list, buttons — no taller than the
+   screen allows, in which only the list scrolls. The buttons are always on
+   screen: a list as long as every item in the strip, with Save at the end
+   of it, pushed Save off the bottom of a tablet with nothing to scroll. */
+.modal.inkling-layout-modal {
+	display: flex;
+	flex-direction: column;
+	max-height: min(85vh, 760px);
+}
+
+.inkling-layout-modal .modal-content {
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	min-height: 0;
+	overflow: hidden;
+}
+
+.is-phone .modal.inkling-layout-modal {
+	max-height: 100%;
+}
+
+.inkling-layout-list {
+	position: relative;
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	gap: 4px;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: 2px;
+}
+
+.inkling-layout-row {
+	display: flex;
+	flex: none;
+	align-items: center;
+	gap: var(--size-4-2);
+	min-height: 44px;
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	/* Where a drag has moved this row to, set by the editor as it goes. */
+	transform: translateY(var(--inkling-row-shift, 0px));
+}
+
+/* While a row is dragged, the others slide aside to show where it will
+   land, rather than jumping. */
+.inkling-layout-list.is-reordering .inkling-layout-row:not(.is-dragging) {
+	transition: transform 160ms ease;
+}
+
+.inkling-layout-row.is-hidden-item .inkling-layout-label,
+.inkling-layout-row.is-hidden-item .inkling-layout-icon {
+	opacity: 0.45;
+}
+
+/* The dragged row is lifted above the rest and follows the pointer exactly. */
+.inkling-layout-row.is-dragging {
+	position: relative;
+	z-index: 1;
+	background-color: var(--background-primary);
+	box-shadow: var(--shadow-l);
+	outline: 1px solid var(--interactive-accent);
+}
+
+/* No text selection while dragging: a drag that runs past the handle on a
+   desktop otherwise paints a selection over every label it crosses. */
+.inkling-layout-list.is-reordering {
+	user-select: none;
+	-webkit-user-select: none;
+	cursor: grabbing;
+}
+
+.inkling-layout-modal button.inkling-layout-handle {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	min-width: 64px;
+	height: 40px;
+	padding: 0 var(--size-4-2) 0 var(--size-4-1);
+	background: none;
+	box-shadow: none;
+	border: none;
+	color: var(--text-normal);
+	cursor: grab;
+	/* The handle is the one place a finger drags rather than scrolls. */
+	touch-action: none;
+}
+
+.inkling-layout-grip {
+	display: flex;
+	color: var(--text-faint);
+}
+
+.inkling-layout-icon {
+	display: flex;
+	--icon-size: var(--icon-m, 18px);
+}
+
+.inkling-layout-label {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.inkling-layout-buttons {
+	flex: none;
+	flex-wrap: wrap;
+	margin-top: var(--size-4-3);
+}
+
+/* Reset sits apart from Cancel and Save, at the start of the row: it
+   throws away the arrangement, and should not be one slip from Save. */
+.inkling-layout-buttons .inkling-layout-reset {
+	margin-right: auto;
+}
+
+.is-mobile .inkling-layout-row {
+	min-height: 52px;
+}
+
+.is-mobile .inkling-layout-modal button.inkling-layout-handle {
+	min-width: 76px;
+	height: 48px;
 }
 
 /* Anything of ours hidden from script actually hides.
