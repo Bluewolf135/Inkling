@@ -1,5 +1,12 @@
 # Inkling
 
+> If you would like to help Inkling by contributing, please fork the repo, or create an issue. For changes created in a fork, if you would like, submit a PR, and we'll get it into an official release on Obsidian! This started as a side project for me, just a guy wanting to only work in his vault. I would love to see the community grow. I had never expected so many people to be interested, but would love to keep development alive. Reach out with changes, and let me know if you want to be added as an official collaborator. - Bluewolf135
+
+## Contributers
+- Bluewolf135
+
+---
+
 Handwritten and text annotation for PDFs and Markdown notes in Obsidian,
 built mobile-first for stylus input.
 
