@@ -3,37 +3,36 @@ import pdfWorkerSource from 'inline-worker:pdf';
 import { FileView, ItemView, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { GlobalWorkerOptions } from 'pdfjs-dist';
 import { ToolState } from './annotate';
+import { normalizeToolbarLayout } from './annotate/toolbarLayout';
 import { collectAnnotations } from './extract/extract';
 import { extractionNotePath, mergeIntoNote, renderExtraction } from './extract/extractFormat';
 import { compactInkBlocks } from './markdown/compactInkBlocks';
 import { registerInkBlock } from './markdown/inkBlock';
 import { inkFilePathFor } from './markdown/inkFilePath';
 import { registerNoteCreation } from './noteCreation';
+import { attachThumbnailDrag, attachThumbnailMenu, openManagePages } from './pageMenu';
+import { ReaderPageWatch } from './readerPageWatch';
+import { readCorePdfPage } from './coreViews';
+import { startStylusCheck } from './stylusCheck';
+import { BackupModal, listBackups } from './backups';
 import { setAnnotationWriterWorkerSourceProvider } from './pdf/annotationWriterClient';
 import { CORE_PDF_VIEW_TYPE, PdfAnnotateView, VIEW_TYPE_PDF } from './pdfView';
 import { defaultSettings, normalizeSettings, type InklingSettings } from './settings';
 import { InklingSettingTab } from './settingsTab';
 
-// The page Obsidian's own PDF view is currently showing. Its ephemeral
-// state is no help here — verified against the running app, the core PDF
-// view's getEphemeralState() returns `{}` no matter where it's scrolled, so
-// simply passing that through carried nothing over and the editor always
-// opened at page 1 (what looked like it working was Obsidian's own
-// per-file position memory, not us). This reads the live viewer instead,
-// which is undocumented internals, hence the fully defensive walk and the
-// null result callers must handle.
-function readCorePdfPage(view: unknown): number | null {
-	const page = (
-		view as {
-			viewer?: { child?: { pdfViewer?: { pdfViewer?: { currentPageNumber?: unknown } } } };
-		}
-	)?.viewer?.child?.pdfViewer?.pdfViewer?.currentPageNumber;
-	return typeof page === 'number' && Number.isFinite(page) && page >= 1 ? page : null;
-}
-
+// Where this device keeps its toolbar layout, and the pen as it was last
+// left: the tool in hand and each tool's colour and width. Local storage,
+// not the plugin's data.json: that file syncs, and the strip a phone wants
+// is not the strip a desktop wants — nor is a stylus's pen width a mouse's.
+// Obsidian scopes the keys to the vault.
+const TOOLBAR_LAYOUT_KEY = 'inkling-expanded:toolbar-layout';
+const TOOL_STATE_KEY = 'inkling-expanded:tool-state';
+// Dragging the width slider changes the width on every pixel. Written once
+// it stops, not on each one.
+const TOOL_STATE_SAVE_DELAY_MS = 400;
 
 export default class InklingPlugin extends Plugin {
-	// Leaves we've already added the "Annotate with Inkling" action to —
+	// Leaves we've already added the "Annotate with InklingExpanded" action to —
 	// active-leaf-change fires repeatedly for the same leaf, and addAction
 	// has no de-dupe of its own, so without this the button would multiply.
 	private readonly decoratedViews = new WeakSet<ItemView>();
@@ -50,6 +49,8 @@ export default class InklingPlugin extends Plugin {
 	// outlives those rebuilds, and it means the pen carries between blocks
 	// and PDFs the way a real one does. See src/annotate/toolState.ts.
 	private readonly toolState = new ToolState();
+	private readerPageWatch: ReaderPageWatch | null = null;
+	private reportedLocalSaveFailure = false;
 	// Read once on load and handed around by reference, never by
 	// snapshot, so changing a setting takes effect without reopening a
 	// file. Initialised to the defaults so nothing has to cope with it
@@ -63,14 +64,20 @@ export default class InklingPlugin extends Plugin {
 		// settings exist — it is shared with surfaces that have no
 		// settings tab behind them.
 		this.toolState.setToolbarCollapsed(this.settings.toolbarStartsCollapsed);
+		this.loadDeviceToolbar();
 
 		this.configurePdfWorker();
 		this.configureAnnotationWriterWorker();
 
 		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf, this.toolState, () => this.settings));
-		registerNoteCreation(this, () => ({ template: this.settings.defaultTemplate, pageSize: this.settings.pageSize }));
+		registerNoteCreation(this, () => ({
+			template: this.settings.defaultTemplate,
+			pageSize: this.settings.pageSize,
+			canvasMode: this.settings.defaultCanvasMode,
+		}));
 		registerInkBlock(this, this.toolState, {
 			captionsEnabled: () => this.settings.blockCaptions,
+			penButton: () => this.settings.penButton,
 			inkFilePathFor: (notePath) =>
 				inkFilePathFor(
 					notePath,
@@ -82,22 +89,41 @@ export default class InklingPlugin extends Plugin {
 
 		// Obsidian's own core PDF view stays the default for opening a .pdf —
 		// full native chrome (page number, zoom, outline) and no pdf-lib
-		// parsing cost. Inkling used to unclaim the "pdf" extension outright
+		// parsing cost. InklingExpanded used to unclaim the "pdf" extension outright
 		// and replace it everywhere, which is what lost that chrome and made
 		// every PDF open pay pdf-lib's parse cost up front, whether or not
 		// the user ever intended to annotate. Now editing is opt-in: a
 		// "pencil" action added to core PDF leaves below swaps just that leaf
-		// into VIEW_TYPE_PDF, and Inkling's own view offers a matching action
+		// into VIEW_TYPE_PDF, and InklingExpanded's own view offers a matching action
 		// back to the core view (see PdfAnnotateView.exitEditMode).
 		this.registerEvent(this.app.workspace.on('active-leaf-change', (leaf) => this.decorateIfCorePdfLeaf(leaf)));
+
+		const readerPageWatch = new ReaderPageWatch(this.app);
+		this.readerPageWatch = readerPageWatch;
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				if (file instanceof TFile) readerPageWatch.fileChanged(file);
+			}),
+		);
+		// Whichever PDF a reader has come to show, so that the first change to
+		// it from elsewhere has something to be compared with.
+		this.registerEvent(
+			this.app.workspace.on('file-open', (file) => {
+				if (file?.extension === 'pdf') readerPageWatch.readerOpened(file);
+			}),
+		);
 		this.app.workspace.onLayoutReady(() => {
-			for (const leaf of this.app.workspace.getLeavesOfType(CORE_PDF_VIEW_TYPE)) this.decorateIfCorePdfLeaf(leaf);
+			for (const leaf of this.app.workspace.getLeavesOfType(CORE_PDF_VIEW_TYPE)) {
+				this.decorateIfCorePdfLeaf(leaf);
+				// A reader restored with the workspace fires no file-open.
+				if (leaf.view instanceof FileView && leaf.view.file) readerPageWatch.readerOpened(leaf.view.file);
+			}
 		});
 
 		this.addCommand({
-			// Not "…with Inkling": Obsidian already prefixes a command with
+			// Not "…with InklingExpanded": Obsidian already prefixes a command with
 			// the plugin's name in the palette, so saying it again reads as
-			// "Inkling: Annotate this PDF with Inkling".
+			// "InklingExpanded: Annotate this PDF with InklingExpanded".
 			id: 'annotate-pdf',
 			name: 'Annotate this PDF',
 			checkCallback: (checking) => {
@@ -117,6 +143,46 @@ export default class InklingPlugin extends Plugin {
 			id: 'undo-annotation',
 			name: 'Undo annotation',
 			checkCallback: (checking) => this.withAnnotateView(checking, (view) => view.undoAnnotation()),
+		});
+
+		this.addCommand({
+			id: 'check-stylus-input',
+			name: 'Check stylus input (side button, eraser, pressure)',
+			callback: () => startStylusCheck(activeWindow),
+		});
+
+		// The way back from a rebuild that went wrong — see backups.ts.
+		this.addCommand({
+			id: 'restore-pdf-backup',
+			name: 'Restore an earlier version of this PDF',
+			checkCallback: (checking) => {
+				const file = this.activePdfFile();
+				if (!file) return false;
+				if (!checking) {
+					void listBackups(this.app, file).then((backups) => {
+						if (backups.length === 0) new Notice(`InklingExpanded: there is no earlier version of “${file.basename}” on this device.`);
+						else new BackupModal(this.app, file, backups).open();
+					});
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'manage-pdf-pages',
+			name: 'Manage pages of this PDF',
+			checkCallback: (checking) => {
+				const file = this.activePdfFile();
+				if (!file) return false;
+				if (!checking) openManagePages(this.app, file);
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'toggle-touch-drawing',
+			name: 'Toggle drawing with finger',
+			callback: () => this.toolState.setTouchDrawing(!this.toolState.isTouchDrawing()),
 		});
 
 		this.addCommand({
@@ -149,7 +215,7 @@ export default class InklingPlugin extends Plugin {
 	}
 
 	// The PDF the user is looking at, whichever view is showing it —
-	// Inkling’s own or Obsidian’s. Extraction is read-only, so it has no
+	// InklingExpanded’s own or Obsidian’s. Extraction is read-only, so it has no
 	// reason to care which.
 	private activePdfFile(): TFile | null {
 		const view = this.app.workspace.getActiveViewOfType(FileView);
@@ -158,7 +224,7 @@ export default class InklingPlugin extends Plugin {
 	}
 
 	private async extractAnnotations(file: TFile): Promise<void> {
-		const notice = new Notice(`Inkling: reading ${file.basename}…`, 0);
+		const notice = new Notice(`InklingExpanded: reading ${file.basename}…`, 0);
 		try {
 			// Anything still sitting in a debounce belongs in the file before it
 			// is read, or the last minute of highlighting is simply missing
@@ -169,7 +235,7 @@ export default class InklingPlugin extends Plugin {
 
 			const annotations = await collectAnnotations(await this.app.vault.readBinary(file), {
 				onProgress: (pageNumber, pageCount) => {
-					notice.setMessage(`Inkling: reading ${file.basename} — page ${pageNumber} of ${pageCount}`);
+					notice.setMessage(`InklingExpanded: reading ${file.basename} — page ${pageNumber} of ${pageCount}`);
 				},
 			});
 
@@ -189,16 +255,16 @@ export default class InklingPlugin extends Plugin {
 			notice.hide();
 			new Notice(
 				annotations.length === 0
-					? `Inkling: no annotations found in ${file.basename}.`
-					: `Inkling: extracted ${annotations.length} annotations from ${file.basename}.`,
+					? `InklingExpanded: no annotations found in ${file.basename}.`
+					: `InklingExpanded: extracted ${annotations.length} annotations from ${file.basename}.`,
 			);
 
 			const note = this.app.vault.getAbstractFileByPath(path);
 			if (note instanceof TFile) await this.app.workspace.getLeaf('tab').openFile(note);
 		} catch (error) {
 			notice.hide();
-			console.error('Inkling: failed to extract annotations.', error);
-			new Notice('Inkling: could not extract annotations from this PDF.');
+			console.error('InklingExpanded: failed to extract annotations.', error);
+			new Notice('InklingExpanded: could not extract annotations from this PDF.');
 		}
 	}
 
@@ -231,7 +297,7 @@ export default class InklingPlugin extends Plugin {
 		const unreadable = result.skipped > 0 ? ` ${result.skipped} could not be read and were left alone.` : '';
 
 		if (result.blocks === 0) {
-			new Notice(`Inkling: nothing to compact in this note.${unreadable}`);
+			new Notice(`InklingExpanded: nothing to compact in this note.${unreadable}`);
 			return;
 		}
 
@@ -248,12 +314,12 @@ export default class InklingPlugin extends Plugin {
 			});
 
 			if (!wrote) {
-				new Notice('Inkling: the note changed while compacting, so nothing was written. Try again.');
+				new Notice('InklingExpanded: the note changed while compacting, so nothing was written. Try again.');
 				return;
 			}
 		} catch (error) {
-			console.error('Inkling: failed to compact ink blocks.', error);
-			new Notice('Inkling: could not compact this note. Nothing was changed.');
+			console.error('InklingExpanded: failed to compact ink blocks.', error);
+			new Notice('InklingExpanded: could not compact this note. Nothing was changed.');
 			return;
 		}
 
@@ -265,7 +331,7 @@ export default class InklingPlugin extends Plugin {
 		// comes to save.
 		const ids = result.stamped > 0 ? ` ${result.stamped} block${result.stamped === 1 ? '' : 's'} given an id.` : '';
 		new Notice(
-			`Inkling: rewrote ${result.blocks} ink block${result.blocks === 1 ? '' : 's'} — ` +
+			`InklingExpanded: rewrote ${result.blocks} ink block${result.blocks === 1 ? '' : 's'} — ` +
 				`${dropped}% fewer points, ${mb(source.length)} to ${mb(result.content.length)}.${ids}${unreadable}`,
 			10_000,
 		);
@@ -278,7 +344,57 @@ export default class InklingPlugin extends Plugin {
 		return true;
 	}
 
+	// Read before anything subscribes, so restoring what was stored is not
+	// mistaken for a change and written straight back.
+	private loadDeviceToolbar(): void {
+		try {
+			this.toolState.setToolbarLayout(normalizeToolbarLayout(this.app.loadLocalStorage(TOOLBAR_LAYOUT_KEY)));
+			this.toolState.restore(this.app.loadLocalStorage(TOOL_STATE_KEY));
+		} catch (error) {
+			// Storage that cannot be read costs the toolbar its arrangement
+			// and the pen its last settings, not the plugin: both start from
+			// their defaults.
+			console.warn('InklingExpanded: could not read the toolbar from this device.', error);
+		}
+
+		let pendingSave: number | null = null;
+		const saveToolState = () => {
+			if (pendingSave !== null) window.clearTimeout(pendingSave);
+			pendingSave = null;
+			this.saveLocally(TOOL_STATE_KEY, this.toolState.snapshot(), 'the pen settings');
+		};
+		this.register(
+			this.toolState.subscribe((change) => {
+				if (change === 'layout') {
+					this.saveLocally(TOOLBAR_LAYOUT_KEY, this.toolState.getToolbarLayout(), 'the toolbar layout');
+				} else if (change === 'tool' || change === 'style') {
+					if (pendingSave !== null) window.clearTimeout(pendingSave);
+					pendingSave = window.setTimeout(saveToolState, TOOL_STATE_SAVE_DELAY_MS);
+				}
+			}),
+		);
+		// A change still waiting out the delay when the plugin stops is
+		// written now rather than lost.
+		this.register(() => {
+			if (pendingSave !== null) saveToolState();
+		});
+	}
+
+	private saveLocally(key: string, value: unknown, what: string): void {
+		try {
+			this.app.saveLocalStorage(key, value);
+		} catch (error) {
+			console.error(`InklingExpanded: could not save ${what} on this device.`, error);
+			// Once: storage that refuses one write refuses every write, and
+			// the pen changes many times a minute.
+			if (this.reportedLocalSaveFailure) return;
+			this.reportedLocalSaveFailure = true;
+			new Notice(`InklingExpanded: ${what} could not be saved on this device, and will apply only until Obsidian restarts.`);
+		}
+	}
+
 	onunload(): void {
+		this.readerPageWatch?.stop();
 		// The "annotate" buttons live on Obsidian's *own* PDF views, not on
 		// anything this plugin owns and Obsidian would tear down for it — so
 		// without this they'd outlive the plugin, still sitting in the
@@ -303,7 +419,13 @@ export default class InklingPlugin extends Plugin {
 			const action = this.actions[i];
 			if (action && !action.isConnected) this.actions.splice(i, 1);
 		}
-		this.actions.push(view.addAction('pencil', 'Annotate with Inkling', () => void this.switchToInkling(leaf)));
+		this.actions.push(view.addAction('pencil', 'Annotate with InklingExpanded', () => void this.switchToInkling(leaf)));
+		// A long press or right-click on a page thumbnail: copy a link to the
+		// page, or delete it. See pageMenu.ts.
+		if (view instanceof FileView) {
+			attachThumbnailMenu(this.app, view, (el, handler) => this.registerDomEvent(el, 'contextmenu', handler, { capture: true }));
+			attachThumbnailDrag(this.app, view, (type, handler) => this.registerDomEvent(view.containerEl, type, handler, { capture: true }));
+		}
 	}
 
 	private async switchToInkling(leaf: WorkspaceLeaf): Promise<void> {

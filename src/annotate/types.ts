@@ -12,8 +12,21 @@ export interface Point {
 }
 
 export type DrawToolType = 'pen' | 'highlighter';
+
+// Which pen a pen stroke was drawn with. 'pen' is the round pen, smooth
+// with round ends, which every stroke was drawn with before there was a
+// choice — a stroke with no brush at all is one of those. 'sharp' follows
+// the hand exactly, corners and all, and ends square. How each draws is in
+// annotate/stroke.ts.
+export type PenBrush = 'pen' | 'sharp';
+
+export const PEN_BRUSHES: readonly PenBrush[] = ['pen', 'sharp'];
+
+export function isPenBrush(value: unknown): value is PenBrush {
+	return typeof value === 'string' && (PEN_BRUSHES as readonly string[]).includes(value);
+}
 export type ShapeToolType = 'line' | 'rectangle' | 'oval' | 'arrow';
-export type ToolType = 'select' | DrawToolType | 'eraser' | 'note' | ShapeToolType;
+export type ToolType = 'select' | DrawToolType | 'eraser' | 'note' | 'text' | ShapeToolType;
 
 interface BaseAnnotation {
 	id: string;
@@ -36,6 +49,10 @@ export interface StrokeAnnotation extends BaseAnnotation {
 	kind: 'stroke';
 	tool: DrawToolType;
 	points: Point[];
+	// A pen stroke's nib. Absent for the plain pen, so that every stroke
+	// drawn before nibs existed, and every one drawn with the plain pen
+	// since, is stored exactly as it always was.
+	brush?: PenBrush;
 }
 
 // A comment pinned to a spot on the page. Unlike a stroke or a shape it
@@ -48,14 +65,88 @@ export interface NoteAnnotation extends BaseAnnotation {
 	note: string;
 }
 
+// How a shape's line is drawn. Absent is solid.
+export type LineDash = 'dashed' | 'dotted';
+
 export interface ShapeAnnotation extends BaseAnnotation {
 	kind: 'shape';
 	tool: ShapeToolType;
 	start: Point;
 	end: Point;
+	dash?: LineDash;
+	// A rectangle or oval with its inside tinted (see SHAPE_FILL_OPACITY).
+	filled?: boolean;
+	// An arrow with a head at both ends.
+	bothEnds?: boolean;
 }
 
-export type Annotation = StrokeAnnotation | ShapeAnnotation | NoteAnnotation;
+// Typed text on the page. `at` is its top-left corner, and `width` — which
+// every other kind uses for line thickness — is its font size, so that
+// scaling, saving and pasting all treat it the way they treat a stroke.
+export interface TextAnnotation extends BaseAnnotation {
+	kind: 'text';
+	at: Point;
+	text: string;
+}
+
+// A picture's pixels, as a page holds them. JPEG bytes for a picture with
+// nothing see-through in it, which is nearly every photo and keeps one
+// small; raw RGBA otherwise, so a transparent PNG keeps its transparency.
+// Either way exactly what goes into the PDF, so reading one back out of a
+// file gives back what was put in.
+export interface PicturePixels {
+	format: 'jpeg' | 'rgba';
+	width: number;
+	height: number;
+	data: Uint8Array;
+}
+
+// A picture placed on a page: an image imported from the vault or the
+// device, which can be moved, scaled and deleted like a drawing, and is
+// drawn beneath the ink so it can be written on. `start` and `end` are
+// opposite corners of the box it fills.
+export interface ImageAnnotation extends BaseAnnotation {
+	kind: 'image';
+	start: Point;
+	end: Point;
+	picture: PicturePixels;
+	// Locked in place: it can still be selected — which is how it is
+	// unlocked again — but not moved, sized or deleted, and a lasso drawn
+	// round the writing on it leaves it where it is.
+	locked?: boolean;
+}
+
+export function isLockedPicture(annotation: Annotation): boolean {
+	return annotation.kind === 'image' && annotation.locked === true;
+}
+
+export type Annotation = StrokeAnnotation | ShapeAnnotation | NoteAnnotation | ImageAnnotation | TextAnnotation;
+
+// How much of a filled shape's colour shows: enough to mark the area,
+// little enough to read what is under it.
+export const SHAPE_FILL_OPACITY = 0.25;
+
+// A dashed or dotted line's on and off lengths, for a line of this width.
+// A dot is a dash of next to no length, which a round cap makes round.
+export function dashPattern(dash: LineDash, width: number): [number, number] {
+	return dash === 'dashed' ? [width * 3, width * 3] : [0.01, width * 2.2];
+}
+
+// The font typed text is drawn in. Helvetica is one of the fonts every PDF
+// reader has without its being embedded, so the page looks the same in the
+// file as it does here.
+export const TEXT_FONT_FAMILY = 'Helvetica, Arial, sans-serif';
+export const TEXT_LINE_HEIGHT = 1.25;
+// Text's width is estimated rather than measured: its box is needed where
+// there is no canvas to measure on — saving, in the writer's worker — and
+// the two must agree. Generous, so a box always holds what is in it.
+const TEXT_ADVANCE = 0.6;
+
+export function textBlockSize(text: string, fontSize: number): { width: number; height: number } {
+	const lines = text.split('\n');
+	const longest = Math.max(1, ...lines.map((line) => line.length));
+	return { width: longest * fontSize * TEXT_ADVANCE, height: lines.length * fontSize * TEXT_LINE_HEIGHT };
+}
 
 // The marker a note annotation draws, in the surface’s own coordinate
 // space. Fixed rather than derived from stroke width: a note has no
@@ -157,6 +248,8 @@ export function paletteFor(tool: ToolType): readonly PresetColor[] {
 }
 
 export const DEFAULT_WIDTH = 3;
+// Typed text's starting size, in points.
+export const DEFAULT_TEXT_SIZE = 14;
 
 // A highlighter's default, in the same units. Freehand highlighting with a
 // 3px nib is just a pale pen — a highlighter has to be about as tall as a
@@ -190,9 +283,17 @@ export const MAX_WIDTH = 40;
 // differs: a pen wants a fine dark nib and a highlighter wants a broad pale
 // one, and starting the highlighter on the pen's defaults is what made it
 // draw a hairline black smear the first time anyone reached for it.
-export function defaultStyleFor(tool: ToolType): { color: string; width: number } {
+export function defaultStyleFor(tool: ToolType, brush: PenBrush = 'pen'): { color: string; width: number } {
 	if (tool === 'highlighter') {
 		return { color: HIGHLIGHTER_COLORS[0]?.value ?? DEFAULT_COLOR, width: DEFAULT_HIGHLIGHTER_WIDTH };
 	}
+	if (tool === 'pen') return { color: DEFAULT_COLOR, width: DEFAULT_BRUSH_WIDTHS[brush] };
+	if (tool === 'text') return { color: DEFAULT_COLOR, width: DEFAULT_TEXT_SIZE };
 	return { color: DEFAULT_COLOR, width: DEFAULT_WIDTH };
 }
+
+// Each pen's starting width.
+const DEFAULT_BRUSH_WIDTHS: Record<PenBrush, number> = {
+	pen: DEFAULT_WIDTH,
+	sharp: DEFAULT_WIDTH,
+};

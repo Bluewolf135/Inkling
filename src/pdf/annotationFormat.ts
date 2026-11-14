@@ -1,4 +1,4 @@
-// How Inkling's annotations are shaped inside a PDF.
+// How InklingExpanded's annotations are shaped inside a PDF.
 //
 // These live apart from both the code that writes them
 // (pdf/annotationSync.ts) and the code that reads them back out
@@ -8,7 +8,7 @@
 // have; there is no reason to leave a second way for the two halves to
 // drift apart.
 
-// Every annotation Inkling writes is tagged with its stable id in the PDF's
+// Every annotation InklingExpanded writes is tagged with its stable id in the PDF's
 // `/NM` field — the specification's own "unique annotation name", which is
 // a perfect fit. The `ink-` prefix (see src/annotate/id.ts) is what lets us
 // tell our own annotations from ones authored by other software on read,
@@ -28,6 +28,17 @@ export const INKLING_EXTRAS = 'Inkling';
 // sample is plenty — a thousandth of a unit of pressure is not worth the
 // file size, and these arrays are as long as the stroke is.
 export const PRESSURE_KEY = 'P';
+
+// Typed text's top-left corner, font size and colour, as numbers. All of
+// them are in the appearance stream too, but not in a form to read back.
+export const TEXT_KEY = 'T';
+
+// The nib a pen stroke was drawn with (see PenBrush in annotate/types.ts),
+// as a name. Only written for a nib other than the plain pen, so a file
+// with no such strokes is byte for byte what it always was. Another reader
+// needs none of it — the appearance stream already holds the ink as the
+// nib drew it — but reading the stroke back needs it to redraw the same.
+export const BRUSH_KEY = 'B';
 
 // The document text an annotation covers, captured when it was drawn.
 //

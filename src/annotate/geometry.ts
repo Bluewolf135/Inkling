@@ -1,4 +1,4 @@
-import { Annotation, NOTE_MARKER_SIZE, Point, Rect } from './types';
+import { Annotation, NOTE_MARKER_SIZE, Point, Rect, textBlockSize } from './types';
 
 export function distance(a: Point, b: Point): number {
 	return Math.hypot(a.x - b.x, a.y - b.y);
@@ -31,6 +31,10 @@ function distanceToPolyline(p: Point, points: Point[]): number {
 
 export function boundingBox(annotation: Annotation): Rect {
 	if (annotation.kind === 'note') return noteBox(annotation.at);
+	if (annotation.kind === 'text') {
+		const size = textBlockSize(annotation.text, annotation.width);
+		return { minX: annotation.at.x, minY: annotation.at.y, maxX: annotation.at.x + size.width, maxY: annotation.at.y + size.height };
+	}
 	const points = annotation.kind === 'stroke' ? annotation.points : [annotation.start, annotation.end];
 	const xs = points.map((p) => p.x);
 	const ys = points.map((p) => p.y);
@@ -71,7 +75,7 @@ export function hitTestAnnotation(annotation: Annotation, point: Point): boolean
 		return distanceToPolyline(point, annotation.points) <= tolerance;
 	}
 
-	if (annotation.tool === 'line' || annotation.tool === 'arrow') {
+	if (annotation.kind === 'shape' && (annotation.tool === 'line' || annotation.tool === 'arrow')) {
 		return distanceToSegment(point, annotation.start, annotation.end) <= tolerance;
 	}
 
@@ -112,7 +116,7 @@ export function pointInPolygon(point: Point, polygon: Point[]): boolean {
 function extentPoints(annotation: Annotation): Point[] {
 	if (annotation.kind === 'note') return [annotation.at];
 	if (annotation.kind === 'stroke') return annotation.points;
-	if (annotation.tool === 'line' || annotation.tool === 'arrow') return [annotation.start, annotation.end];
+	if (annotation.kind === 'shape' && (annotation.tool === 'line' || annotation.tool === 'arrow')) return [annotation.start, annotation.end];
 	const box = boundingBox(annotation);
 	return [
 		{ x: box.minX, y: box.minY },
@@ -129,8 +133,43 @@ export function polygonEnclosesAnnotation(annotation: Annotation, polygon: Point
 	return extentPoints(annotation).every((p) => pointInPolygon(p, polygon));
 }
 
+// How much of an annotation has to lie inside a lasso for the lasso to take
+// it. Not all of it: a loop drawn round a word by hand clips the tail of a
+// g or the cross of a t as often as not, and a lasso that then left those
+// letters behind read as broken. Not any of it either, or a loop round one
+// line would pick up the descenders of the line above.
+export const LASSO_COVERAGE = 0.6;
+
+// Whether a lasso loop takes this annotation: most of it inside the loop.
+// For a stroke that is most of its samples, which sit along it evenly
+// enough to stand for its length.
+export function polygonSelectsAnnotation(annotation: Annotation, polygon: Point[]): boolean {
+	// A locked picture is the page's background, not something to pick up
+	// with the writing on it.
+	if (annotation.kind === 'image' && annotation.locked) return false;
+	const points = extentPoints(annotation);
+	if (points.length === 0) return false;
+	let inside = 0;
+	for (const point of points) if (pointInPolygon(point, polygon)) inside++;
+	return inside / points.length >= LASSO_COVERAGE;
+}
+
+// Scales an annotation about a fixed point, stroke width included — what
+// dragging a selection's corner does. The width comes along so that
+// handwriting made larger looks like the same handwriting, larger, rather
+// than the same thin line drawn round bigger letters. A note's marker is
+// chrome at a fixed size, so a note only moves.
+export function scaleAnnotationAbout(annotation: Annotation, anchor: Point, factor: number): Annotation {
+	const project = (p: Point): Point => ({ ...p, x: anchor.x + (p.x - anchor.x) * factor, y: anchor.y + (p.y - anchor.y) * factor });
+	if (annotation.kind === 'note') return { ...annotation, at: project(annotation.at) };
+	const width = annotation.width * factor;
+	if (annotation.kind === 'text') return { ...annotation, width, at: project(annotation.at) };
+	if (annotation.kind === 'stroke') return { ...annotation, width, points: annotation.points.map(project) };
+	return { ...annotation, width, start: project(annotation.start), end: project(annotation.end) };
+}
+
 export function translateAnnotation(annotation: Annotation, dx: number, dy: number): Annotation {
-	if (annotation.kind === 'note') {
+	if (annotation.kind === 'note' || annotation.kind === 'text') {
 		return { ...annotation, at: { x: annotation.at.x + dx, y: annotation.at.y + dy } };
 	}
 	if (annotation.kind === 'stroke') {
@@ -163,6 +202,7 @@ export function scaleAnnotation(annotation: Annotation, from: Rect, to: Rect): A
 	// chrome at a fixed size, not geometry, so scaling it would make a
 	// pin the size of a paragraph.
 	if (annotation.kind === 'note') return { ...annotation, at: project(annotation.at) };
+	if (annotation.kind === 'text') return { ...annotation, width: annotation.width * scaleY, at: project(annotation.at) };
 	if (annotation.kind === 'stroke') {
 		return { ...annotation, points: annotation.points.map(project) };
 	}
@@ -181,7 +221,7 @@ export function scaleAnnotationUniform(annotation: Annotation, factor: number): 
 	const point = (p: Point): Point => (p.p === undefined ? { x: p.x * factor, y: p.y * factor } : { x: p.x * factor, y: p.y * factor, p: p.p });
 	const width = annotation.width * factor;
 
-	if (annotation.kind === 'note') return { ...annotation, width, at: point(annotation.at) };
+	if (annotation.kind === 'note' || annotation.kind === 'text') return { ...annotation, width, at: point(annotation.at) };
 	if (annotation.kind === 'stroke') return { ...annotation, width, points: annotation.points.map(point) };
 	return { ...annotation, width, start: point(annotation.start), end: point(annotation.end) };
 }

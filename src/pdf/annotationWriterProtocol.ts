@@ -43,8 +43,8 @@ interface OpenedOk {
 	requestId: number;
 	ok: true;
 	savedAnnotations: Map<number, Annotation[]>;
-	// What pdf.js should render: the file with only Inkling's own
-	// annotations stripped out (see stripInklingAnnotations), so its default
+	// What pdf.js should render: the file with only InklingExpanded's own
+	// annotations left off its pages (see displayCopyOf), so its default
 	// annotation-baking render still shows annotations from other PDF
 	// software without doubling up with our own live overlay.
 	displayBytes: ArrayBuffer;
@@ -57,6 +57,10 @@ interface OpenedOk {
 	// Whether this file can be appended to rather than rewritten, which is
 	// what the view's save cadence turns on.
 	incremental: boolean;
+	// See pageIdsOf in annotationWriterCore.ts.
+	pageIds: string[];
+	// See layoutStampOf in outline.ts.
+	layoutStamp: string;
 }
 
 // Discriminated, because the two outcomes go to different Vault calls and

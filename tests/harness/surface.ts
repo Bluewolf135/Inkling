@@ -47,8 +47,11 @@ const CONTEXT_METHODS = [
 	'stroke',
 	'fillRect',
 	'strokeRect',
+	'roundRect',
 	'setLineDash',
 	'setTransform',
+	'drawImage',
+	'fillText',
 	'translate',
 	'scale',
 ] as const;
@@ -85,6 +88,10 @@ export interface PointerOptions {
 	pointerType?: string;
 	pressure?: number;
 	isPrimary?: boolean;
+	button?: number;
+	// The buttons held, as a bit mask: 2 a stylus's side button, 32 its
+	// eraser end.
+	buttons?: number;
 }
 
 class FakePointerEvent extends Event {
@@ -92,6 +99,8 @@ class FakePointerEvent extends Event {
 	pointerType: string;
 	pressure: number;
 	isPrimary: boolean;
+	button: number;
+	buttons: number;
 	width = 1;
 	height = 1;
 	clientX: number;
@@ -103,6 +112,8 @@ class FakePointerEvent extends Event {
 		this.pointerType = init.pointerType ?? 'pen';
 		this.pressure = init.pressure ?? 0.5;
 		this.isPrimary = init.isPrimary ?? true;
+		this.button = init.button ?? 0;
+		this.buttons = init.buttons ?? (type === 'pointerup' ? 0 : 1);
 		this.clientX = init.clientX;
 		this.clientY = init.clientY;
 	}

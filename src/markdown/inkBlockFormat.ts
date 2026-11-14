@@ -1,4 +1,5 @@
 import type { Annotation, DrawToolType, Point, ShapeToolType } from '../annotate';
+import { isPenBrush } from '../annotate/types';
 
 // The fenced-block language that marks an ink block in a note. Short and
 // readable on purpose: it's what shows up in the raw Markdown, and someone
@@ -160,6 +161,14 @@ function readAnnotation(value: unknown): Annotation | null {
 	if (typeof id !== 'string' || !id) return null;
 	if (typeof color !== 'string' || !color) return null;
 	if (!isFiniteNumber(width) || width <= 0) return null;
+
+	// Text has no tool to name.
+	if (kind === 'text') {
+		const at = readFlexiblePoint(raw.at);
+		if (!at || typeof raw.text !== 'string' || !raw.text) return null;
+		return { id, color, width, kind: 'text', at, text: raw.text };
+	}
+
 	if (typeof tool !== 'string') return null;
 
 	if (kind === 'stroke') {
@@ -183,7 +192,10 @@ function readAnnotation(value: unknown): Annotation | null {
 			}
 		}
 		if (!points || points.length === 0) return null;
-		return { id, color, width, kind: 'stroke', tool: tool as DrawToolType, points };
+		// A nib this build does not know — written by a newer one — draws as
+		// the plain pen rather than costing the stroke.
+		const brush = tool === 'pen' && isPenBrush(raw.brush) && raw.brush !== 'pen' ? raw.brush : undefined;
+		return { id, color, width, kind: 'stroke', tool: tool as DrawToolType, points, ...(brush ? { brush } : {}) };
 	}
 
 	if (kind === 'shape') {
@@ -191,7 +203,19 @@ function readAnnotation(value: unknown): Annotation | null {
 		const start = readFlexiblePoint(raw.start);
 		const end = readFlexiblePoint(raw.end);
 		if (!start || !end) return null;
-		return { id, color, width, kind: 'shape', tool: tool as ShapeToolType, start, end };
+		return {
+			id,
+			color,
+			width,
+			kind: 'shape',
+			tool: tool as ShapeToolType,
+			start,
+			end,
+			// Each only as what it can be; anything else draws as a plain line.
+			...(raw.dash === 'dashed' || raw.dash === 'dotted' ? { dash: raw.dash } : {}),
+			...(raw.filled === true ? { filled: true } : {}),
+			...(raw.bothEnds === true ? { bothEnds: true } : {}),
+		};
 	}
 
 	return null;
@@ -440,7 +464,7 @@ function flatPoint(point: Point): number[] {
 // A stroke's points as format 2 stores them: coordinates in one flat array,
 // and pressure in a parallel array beside it — the same shape the PDF side
 // already uses, where /InkList holds flat coordinates and the private
-// /Inkling /P a parallel byte array.
+// /InklingExpanded /P a parallel byte array.
 //
 // A point with no pressure writes `null` rather than being left out, so the
 // two arrays always agree on how many samples there are and a gap stays a
@@ -501,7 +525,7 @@ export function storedAnnotation(annotation: Annotation): Record<string, unknown
 //
 // Established by experiment rather than reasoned about. A copy of the note
 // with the fence language changed — so this plugin never ran at all — lagged
-// exactly the same, which ruled out anything Inkling executes. The same copy
+// exactly the same, which ruled out anything InklingExpanded executes. The same copy
 // with the JSON wrapped was smooth. Source mode was smooth throughout, which
 // is what pointed at the rendering pass rather than at CodeMirror's handling
 // of long lines.
