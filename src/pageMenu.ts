@@ -7,7 +7,7 @@ import { ManagePagesModal, type PageExportFormat, type PageSource } from './mana
 import { followPageLinks, pageMapOfDeletion, pageMapOfPlan } from './pageLinks';
 import { writeBinarySafely } from './vaultWrite';
 import { annotateViewsOf, refreshCoreReaders } from './coreViews';
-import { backUp } from './backups';
+import { backUp, type BackupReason } from './backups';
 
 // A menu on the page thumbnails of Obsidian's own PDF reader — a long press
 // on a tablet, a right-click on a desktop — that can delete a page.
@@ -96,30 +96,58 @@ class DeletePageModal extends Modal {
 }
 
 // Removes the page and writes the file. Obsidian's reader reloads a PDF that
-// changes, and so does InklingExpanded's annotate view, so whatever has it open
-// shows the result.
+// changes, so whatever has it open shows the result.
 export async function deletePage(app: App, file: TFile, pageNumber: number): Promise<boolean> {
-	try {
-		// The same PDF open to annotate, here: what is drawn there and not
-		// saved yet goes into the file first, so the page is deleted from the
-		// file as it really is — and that view then takes the deletion in as
-		// it would one from another device.
-		for (const view of annotateViewsOf(app, file)) await view.flushPendingWrites();
-		const before = await app.vault.readBinary(file);
+	const done = await rewriteFile(app, file, 'delete-page', `could not delete page ${pageNumber}.`, async (before) => {
 		const result = await removePage(before, pageNumber);
 		if (result.kind === 'refused') {
 			new Notice(`InklingExpanded: page ${pageNumber} was not deleted — ${result.reason}.`);
-			return false;
+			return null;
 		}
-		await backUp(app, file, before, 'delete-page');
-		await writeBinarySafely(app.vault, file, toArrayBuffer(result.bytes));
+		return {
+			bytes: toArrayBuffer(result.bytes),
+			notice: `InklingExpanded: deleted page ${pageNumber}. ${result.pageCount} ${result.pageCount === 1 ? 'page' : 'pages'} left.`,
+		};
+	});
+	if (done) await followPageLinks(app, file, pageMapOfDeletion(pageNumber));
+	return done;
+}
+
+// Rewrites the file as `change` says, with a backup of it as it was.
+//
+// The same PDF open to annotate, here, is the one thing that can be writing
+// to it meanwhile. Flushing that view first was not enough: a stroke drawn
+// between the flush and the write here was saved by the view in between,
+// then written over, and the view took its absence for a deletion made on
+// another device. So with a view open the change is made by the view, as
+// its own page changes are — drawing paused and its save slot held for the
+// whole of it (see PdfAnnotateView.rebuild). Only with none is the file
+// written from here.
+async function rewriteFile(
+	app: App,
+	file: TFile,
+	reason: BackupReason,
+	failure: string,
+	change: (before: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; notice?: string } | null>,
+): Promise<boolean> {
+	const [view] = annotateViewsOf(app, file);
+	if (view) {
+		const done = await view.rebuildFromOutside(reason, failure, change);
+		if (done === null) new Notice(`InklingExpanded: “${file.basename}” is busy being changed in its annotate view — try again in a moment.`);
+		return done === true;
+	}
+	try {
+		const before = await app.vault.readBinary(file);
+		const result = await change(before);
+		if (!result) return false;
+		await backUp(app, file, before, reason);
+		await writeBinarySafely(app.vault, file, result.bytes);
 		await refreshCoreReaders(app, file);
-		await followPageLinks(app, file, pageMapOfDeletion(pageNumber));
-		new Notice(`InklingExpanded: deleted page ${pageNumber}. ${result.pageCount} ${result.pageCount === 1 ? 'page' : 'pages'} left.`);
+		if (result.notice) new Notice(result.notice);
 		return true;
 	} catch (error) {
-		console.error('InklingExpanded: failed to delete a page.', error);
-		new Notice(`InklingExpanded: could not delete page ${pageNumber}.`);
+		console.error(`InklingExpanded: ${failure}`, error);
+		new Notice(`InklingExpanded: ${failure}`);
 		return false;
 	}
 }
@@ -163,31 +191,22 @@ export function applyPageOrder(app: App, file: TFile, order: readonly number[]):
 	return applyPlanToFile(app, file, order.map((page) => ({ page })));
 }
 
-// Writes the pages as `plan` has them. An annotate view with the file open
-// saves first, then takes the change in as it would another device's (see
-// takeInRemote in pdfView.ts) — which is also what happens on another device
-// when the sync brings this over: pages are matched by what they are, so ink
-// not yet saved there stays on its own page.
+// Writes the pages as `plan` has them (see rewriteFile). On another device
+// the sync brings this over as a change of theirs (see takeInRemote in
+// pdfView.ts): pages are matched by what they are, so ink not yet saved
+// there stays on its own page.
 export async function applyPlanToFile(app: App, file: TFile, plan: readonly PlannedPage[]): Promise<boolean> {
-	try {
-		for (const view of annotateViewsOf(app, file)) await view.flushPendingWrites();
-		const before = await app.vault.readBinary(file);
+	const done = await rewriteFile(app, file, 'move-page', 'could not change the pages.', async (before) => {
 		const result = await applyPagePlan(before, plan);
-		if (result.kind === 'unchanged') return false;
+		if (result.kind === 'unchanged') return null;
 		if (result.kind === 'refused') {
 			new Notice(`InklingExpanded: the pages were not changed — ${result.reason}.`);
-			return false;
+			return null;
 		}
-		await backUp(app, file, before, 'move-page');
-		await writeBinarySafely(app.vault, file, toArrayBuffer(result.bytes));
-		await refreshCoreReaders(app, file);
-		await followPageLinks(app, file, pageMapOfPlan(plan));
-		return true;
-	} catch (error) {
-		console.error('InklingExpanded: failed to change the pages.', error);
-		new Notice('InklingExpanded: could not change the pages.');
-		return false;
-	}
+		return { bytes: toArrayBuffer(result.bytes) };
+	});
+	if (done) await followPageLinks(app, file, pageMapOfPlan(plan));
+	return done;
 }
 
 // ---- Exporting pages ----

@@ -2031,6 +2031,20 @@ export class PdfAnnotateView extends FileView {
 	//   - the file as it was is kept as a backup (see backups.ts), so even a
 	//     rebuild gone wrong costs nothing that "Restore an earlier version of
 	//     this PDF" cannot bring back.
+	// For pageMenu.ts: a change to this file's pages asked for from outside
+	// this view — Obsidian's reader, the command palette — made as this view's
+	// own rebuilds are, with drawing paused and the save slot held, so a stroke
+	// drawn meanwhile is never saved over. Null when the view cannot take it
+	// now: a rebuild or a growth under way, or a file it is not writing to.
+	async rebuildFromOutside(
+		reason: BackupReason,
+		failure: string,
+		change: (bytes: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; scrollTo?: number; notice?: string } | null>,
+	): Promise<boolean | null> {
+		if (!this.currentFile || this.addingPage || this.growing || this.controller.isReadOnly()) return null;
+		return this.rebuild(reason, failure, change);
+	}
+
 	private async rebuild(
 		reason: BackupReason,
 		failure: string,
@@ -2937,7 +2951,11 @@ export class PdfAnnotateView extends FileView {
 
 			const ourIds = this.pageIds;
 			const theirIds = opened.pageIds ?? [];
-			const identified = ourIds.length > 0 && theirIds.length > 0;
+			// A file rewritten by other software has every object renumbered, so
+			// no page of ours is found in it though they are the same pages. Then
+			// they are matched by number, as before pages had identities, rather
+			// than every one of them taken for deleted — with what was drawn on it.
+			const identified = ourIds.length > 0 && theirIds.length > 0 && ourIds.some((id) => theirIds.includes(id));
 			const theirStamp = opened.layoutStamp ?? '';
 			// A page turned or a bookmark changed there: the ink merges as it
 			// always does, and the view reloads to show it.

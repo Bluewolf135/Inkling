@@ -152,13 +152,32 @@ describe('writing a new page order', () => {
 		expect(rebuildView).toHaveBeenCalled();
 	});
 
-	it('saves what an open annotate view has first', async () => {
+	// With the PDF open to annotate, the view makes the change itself, with
+	// drawing paused and its save slot held: a stroke drawn while the pages
+	// were being rewritten here used to be saved in between and written over.
+	it('hands the change to an open annotate view rather than writing past it', async () => {
 		const vault = vaultWith(await pdfOf([300, 400]));
-		const flushPendingWrites = vi.fn(async () => {});
-		const annotate = { file: { path: 'Book.pdf' }, flushPendingWrites };
+		const rebuildFromOutside = vi.fn(async (_reason: string, _failure: string, change: (bytes: ArrayBuffer) => Promise<unknown>) => {
+			await change(vault.bytes.slice().buffer);
+			return true;
+		});
+		const annotate = { file: { path: 'Book.pdf' }, flushPendingWrites: vi.fn(async () => {}), rebuildFromOutside };
 		const app = { vault, workspace: { getLeavesOfType: (type: string) => (type === 'inkling-pdf-view' ? [{ view: annotate }] : []) } };
-		await applyPageOrder(app as never, file as never, [2, 1]);
-		expect(flushPendingWrites).toHaveBeenCalled();
+
+		expect(await applyPageOrder(app as never, file as never, [2, 1])).toBe(true);
+
+		expect(rebuildFromOutside).toHaveBeenCalledWith('move-page', expect.any(String), expect.any(Function));
+		expect(vault.modifyBinary).not.toHaveBeenCalled();
+		expect(vault.adapter.writeBinary).not.toHaveBeenCalled();
+	});
+
+	it('writes nothing when the annotate view cannot take the change now', async () => {
+		const vault = vaultWith(await pdfOf([300, 400]));
+		const annotate = { file: { path: 'Book.pdf' }, flushPendingWrites: vi.fn(async () => {}), rebuildFromOutside: vi.fn(async () => null) };
+		const app = { vault, workspace: { getLeavesOfType: (type: string) => (type === 'inkling-pdf-view' ? [{ view: annotate }] : []) } };
+
+		expect(await applyPageOrder(app as never, file as never, [2, 1])).toBe(false);
+		expect(vault.modifyBinary).not.toHaveBeenCalled();
 	});
 });
 

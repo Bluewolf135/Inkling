@@ -1,4 +1,5 @@
 import { App, FileView, TFile } from 'obsidian';
+import type { BackupReason } from './backups';
 
 // Obsidian's own PDF reader, from the outside — none of this is public API,
 // so all of it is read defensively and does nothing when the shape is not
@@ -16,6 +17,12 @@ export interface AnnotateViewHooks {
 	flushPendingWrites(): Promise<void>;
 	prepareForRestore(): Promise<void>;
 	finishRestore(file: TFile): Promise<void>;
+	// See PdfAnnotateView.rebuildFromOutside.
+	rebuildFromOutside(
+		reason: BackupReason,
+		failure: string,
+		change: (bytes: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; scrollTo?: number; notice?: string } | null>,
+	): Promise<boolean | null>;
 }
 
 // Every annotate view with `file` open, in this window or any other.
