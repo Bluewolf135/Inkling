@@ -8,6 +8,9 @@ import {
 	type IncrementalSession,
 } from './annotationWriterCore';
 import type { WorkerRequestMessage, WorkerResponseMessage } from './annotationWriterProtocol';
+import { runAtFullSpeed } from './pdfLibSpeed';
+
+runAtFullSpeed();
 
 // Runs pdf-lib's parse/mutate/save entirely off the main thread. pdf-lib's
 // save() is a full-document re-serialize with no true incremental mode —
@@ -51,6 +54,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequestMessage>) => {
 					profile: opened.profile,
 					risky: opened.risky,
 					incremental: opened.incremental,
+					pageIds: opened.pageIds,
+					layoutStamp: opened.layoutStamp,
 				},
 				[opened.displayBytes],
 			);

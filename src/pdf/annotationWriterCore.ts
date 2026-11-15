@@ -1,6 +1,8 @@
-import { PDFDocument } from 'pdf-lib';
+import { PDFDict, PDFDocument, PDFName, type PDFObject, type PDFPage } from 'pdf-lib';
+import { layoutStampOf } from './outline';
+import { loadSpeed, saveSpeed } from './pdfLibSpeed';
 import type { Annotation } from '../annotate/types';
-import { pruneOrphanedInklingAnnotations, readInklingAnnotations, stripInklingAnnotations, writeInklingAnnotations } from './annotationSync';
+import { isInklingAnnotationDict, pruneOrphanedInklingAnnotations, readInklingAnnotations, writeInklingAnnotations } from './annotationSync';
 import { profileFromPdfLib, riskyFeatures, type StructureProfile } from './compatibility';
 import { recordChanges } from './changeSet';
 import {
@@ -40,14 +42,64 @@ export interface OpenedDocument {
 	session: IncrementalSession;
 	// Whether this file took the fast path, for the view's save cadence.
 	incremental: boolean;
+	// Each page's object in the file, by page index: who a page is, however
+	// its number changes — see pageIdsOf.
+	pageIds: string[];
+	// The document's page turns and bookmarks (see layoutStampOf).
+	layoutStamp: string;
+}
+
+// A page's identity across saves and devices. Its number is not one: a page
+// added before it, or one deleted, moves it. Its object number in the file
+// is — pdf-lib keeps every existing object's number when it saves, and gives
+// new pages new ones — so a change from another device can be matched up
+// page for page, whatever was added or deleted meanwhile.
+export function pageIdsOf(doc: PDFDocument): string[] {
+	return doc.getPages().map((page) => `${page.ref.objectNumber}.${page.ref.generationNumber}`);
 }
 
 export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
+// The document as pdf.js should see it, with our annotations off its pages
+// and those from other software (Xodo, Acrobat...) left on, since pdf.js is
+// the only thing that draws them. It can only bake all of a page's
+// annotations or none, so ours have to be absent or they would be doubled
+// under the live overlay.
+//
+// From the document already parsed, with them taken off only for the length
+// of the save and every page put back exactly as it was. A second parse used
+// to pay for this: the whole file again, in time and in memory, on every open
+// of a note with ink. The ink's objects stay in this copy with nothing leading
+// to them, which pdf.js never looks at, and the copy is never written anywhere.
+async function displayCopyOf(doc: PDFDocument): Promise<ArrayBuffer> {
+	const annotsKey = PDFName.of('Annots');
+	const originals: [PDFPage, PDFObject][] = [];
+	try {
+		for (const page of doc.getPages()) {
+			const original = page.node.get(annotsKey);
+			const annots = page.node.Annots();
+			if (!original || !annots) continue;
+			const entries = annots.asArray();
+			const kept = entries.filter((entry) => {
+				const dict = doc.context.lookupMaybe(entry, PDFDict);
+				return !(dict && isInklingAnnotationDict(dict));
+			});
+			if (kept.length === entries.length) continue;
+			originals.push([page, original]);
+			page.node.set(annotsKey, doc.context.obj(kept));
+		}
+		// Never written anywhere: packing its objects into compressed streams
+		// is time spent making small a copy that is thrown away.
+		return toArrayBuffer(await doc.save({ useObjectStreams: false, ...saveSpeed() }));
+	} finally {
+		for (const [page, original] of originals) page.node.set(annotsKey, original);
+	}
+}
+
 export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> {
-	const doc = await PDFDocument.load(bytes);
+	const doc = await PDFDocument.load(bytes, loadSpeed());
 
 	const savedAnnotations = new Map<number, Annotation[]>();
 	for (let index = 0; index < doc.getPageCount(); index++) {
@@ -72,19 +124,10 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		pruneOrphanedInklingAnnotations(doc);
 	});
 
-	// A second, independent parse of the same bytes — only worth it (and its
-	// own save()) when this file actually has Inkling annotations to strip
-	// out; otherwise the original bytes are already exactly the right display
-	// copy. `bytes` is safe to re-read here since nothing above mutated or
-	// transferred it away — pdf-lib doesn't detach the buffers it parses.
-	let displayBytes: ArrayBuffer;
-	if (savedAnnotations.size > 0) {
-		const displayDoc = await PDFDocument.load(bytes);
-		stripInklingAnnotations(displayDoc);
-		displayBytes = toArrayBuffer(await displayDoc.save());
-	} else {
-		displayBytes = bytes.slice(0);
-	}
+	// What pdf.js should render: the file without our own annotations, so
+	// they are not baked in under the live overlay. The original bytes
+	// already are that when the file has none.
+	const displayBytes = savedAnnotations.size > 0 ? await displayCopyOf(doc) : bytes.slice(0);
 
 	// A view over the caller's buffer, not a copy. `bytes` came in over
 	// postMessage and nothing else retains it once this returns — displayBytes
@@ -107,6 +150,8 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		risky: riskyFeatures(doc),
 		session,
 		incremental: session.classification.supported,
+		pageIds: pageIdsOf(doc),
+		layoutStamp: layoutStampOf(doc),
 	};
 }
 
