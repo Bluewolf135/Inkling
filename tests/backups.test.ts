@@ -25,7 +25,7 @@ function memoryVault(note: Uint8Array) {
 		}),
 		adapter: {
 			stat: vi.fn(async (path: string) => ({ size: path === 'Notes/Handwritten.pdf' ? onDisk.byteLength : (files.get(path)?.byteLength ?? 0), mtime: 1 })),
-			exists: vi.fn(async (path: string) => path === `${CONFIG}/plugins/inkling-expanded/backups` || files.has(path)),
+			exists: vi.fn(async (path: string) => path === `${CONFIG}/plugins/inkling/backups` || files.has(path)),
 			mkdir: vi.fn(async () => {}),
 			writeBinary: vi.fn(async (path: string, bytes: ArrayBuffer) => void files.set(path, bytes.slice(0))),
 			readBinary: vi.fn(async (path: string) => (files.get(path) as ArrayBuffer).slice(0)),
@@ -128,7 +128,7 @@ describe('a rebuild in the PDF view', () => {
 		expect(await pageCount(memory.onDisk())).toBe(2);
 		const kept = [...memory.files.keys()];
 		expect(kept).toHaveLength(1);
-		expect(kept[0]?.startsWith(`${CONFIG}/plugins/inkling-expanded/backups/Notes_Handwritten.pdf@`)).toBe(true);
+		expect(kept[0]?.startsWith(`${CONFIG}/plugins/inkling/backups/Notes_Handwritten.pdf@`)).toBe(true);
 		expect(kept[0]?.endsWith('@add-page.pdf')).toBe(true);
 		expect(await pageCount(memory.files.get(kept[0] as string) as ArrayBuffer)).toBe(1);
 	});

@@ -34,7 +34,7 @@ CI has passed. It never takes a force push.
 Tests prove the source; they do not prove the plugin works on a tablet.
 Anything touching drawing, saving, PDFs or workers is checked in the running
 app before it goes to `Trunk`: build, copy `main.js`, `manifest.json` and
-`styles.css` into the vault's `.obsidian/plugins/inkling-expanded/`, and reload the
+`styles.css` into the vault's `.obsidian/plugins/inkling/`, and reload the
 plugin. Obsidian never reloads a plugin on its own, so a synced device keeps
 running the old code until the plugin is toggled off and on there.
 
@@ -52,7 +52,7 @@ running the old code until the plugin is toggled off and on there.
 
    ```bash
    git checkout Trunk && git pull
-   git tag -a 1.1.0 -m "InklingExpanded 1.1.0"
+   git tag -a 1.1.0 -m "Inkling 1.1.0"
    git push origin 1.1.0
    ```
 

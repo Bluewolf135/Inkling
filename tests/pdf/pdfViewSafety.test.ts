@@ -100,7 +100,7 @@ async function open(initial: Annotation[]) {
 	});
 	Object.assign(vault.adapter, {
 		stat: vi.fn(async (path: string) => (path === file.path ? { ...file.stat } : { size: kept.get(path)?.byteLength ?? 0, mtime: 1 })),
-		exists: vi.fn(async (path: string) => path === 'config-folder/plugins/inkling-expanded/backups' || kept.has(path)),
+		exists: vi.fn(async (path: string) => path === 'config-folder/plugins/inkling/backups' || kept.has(path)),
 		mkdir: vi.fn(async () => {}),
 		writeBinary: vi.fn(async (path: string, bytes: ArrayBuffer) => void kept.set(path, bytes.slice(0))),
 		readBinary: vi.fn(async (path: string) => (kept.get(path) as ArrayBuffer).slice(0)),

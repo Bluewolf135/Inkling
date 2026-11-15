@@ -545,7 +545,7 @@ function writeNote(pdfDoc: PDFDocument, page: PDFPage, note: NoteAnnotation): vo
 // from a page's /Annots array (page.node.removeAnnot, below) does *not* do
 // this by itself: the objects stay registered in the PDFContext and keep
 // getting serialized into every future save regardless. Since
-// writeInklingAnnotations (below) once rewrote every InklingExpanded annotation on
+// writeInklingAnnotations (below) once rewrote every Inkling annotation on
 // a page as brand-new objects on every autosave (it now rewrites only what
 // changed, and this frees exactly what that leaves behind), skipping this
 // step meant every edit left the *previous* generation of dicts/streams
@@ -576,7 +576,7 @@ function deleteAnnotationObjects(pdfDoc: PDFDocument, ref: PDFRef, keep: Readonl
 	pdfDoc.context.delete(ref);
 }
 
-// This page's InklingExpanded annotation refs, in /Annots order.
+// This page's Inkling annotation refs, in /Annots order.
 function inklingAnnotationRefs(pdfDoc: PDFDocument, page: PDFPage): PDFRef[] {
 	const annots = page.node.Annots();
 	if (!annots) return [];
@@ -737,7 +737,7 @@ function touchPageContainers(page: PDFPage, touch: TouchFn): void {
 	}
 }
 
-// Resyncs one page's InklingExpanded-authored annotations to match `annotations` (in
+// Resyncs one page's Inkling-authored annotations to match `annotations` (in
 // PDF space — see src/pdfView.ts for the canvas<->PDF conversion), in the
 // order given. Foreign annotations (no matching `/NM` prefix) are never
 // touched.
@@ -826,7 +826,7 @@ export function writeInklingAnnotations(
 // weight nothing pointed to any more but that still got serialized into
 // every subsequent save regardless — a file only ever grew, compounding
 // with every stroke across every session, until it was large enough to
-// trip a sync tool's file-size limit. Finds every InklingExpanded-tagged
+// trip a sync tool's file-size limit. Finds every Inkling-tagged
 // annotation dict (the same /NM `ink-` prefix used everywhere else here)
 // that no page's /Annots array links to any more, and frees it the same
 // way a normal edit now does. Called once when a file is opened for
@@ -995,7 +995,7 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 	return null;
 }
 
-// Reads back this page's previously-saved InklingExpanded annotations, in PDF
+// Reads back this page's previously-saved Inkling annotations, in PDF
 // space. Anything not tagged with our `/NM` prefix — including annotations
 // this same page already had from other software — is left untouched and
 // simply not returned; see the plan's "must gracefully handle foreign
@@ -1017,7 +1017,7 @@ export function readInklingAnnotations(pdfDoc: PDFDocument, pageIndex: number): 
 			const annotation = readOne(id, dict);
 			if (annotation) result.push(readSharedFields(dict, annotation));
 		} catch (error) {
-			console.error('InklingExpanded: skipping an unreadable annotation while loading a page.', error);
+			console.error('Inkling: skipping an unreadable annotation while loading a page.', error);
 		}
 	}
 	return result;

@@ -101,12 +101,12 @@ export async function deletePage(app: App, file: TFile, pageNumber: number): Pro
 	const done = await rewriteFile(app, file, 'delete-page', `could not delete page ${pageNumber}.`, async (before) => {
 		const result = await removePage(before, pageNumber);
 		if (result.kind === 'refused') {
-			new Notice(`InklingExpanded: page ${pageNumber} was not deleted — ${result.reason}.`);
+			new Notice(`Inkling: page ${pageNumber} was not deleted — ${result.reason}.`);
 			return null;
 		}
 		return {
 			bytes: toArrayBuffer(result.bytes),
-			notice: `InklingExpanded: deleted page ${pageNumber}. ${result.pageCount} ${result.pageCount === 1 ? 'page' : 'pages'} left.`,
+			notice: `Inkling: deleted page ${pageNumber}. ${result.pageCount} ${result.pageCount === 1 ? 'page' : 'pages'} left.`,
 		};
 	});
 	if (done) await followPageLinks(app, file, pageMapOfDeletion(pageNumber));
@@ -133,7 +133,7 @@ async function rewriteFile(
 	const [view] = annotateViewsOf(app, file);
 	if (view) {
 		const done = await view.rebuildFromOutside(reason, failure, change);
-		if (done === null) new Notice(`InklingExpanded: “${file.basename}” is busy being changed in its annotate view — try again in a moment.`);
+		if (done === null) new Notice(`Inkling: “${file.basename}” is busy being changed in its annotate view — try again in a moment.`);
 		return done === true;
 	}
 	try {
@@ -146,8 +146,8 @@ async function rewriteFile(
 		if (result.notice) new Notice(result.notice);
 		return true;
 	} catch (error) {
-		console.error(`InklingExpanded: ${failure}`, error);
-		new Notice(`InklingExpanded: ${failure}`);
+		console.error(`Inkling: ${failure}`, error);
+		new Notice(`Inkling: ${failure}`);
 		return false;
 	}
 }
@@ -200,7 +200,7 @@ export async function applyPlanToFile(app: App, file: TFile, plan: readonly Plan
 		const result = await applyPagePlan(before, plan);
 		if (result.kind === 'unchanged') return null;
 		if (result.kind === 'refused') {
-			new Notice(`InklingExpanded: the pages were not changed — ${result.reason}.`);
+			new Notice(`Inkling: the pages were not changed — ${result.reason}.`);
 			return null;
 		}
 		return { bytes: toArrayBuffer(result.bytes) };
@@ -264,12 +264,12 @@ export async function exportPages(app: App, file: TFile, plan: readonly PlannedP
 		if (format === 'pdf') {
 			const result = await extractPages(bytes, plan);
 			if (result.kind === 'refused') {
-				new Notice(`InklingExpanded: the pages were not exported — ${result.reason}.`);
+				new Notice(`Inkling: the pages were not exported — ${result.reason}.`);
 				return false;
 			}
 			const path = freePath(app, file, exportedPagesName(file.basename, plan.map(({ page }) => page)), 'pdf');
 			await app.vault.createBinary(path, toArrayBuffer(result.bytes));
-			new Notice(`InklingExpanded: saved ${path}.`);
+			new Notice(`Inkling: saved ${path}.`);
 			return true;
 		}
 		const pdf = await getDocument({ data: bytes, isEvalSupported: false }).promise;
@@ -280,14 +280,14 @@ export async function exportPages(app: App, file: TFile, plan: readonly PlannedP
 				last = freePath(app, file, exportedPagesName(file.basename, [number]), 'png');
 				await app.vault.createBinary(last, picture);
 			}
-			new Notice(plan.length === 1 ? `InklingExpanded: saved ${last}.` : `InklingExpanded: saved ${plan.length} pictures next to the PDF.`);
+			new Notice(plan.length === 1 ? `Inkling: saved ${last}.` : `Inkling: saved ${plan.length} pictures next to the PDF.`);
 			return true;
 		} finally {
 			void pdf.destroy();
 		}
 	} catch (error) {
-		console.error('InklingExpanded: failed to export pages.', error);
-		new Notice('InklingExpanded: could not export the pages.');
+		console.error('Inkling: failed to export pages.', error);
+		new Notice('Inkling: could not export the pages.');
 		return false;
 	}
 }

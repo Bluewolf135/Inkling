@@ -26,7 +26,7 @@ export interface OpenedDocument {
 	// saves reuse this parse instead of re-reading the whole file each time.
 	doc: PDFDocument;
 	savedAnnotations: Map<number, Annotation[]>;
-	// What pdf.js should render: the file with only InklingExpanded's own annotations
+	// What pdf.js should render: the file with only Inkling's own annotations
 	// stripped out, so its annotation-baking render still shows annotations
 	// from other PDF software without doubling up with our live overlay.
 	displayBytes: ArrayBuffer;

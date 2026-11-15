@@ -101,12 +101,12 @@ export async function followPageLinks(app: App, file: TFile, map: PageMap): Prom
 			if (inNote > 0) notes++;
 		}
 	} catch (error) {
-		console.error('InklingExpanded: could not update the links to this PDF.', error);
-		new Notice('InklingExpanded: some links to this PDF could not be updated.');
+		console.error('Inkling: could not update the links to this PDF.', error);
+		new Notice('Inkling: some links to this PDF could not be updated.');
 		return;
 	}
 	const said: string[] = [];
 	if (changed > 0) said.push(`updated ${changed} ${changed === 1 ? 'link' : 'links'} in ${notes} ${notes === 1 ? 'note' : 'notes'}`);
 	if (orphaned > 0) said.push(`${orphaned} ${orphaned === 1 ? 'link leads' : 'links lead'} to a deleted page`);
-	if (said.length > 0) new Notice(`InklingExpanded: ${said.join('; ')}.`);
+	if (said.length > 0) new Notice(`Inkling: ${said.join('; ')}.`);
 }

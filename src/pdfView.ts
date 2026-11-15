@@ -817,7 +817,7 @@ export class PdfAnnotateView extends FileView {
 	private handlePlainKey(event: KeyboardEvent): boolean {
 		if (event.key === 'Escape') return this.controller.clearSelection();
 		// Navigation works whatever state the document is in. Reading a book
-		// InklingExpanded refuses to write to is still reading a book.
+		// Inkling refuses to write to is still reading a book.
 		if (event.key === 'PageDown') {
 			this.scrollToPage(Math.min(this.currentPageNumber + 1, this.controller.getPageCount()));
 			return true;
@@ -869,7 +869,7 @@ export class PdfAnnotateView extends FileView {
 	// Hands this leaf back to Obsidian's native PDF view for the same file —
 	// restores page number/zoom/outline and drops the editing machinery
 	// (pdf-lib, the annotation controller/toolbar) this view needed. The
-	// reverse direction (native -> InklingExpanded) lives in main.ts, on a "pencil"
+	// reverse direction (native -> Inkling) lives in main.ts, on a "pencil"
 	// action it adds to core PDF view leaves. Carries the current page back
 	// the same way that direction does, via ephemeral state, so leaving edit
 	// mode doesn't lose your place either.
@@ -968,8 +968,8 @@ export class PdfAnnotateView extends FileView {
 			bytes = await this.app.vault.readBinary(file);
 		} catch (error) {
 			if (token !== this.renderToken) return;
-			console.error('InklingExpanded: failed to read this PDF.', error);
-			new Notice('InklingExpanded: could not read this PDF — try reopening it.');
+			console.error('Inkling: failed to read this PDF.', error);
+			new Notice('Inkling: could not read this PDF — try reopening it.');
 			this.showLoadError();
 			return;
 		}
@@ -1014,8 +1014,8 @@ export class PdfAnnotateView extends FileView {
 			risky = opened.risky;
 			incremental = opened.incremental && canAppendBinary(this.app.vault);
 		} catch (error) {
-			console.error('InklingExpanded: could not read existing annotations from this file.', error);
-			new Notice("InklingExpanded: could not read this PDF's existing annotations — any already on it won't show up this time.");
+			console.error('Inkling: could not read existing annotations from this file.', error);
+			new Notice("Inkling: could not read this PDF's existing annotations — any already on it won't show up this time.");
 			writer?.terminate();
 			writer = null;
 			savedAnnotations = new Map();
@@ -1043,10 +1043,10 @@ export class PdfAnnotateView extends FileView {
 
 		let pdf: PDFDocumentProxy;
 		try {
-			pdf = await withTimeout(getDocument({ data: displayBytes, isEvalSupported: false }).promise, PDF_LOAD_TIMEOUT_MS, 'InklingExpanded: timed out opening this PDF.');
+			pdf = await withTimeout(getDocument({ data: displayBytes, isEvalSupported: false }).promise, PDF_LOAD_TIMEOUT_MS, 'Inkling: timed out opening this PDF.');
 		} catch (error) {
-			console.error('InklingExpanded: failed to open this PDF for rendering.', error);
-			new Notice('InklingExpanded: could not open this PDF for annotating — try again, or reopen it in reading view.');
+			console.error('Inkling: failed to open this PDF for rendering.', error);
+			new Notice('Inkling: could not open this PDF for annotating — try again, or reopen it in reading view.');
 			this.showLoadError();
 			return;
 		}
@@ -1066,7 +1066,7 @@ export class PdfAnnotateView extends FileView {
 			try {
 				refusal = compareProfiles(profile, await profileFromPdfJs(pdf));
 			} catch (error) {
-				console.error('InklingExpanded: could not check this PDF for editing safety.', error);
+				console.error('Inkling: could not check this PDF for editing safety.', error);
 				refusal = 'its structure could not be checked';
 			}
 		}
@@ -1081,17 +1081,17 @@ export class PdfAnnotateView extends FileView {
 			// Both still depend on the same pdf.js worker that just parsed the
 			// document above — a worker that went quiet mid-parse could just as
 			// easily go quiet here instead, so these get the same guard.
-			metadata = await withTimeout(pdf.getMetadata(), PDF_LOAD_TIMEOUT_MS, 'InklingExpanded: timed out reading this PDF.');
+			metadata = await withTimeout(pdf.getMetadata(), PDF_LOAD_TIMEOUT_MS, 'Inkling: timed out reading this PDF.');
 			if (token !== this.renderToken) return;
 			// Real textbooks/technical docs are hundreds of pages; rendering all
 			// of them eagerly on open is what made switching PDFs slow. Use one
 			// page's viewport to size every placeholder up front (most documents
 			// share a page size), then only render a page once it actually
 			// scrolls into view.
-			firstPage = await withTimeout(pdf.getPage(1), PDF_LOAD_TIMEOUT_MS, 'InklingExpanded: timed out reading this PDF.');
+			firstPage = await withTimeout(pdf.getPage(1), PDF_LOAD_TIMEOUT_MS, 'Inkling: timed out reading this PDF.');
 		} catch (error) {
-			console.error('InklingExpanded: failed to read this PDF for rendering.', error);
-			new Notice('InklingExpanded: could not open this PDF for annotating — try again, or reopen it in reading view.');
+			console.error('Inkling: failed to read this PDF for rendering.', error);
+			new Notice('Inkling: could not open this PDF for annotating — try again, or reopen it in reading view.');
 			this.showLoadError();
 			return;
 		}
@@ -1182,8 +1182,8 @@ export class PdfAnnotateView extends FileView {
 				await this.flushAnnotationsIfDirty(file);
 			}
 			if (file && this.dirtyPages.size > 0) {
-				console.error(`InklingExpanded: ink on ${this.dirtyPages.size} page(s) of ${file.path} could not be saved before it closed.`);
-				new Notice(`InklingExpanded: some ink on “${file.basename}” could not be saved before it closed.`);
+				console.error(`Inkling: ink on ${this.dirtyPages.size} page(s) of ${file.path} could not be saved before it closed.`);
+				new Notice(`Inkling: some ink on “${file.basename}” could not be saved before it closed.`);
 			}
 		} finally {
 			this.unloading = false;
@@ -1393,7 +1393,7 @@ export class PdfAnnotateView extends FileView {
 				if (token === this.renderToken && this.viewports.get(pageNumber) === waiting.viewport) this.textLines.set(pageNumber, lines);
 			})
 			.catch((error: unknown) => {
-				console.error(`InklingExpanded: failed to read text content for PDF page ${pageNumber}.`, error);
+				console.error(`Inkling: failed to read text content for PDF page ${pageNumber}.`, error);
 			})
 			.finally(() => this.scheduleTextLines());
 	}
@@ -1499,7 +1499,7 @@ export class PdfAnnotateView extends FileView {
 			// The document was closed while this page waited, which a reload
 			// does. Anything else is worth saying, and the page may try again.
 			if (token === this.renderToken) {
-				console.error(`InklingExpanded: failed to read PDF page ${pageNumber}.`, error);
+				console.error(`Inkling: failed to read PDF page ${pageNumber}.`, error);
 				this.renderedPages.delete(pageNumber);
 			}
 			return;
@@ -1568,7 +1568,7 @@ export class PdfAnnotateView extends FileView {
 			// Expected when the page is flown past or the view torn down while
 			// it was still being drawn.
 			if (error instanceof RenderingCancelledException) return;
-			console.error(`InklingExpanded: failed to render PDF page ${pageNumber}.`, error);
+			console.error(`Inkling: failed to render PDF page ${pageNumber}.`, error);
 			// Left to be tried again when it next scrolls into view, rather
 			// than blank for as long as the file is open.
 			if (token === this.renderToken && !job.cancelled) this.renderedPages.delete(pageNumber);
@@ -1736,7 +1736,7 @@ export class PdfAnnotateView extends FileView {
 			this.queueTextLines(pageNumber, page, newViewport);
 		} catch (error) {
 			if (!(error instanceof RenderingCancelledException)) {
-				console.error(`InklingExpanded: failed to sharpen PDF page ${pageNumber} for zoom.`, error);
+				console.error(`Inkling: failed to sharpen PDF page ${pageNumber} for zoom.`, error);
 			}
 		} finally {
 			this.upgradingPages.delete(pageNumber);
@@ -1963,8 +1963,8 @@ export class PdfAnnotateView extends FileView {
 			for (const page of pages) this.savedAnnotations.set(page.pageNumber, page.annotations);
 			this.consecutiveWriteFailures = 0;
 		} catch (error) {
-			console.error('InklingExpanded: failed to save annotations.', error);
-			new Notice('InklingExpanded: could not save annotations to this file.');
+			console.error('Inkling: failed to save annotations.', error);
+			new Notice('Inkling: could not save annotations to this file.');
 			// Re-marked dirty first, deliberately: the work stays pending, so
 			// if the file later saves — this session or the next — nothing has
 			// been thrown away.
@@ -1977,7 +1977,7 @@ export class PdfAnnotateView extends FileView {
 				// a notice every interval for as long as the book is open.
 				this.controller.setReadOnly(true);
 				this.showReadOnlyBanner('saving to it keeps failing');
-				new Notice("InklingExpanded: this PDF isn't saving, so editing has been turned off. Your ink from this session is still on screen.");
+				new Notice("Inkling: this PDF isn't saving, so editing has been turned off. Your ink from this session is still on screen.");
 			}
 		}
 	}
@@ -1987,7 +1987,7 @@ export class PdfAnnotateView extends FileView {
 		// being one — it would never grow again. The toolbar hides the button
 		// there; this is for any other way of asking.
 		if (this.infiniteBox) {
-			new Notice('InklingExpanded: an infinite canvas grows by itself and cannot have more pages.');
+			new Notice('Inkling: an infinite canvas grows by itself and cannot have more pages.');
 			return;
 		}
 		const file = this.currentFile;
@@ -2096,8 +2096,8 @@ export class PdfAnnotateView extends FileView {
 			if (result.notice) new Notice(result.notice);
 			return true;
 		} catch (error) {
-			console.error(`InklingExpanded: ${failure}`, error);
-			new Notice(`InklingExpanded: ${failure}`);
+			console.error(`Inkling: ${failure}`, error);
+			new Notice(`Inkling: ${failure}`);
 			return false;
 		} finally {
 			this.addingPage = false;
@@ -2267,7 +2267,7 @@ export class PdfAnnotateView extends FileView {
 			detail.task = task;
 			await task.promise;
 		} catch (error) {
-			if (!(error instanceof RenderingCancelledException)) console.error(`InklingExpanded: failed to draw page ${pageNumber} sharp.`, error);
+			if (!(error instanceof RenderingCancelledException)) console.error(`Inkling: failed to draw page ${pageNumber} sharp.`, error);
 			return;
 		}
 		if (detail.generation !== generation || token !== this.renderToken || this.details.get(pageNumber) !== detail) return;
@@ -2539,7 +2539,7 @@ export class PdfAnnotateView extends FileView {
 		if (!growth) {
 			if (!this.reportedCanvasLimit) {
 				this.reportedCanvasLimit = true;
-				new Notice('InklingExpanded: this canvas has reached the largest size a PDF page can be.');
+				new Notice('Inkling: this canvas has reached the largest size a PDF page can be.');
 			}
 			return;
 		}
@@ -2558,8 +2558,8 @@ export class PdfAnnotateView extends FileView {
 				throw error;
 			}
 		} catch (error) {
-			console.error('InklingExpanded: failed to grow the canvas.', error);
-			if (!unshown) new Notice('InklingExpanded: could not make this canvas larger.');
+			console.error('Inkling: failed to grow the canvas.', error);
+			if (!unshown) new Notice('Inkling: could not make this canvas larger.');
 		} finally {
 			this.growing = false;
 		}
@@ -2653,7 +2653,7 @@ export class PdfAnnotateView extends FileView {
 		const pdf = await withTimeout(
 			getDocument({ data: opened.displayBytes, isEvalSupported: false }).promise,
 			PDF_LOAD_TIMEOUT_MS,
-			'InklingExpanded: timed out opening this PDF.',
+			'Inkling: timed out opening this PDF.',
 		);
 		let swapped = false;
 		try {
@@ -2720,7 +2720,7 @@ export class PdfAnnotateView extends FileView {
 				.then((lines) => {
 					if (token === this.renderToken) this.textLines.set(1, lines);
 				})
-				.catch((error: unknown) => console.error('InklingExpanded: failed to read text content for the canvas.', error));
+				.catch((error: unknown) => console.error('Inkling: failed to read text content for the canvas.', error));
 
 			if (refusal) {
 				this.controller.setReadOnly(true);
@@ -2929,7 +2929,7 @@ export class PdfAnnotateView extends FileView {
 				writer.terminate();
 				// Not readable as it is — most likely a sync still writing it.
 				// The next change will bring the rest.
-				console.warn('InklingExpanded: could not read this PDF as it arrived from another device.', error);
+				console.warn('Inkling: could not read this PDF as it arrived from another device.', error);
 				return false;
 			}
 			const pdf = this.pdf;
@@ -3028,7 +3028,7 @@ export class PdfAnnotateView extends FileView {
 					// next save finds the file changed and brings this round
 					// again, rather than either side being lost.
 					writer.terminate();
-					console.error('InklingExpanded: could not save ink into a change from another device.', error);
+					console.error('Inkling: could not save ink into a change from another device.', error);
 					return false;
 				}
 			} else {
@@ -3037,7 +3037,7 @@ export class PdfAnnotateView extends FileView {
 
 			if (gone.length > 0) {
 				const list = gone.join(', ');
-				new Notice(`InklingExpanded: ${gone.length === 1 ? `page ${list} was` : `pages ${list} were`} deleted on another device, with what you had just drawn on ${gone.length === 1 ? 'it' : 'them'}.`);
+				new Notice(`Inkling: ${gone.length === 1 ? `page ${list} was` : `pages ${list} were`} deleted on another device, with what you had just drawn on ${gone.length === 1 ? 'it' : 'them'}.`);
 			}
 
 			this.savedAnnotations = opened.savedAnnotations;
@@ -3066,7 +3066,7 @@ export class PdfAnnotateView extends FileView {
 				reload = resized;
 			}
 		} catch (error) {
-			console.error('InklingExpanded: failed to take in a change from another device.', error);
+			console.error('Inkling: failed to take in a change from another device.', error);
 		} finally {
 			pendingWriter?.terminate();
 			release();
@@ -3164,7 +3164,7 @@ export class PdfAnnotateView extends FileView {
 		await this.rebuild('background', 'could not change the background.', async (bytes) => {
 			const result = await setPageBackground(bytes, target, style);
 			if (result.kind === 'refused') {
-				new Notice(`InklingExpanded: the background was not changed — ${result.reason}.`);
+				new Notice(`Inkling: the background was not changed — ${result.reason}.`);
 				return null;
 			}
 			return { bytes: toArrayBuffer(result.bytes) };
@@ -3242,7 +3242,7 @@ export class PdfAnnotateView extends FileView {
 			return {
 				bytes: toArrayBuffer(await target.save()),
 				scrollTo: insertAt + 1,
-				notice: `InklingExpanded: inserted ${pages.length} ${pages.length === 1 ? 'page' : 'pages'} from ${name}.`,
+				notice: `Inkling: inserted ${pages.length} ${pages.length === 1 ? 'page' : 'pages'} from ${name}.`,
 			};
 		});
 		if (done && file) await followPageLinks(this.app, file, pageMapOfInsertion(insertedAfter, inserted));
@@ -3261,8 +3261,8 @@ export class PdfAnnotateView extends FileView {
 		try {
 			picture = await preparePicture(blob, this.contentEl.ownerDocument);
 		} catch (error) {
-			console.error('InklingExpanded: failed to read a picture.', error);
-			new Notice(`InklingExpanded: could not read ${name} as a picture on this device.`);
+			console.error('Inkling: failed to read a picture.', error);
+			new Notice(`Inkling: could not read ${name} as a picture on this device.`);
 			return;
 		}
 		// The page may have changed while the picture was decoding.
@@ -3397,7 +3397,7 @@ export class PdfAnnotateView extends FileView {
 		try {
 			entries = await flattenOutline(await pdf.getOutline(), (dest) => this.resolveDestination(pdf, dest));
 		} catch (error) {
-			console.error('InklingExpanded: could not read this PDF outline.', error);
+			console.error('Inkling: could not read this PDF outline.', error);
 			return;
 		}
 		if (token !== this.renderToken) return;
@@ -3458,14 +3458,14 @@ export class PdfAnnotateView extends FileView {
 	// Into the file, where every other PDF reader finds them too.
 	private changeBookmark(change: BookmarkChange): void {
 		if (this.controller.isReadOnly()) {
-			new Notice('InklingExpanded: this PDF cannot be changed here.');
+			new Notice('Inkling: this PDF cannot be changed here.');
 			return;
 		}
 		const panelOpen = this.navPanel?.hidden === false;
 		void this.rebuild('bookmarks', 'could not change the bookmarks of this PDF.', async (bytes) => {
 			const result = await changeBookmarks(bytes, change);
 			if (result.kind === 'refused') {
-				new Notice(`InklingExpanded: the bookmarks were not changed — ${result.reason}.`);
+				new Notice(`Inkling: the bookmarks were not changed — ${result.reason}.`);
 				return null;
 			}
 			return { bytes: toArrayBuffer(result.bytes) };
@@ -3688,7 +3688,7 @@ export class PdfAnnotateView extends FileView {
 		setIcon(box.createDiv({ cls: 'inkling-pdf-message-icon' }), 'file-warning');
 		box.createDiv({
 			cls: 'inkling-pdf-message-text',
-			text: "InklingExpanded couldn't open this PDF. Try reopening it, or view it in reading mode.",
+			text: "Inkling couldn't open this PDF. Try reopening it, or view it in reading mode.",
 		});
 	}
 
@@ -3704,7 +3704,7 @@ export class PdfAnnotateView extends FileView {
 		setIcon(box.createDiv({ cls: 'inkling-pdf-message-icon' }), 'file-warning');
 		box.createDiv({
 			cls: 'inkling-pdf-message-text',
-			text: `InklingExpanded can't safely annotate this PDF, because ${reason}. You can read it and see annotations already on it, but editing is turned off so the file isn't damaged.`,
+			text: `Inkling can't safely annotate this PDF, because ${reason}. You can read it and see annotations already on it, but editing is turned off so the file isn't damaged.`,
 		});
 	}
 
@@ -3777,7 +3777,7 @@ export class PdfAnnotateView extends FileView {
 		try {
 			this.buildReloadCover(shown, view, top);
 		} catch (error) {
-			console.warn('InklingExpanded: could not keep the pages on screen while reloading.', error);
+			console.warn('Inkling: could not keep the pages on screen while reloading.', error);
 			this.dropReloadCover();
 		}
 		return hold;

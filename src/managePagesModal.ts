@@ -100,7 +100,7 @@ export class ManagePagesModal extends Modal {
 				this.buildRows(source.numPages);
 			},
 			(error: unknown) => {
-				console.error('InklingExpanded: could not read this PDF to arrange its pages.', error);
+				console.error('Inkling: could not read this PDF to arrange its pages.', error);
 				this.close();
 			},
 		);
@@ -290,7 +290,7 @@ export class ManagePagesModal extends Modal {
 			const page = this.rowOf.get(row)?.page;
 			if (canvas && page !== undefined && this.source) {
 				this.source.draw(page, canvas).catch((error: unknown) => {
-					if (!this.closed) console.warn('InklingExpanded: could not draw a page preview.', error);
+					if (!this.closed) console.warn('Inkling: could not draw a page preview.', error);
 				});
 			}
 		}
