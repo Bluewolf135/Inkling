@@ -397,8 +397,7 @@ Inkling was written by [Bluewolf135](https://github.com/Bluewolf135)
 
 A big part of what's described above started life as
 [InklingExpanded](https://github.com/user3019/InklingExpanded), a fork by
-[user3019](https://github.com/user3019). They reached out, we talked, and
-their work is merged back into Inkling with every commit under their name.
+[user3019](https://github.com/user3019). They responded to an issue that I had missed, helping a inkling user by providing the features they requested in their fork. After talking, they agreed to allow me to merge there changes into the main plugin with every commit under their name.
 Theirs is: the per-device toolbar editor and remembered tool settings; the
 round and sharp pens; the text tool, dashed and dotted lines, filled shapes
 and double-headed arrows; pictures and PDF import, cropping, and copy and
