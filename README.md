@@ -51,6 +51,10 @@ https://github.com/user-attachments/assets/40446953-9efd-4fca-be6c-e2305961d351
 
 ## What it does
 
+> Features marked † came from [user3019](https://github.com/user3019)'s
+> InklingExpanded fork, merged into Inkling. See
+> [Credits](#credits-and-license).
+
 **Annotate PDFs.** Pen, highlighter, eraser, shapes, text and lasso
 selection, over any PDF in your vault. Ink is written into the file as real
 PDF annotations, so it shows up in Obsidian's own reader, in Xodo, in
@@ -61,15 +65,15 @@ frame the browser volunteers; strokes are curve-fitted rather than joined
 with straight lines; and a pen that reports pressure draws a stroke that
 tapers with it.
 
-**Two pens.** Tap the pen while it is in hand to choose between a **round
+**Two pens. †** Tap the pen while it is in hand to choose between a **round
 pen** (smooth, round ends) and a **sharp pen** (follows your hand exactly,
 corners and all). Each has its own pressure switch and remembers its own
 colour and width.
 
-**Type on the page.** The text tool (`t`) puts a box where you tap; a tap
+**Type on the page. †** The text tool (`t`) puts a box where you tap; a tap
 anywhere else finishes it. Size and colour follow the toolbar.
 
-**More line styles.** Press a shape tool that is already in hand to choose
+**More line styles. †** Press a shape tool that is already in hand to choose
 solid, dashed or dotted, a filled shape, or an arrow with a head at both
 ends. They are real PDF annotations, so other readers show them too.
 
@@ -88,7 +92,7 @@ PDF sticky note — which means other readers show it too.
 
 **Handwritten notes.** Create a blank, lined, or dot-grid PDF and write
 straight into it, adding pages as you fill them. Or choose **Infinite
-canvas**: one sheet that grows smoothly in whichever direction you write,
+canvas** †: one sheet that grows smoothly in whichever direction you write,
 still an ordinary one-page PDF that opens anywhere.
 
 **Ink blocks in Markdown.** A ```` ```inkling ```` block is a drawing
@@ -98,15 +102,15 @@ and keeps the strokes in an `.ink` file beside your other attachments, one
 per note, so the note stays readable and small. Where those files go is a
 setting.
 
-**Your toolbar, per device.** The **Customize toolbar** button (sliders
+**Your toolbar, per device. †** The **Customize toolbar** button (sliders
 icon) at the end of the toolbar opens an editor: drag the tools into the
 order you want, hide the ones you never use, save. Each device keeps its own
 layout — a phone can show six tools, a laptop all of them — and the tool in
 hand, colours, widths, pens and pressure come back as you left them.
 
-**Getting around.** Outline with editable bookmarks, page jump,
+**Getting around.** Outline with editable bookmarks †, page jump,
 find-in-document, a collapsible toolbar, and dark-mode page inversion that
-darkens the page without touching the colour of your ink. Zoom the whole
+darkens the page without touching the colour of your ink. Zoom † the whole
 document from 25% to 500% — pinch, trackpad pinch, Ctrl+wheel or the
 toolbar — and scroll in every direction with a finger, the trackpad or the
 middle mouse button. The part of the page on screen is redrawn at the
@@ -114,6 +118,8 @@ screen's resolution, so text, ink, highlights and ink blocks stay sharp at
 any zoom.
 
 ## Pages, pictures and the lasso
+
+> Everything in this section came from user3019's InklingExpanded fork.
 
 **Page background, after the fact, in any PDF.** Switch any page — or every
 page — between blank, lined and dot grid. Pages with content keep it, with
@@ -162,6 +168,8 @@ another PDF or into a note's ink block, and arrives selected, ready to
 move.
 
 ## Two devices at once
+
+> Everything in this section came from user3019's InklingExpanded fork.
 
 **Live editing.** Open the same PDF on a tablet and a laptop and write on
 both: each one's ink appears on the other as soon as your sync brings the
@@ -255,11 +263,11 @@ a Samsung tablet with an S Pen and on Linux.
 - **Palm rejection.** Pen and mouse draw; touch scrolls and pinch-zooms.
   Touch panning is hand-rolled rather than left to the browser, because
   relying on `touch-action` let a downward pen stroke get taken over
-  mid-draw on real hardware. A toolbar switch lets a finger draw, for
+  mid-draw on real hardware. A toolbar switch † lets a finger draw, for
   phones and for styluses that report themselves as a finger.
 - **Pressure.** Pressure varies stroke width where the stylus reports it,
   and each pen has its own switch for it.
-- **Side button and eraser end.** Hold the side button to erase (or
+- **Side button and eraser end** †. Hold the side button to erase (or
   highlight, or lasso — a setting) and let go to get your tool back; an
   eraser end always erases. Works with Windows and Wacom pens, and on
   Android with the Samsung S Pen and other pens. The **Check stylus input**
