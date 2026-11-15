@@ -12,6 +12,15 @@ const CORE_PDF_VIEW = 'pdf';
 // importing the view, which is the heavy module.
 export const ANNOTATE_VIEW_TYPE = 'inkling-pdf-view';
 
+// What a change to a file's pages hands back: the file as it should now be,
+// and what the change meant to leave in it, for checking that it did.
+export interface RebuiltFile {
+	bytes: ArrayBuffer;
+	scrollTo?: number;
+	notice?: string;
+	pageCount?: number;
+}
+
 export interface AnnotateViewHooks {
 	file: TFile | null;
 	flushPendingWrites(): Promise<void>;
@@ -21,7 +30,7 @@ export interface AnnotateViewHooks {
 	rebuildFromOutside(
 		reason: BackupReason,
 		failure: string,
-		change: (bytes: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; scrollTo?: number; notice?: string } | null>,
+		change: (bytes: ArrayBuffer) => Promise<RebuiltFile | null>,
 	): Promise<boolean | null>;
 }
 

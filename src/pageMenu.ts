@@ -6,7 +6,8 @@ import { applyPagePlan, extractPages, movedOrder, removePage, type PlannedPage }
 import { ManagePagesModal, type PageExportFormat, type PageSource } from './managePagesModal';
 import { followPageLinks, pageMapOfDeletion, pageMapOfPlan } from './pageLinks';
 import { writeBinarySafely } from './vaultWrite';
-import { annotateViewsOf, refreshCoreReaders } from './coreViews';
+import { annotateViewsOf, refreshCoreReaders, type RebuiltFile } from './coreViews';
+import { verifyRebuilt } from './pdf/verifyRebuilt';
 import { backUp, type BackupReason } from './backups';
 
 // A menu on the page thumbnails of Obsidian's own PDF reader — a long press
@@ -107,6 +108,7 @@ export async function deletePage(app: App, file: TFile, pageNumber: number): Pro
 		return {
 			bytes: toArrayBuffer(result.bytes),
 			notice: `Inkling: deleted page ${pageNumber}. ${result.pageCount} ${result.pageCount === 1 ? 'page' : 'pages'} left.`,
+			pageCount: result.pageCount,
 		};
 	});
 	if (done) await followPageLinks(app, file, pageMapOfDeletion(pageNumber));
@@ -128,7 +130,7 @@ async function rewriteFile(
 	file: TFile,
 	reason: BackupReason,
 	failure: string,
-	change: (before: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; notice?: string } | null>,
+	change: (before: ArrayBuffer) => Promise<RebuiltFile | null>,
 ): Promise<boolean> {
 	const [view] = annotateViewsOf(app, file);
 	if (view) {
@@ -140,6 +142,7 @@ async function rewriteFile(
 		const before = await app.vault.readBinary(file);
 		const result = await change(before);
 		if (!result) return false;
+		await verifyRebuilt(result.bytes, result.pageCount);
 		await backUp(app, file, before, reason);
 		await writeBinarySafely(app.vault, file, result.bytes);
 		await refreshCoreReaders(app, file);
@@ -203,7 +206,7 @@ export async function applyPlanToFile(app: App, file: TFile, plan: readonly Plan
 			new Notice(`Inkling: the pages were not changed — ${result.reason}.`);
 			return null;
 		}
-		return { bytes: toArrayBuffer(result.bytes) };
+		return { bytes: toArrayBuffer(result.bytes), pageCount: plan.length };
 	});
 	if (done) await followPageLinks(app, file, pageMapOfPlan(plan));
 	return done;

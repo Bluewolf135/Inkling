@@ -1,6 +1,7 @@
 import { FileView, Menu, Notice, setIcon, setTooltip, TFile, WorkspaceLeaf } from 'obsidian';
 import { chooseDeviceFile, chooseVaultFile, PICTURE_EXTENSIONS, placePicture, preparePicture } from './importing';
-import { ANNOTATE_VIEW_TYPE, refreshCoreReaders } from './coreViews';
+import { ANNOTATE_VIEW_TYPE, refreshCoreReaders, type RebuiltFile } from './coreViews';
+import { verifyRebuilt } from './pdf/verifyRebuilt';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy, type RenderTask } from 'pdfjs-dist';
 import { PDFDocument, type PDFPage } from 'pdf-lib';
 import { AnnotationController, buildToolbar, HistoryStack, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
@@ -2007,7 +2008,7 @@ export class PdfAnnotateView extends FileView {
 			} else {
 				pdfDoc.insertPage(insertIndex, shownPageSize(pdfDoc.getPage(Math.max(insertIndex - 1, 0))));
 			}
-			return { bytes: toArrayBuffer(await pdfDoc.save()), scrollTo: insertIndex + 1 };
+			return { bytes: toArrayBuffer(await pdfDoc.save()), scrollTo: insertIndex + 1, pageCount: pdfDoc.getPageCount() };
 		});
 		if (added && file) await followPageLinks(this.app, file, pageMapOfInsertion(addedAfter, 1));
 	}
@@ -2039,7 +2040,7 @@ export class PdfAnnotateView extends FileView {
 	async rebuildFromOutside(
 		reason: BackupReason,
 		failure: string,
-		change: (bytes: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; scrollTo?: number; notice?: string } | null>,
+		change: (bytes: ArrayBuffer) => Promise<RebuiltFile | null>,
 	): Promise<boolean | null> {
 		if (!this.currentFile || this.addingPage || this.growing || this.controller.isReadOnly()) return null;
 		return this.rebuild(reason, failure, change);
@@ -2048,7 +2049,7 @@ export class PdfAnnotateView extends FileView {
 	private async rebuild(
 		reason: BackupReason,
 		failure: string,
-		change: (bytes: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; scrollTo?: number; notice?: string } | null>,
+		change: (bytes: ArrayBuffer) => Promise<RebuiltFile | null>,
 	): Promise<boolean> {
 		const file = this.currentFile;
 		if (!file || this.addingPage || this.growing || this.controller.isReadOnly()) return false;
@@ -2076,13 +2077,14 @@ export class PdfAnnotateView extends FileView {
 			let release: () => void = () => undefined;
 			this.saving = new Promise<void>((resolve) => (release = resolve));
 			const slot = this.saving;
-			let result: { bytes: ArrayBuffer; scrollTo?: number; notice?: string } | null;
+			let result: RebuiltFile | null;
 			try {
 				const before = await this.app.vault.readBinary(file);
 				result = await change(before);
 				if (!result) return false;
 				await backUp(this.app, file, before, reason);
 				const rebuilt = result.bytes;
+				await verifyRebuilt(rebuilt, result.pageCount);
 				await this.ownWrite(file, () => writeBinarySafely(this.app.vault, file, rebuilt));
 			} finally {
 				release();
@@ -2608,6 +2610,7 @@ export class PdfAnnotateView extends FileView {
 			const pdfDoc = await PDFDocument.load(original);
 			setInfiniteCanvasBox(pdfDoc.getPage(0), box);
 			const grown = toArrayBuffer(await pdfDoc.save());
+			await verifyRebuilt(grown, 1);
 			await this.ownWrite(file, () => writeBinarySafely(this.app.vault, file, grown));
 
 			const writer = new AnnotationWriterClient();
@@ -3242,6 +3245,7 @@ export class PdfAnnotateView extends FileView {
 			return {
 				bytes: toArrayBuffer(await target.save()),
 				scrollTo: insertAt + 1,
+				pageCount: target.getPageCount(),
 				notice: `Inkling: inserted ${pages.length} ${pages.length === 1 ? 'page' : 'pages'} from ${name}.`,
 			};
 		});
