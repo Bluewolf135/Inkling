@@ -213,6 +213,26 @@ describe('a note changing on two devices at once', () => {
 		expect(await onDiskPages()).toEqual([['ink-a', 'ink-ours']]);
 	});
 
+	// Pages are matched by their object number in the file, which pdf-lib
+	// keeps across saves. Other PDF software does not: a file it rewrote has
+	// every object renumbered, so not one of our ids is in it, though they
+	// are the same pages. Matched by number then, as before pages had
+	// identities — not every one of them taken for deleted, with whatever
+	// was drawn on it.
+	it('falls back to page numbers when the file was renumbered by other software', async () => {
+		const { internals, file, onDiskPages, remote } = await open();
+		// Ids from before the rewrite, which the file no longer has anywhere.
+		internals.pageIds = ['9001.0', '9002.0'];
+		internals.controller.place(1, onScreen(stroke('ink-ours', 500)));
+		await remote((doc) => writeInklingAnnotations(doc, 1, [stroke('ink-b', 600), stroke('ink-theirs', 400)]));
+		await vi.advanceTimersByTimeAsync(5000);
+		await internals.flushAnnotations(file);
+		await vi.advanceTimersByTimeAsync(5000);
+
+		expect(await onDiskPages()).toEqual([['ink-a', 'ink-ours'], ['ink-b', 'ink-theirs']]);
+		expect(notices.some((message) => message.includes('deleted on another device'))).toBe(false);
+	});
+
 	it('says so when the page with ink not saved yet was the one deleted there', async () => {
 		const { internals, onDiskPages, remote } = await open();
 		internals.controller.place(2, onScreen(stroke('ink-ours', 500)));
