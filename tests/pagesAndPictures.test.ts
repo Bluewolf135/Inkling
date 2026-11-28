@@ -102,6 +102,65 @@ describe('the thumbnail menu in Obsidian’s reader', () => {
 		expect(await widthsOf(onDisk)).toEqual([200, 300]);
 	});
 
+	// With the PDF open to annotate, the deletion is made by that view, as
+	// its own page changes are: drawing paused and its save slot held for
+	// the whole of it. Writing the file from here instead let a stroke drawn
+	// while pdf-lib rebuilt it be saved in between and then written over,
+	// and the view took its absence for a deletion made on another device.
+	it('hands the deletion to an open annotate view rather than writing past it', async () => {
+		let onDisk = await pdfOf([100, 200, 300]);
+		const writes: string[] = [];
+		const vault = {
+			readBinary: async () => onDisk.slice().buffer,
+			modifyBinary: async (_file: unknown, bytes: ArrayBuffer) => {
+				writes.push('vault');
+				onDisk = new Uint8Array(bytes);
+			},
+			adapter: { stat: async () => ({ size: onDisk.byteLength }) },
+		};
+		// Stands in for the view: runs the change the way the real rebuild
+		// does, under its own save slot, and writes the result itself.
+		const rebuildFromOutside = vi.fn(async (_reason: string, _failure: string, change: (bytes: ArrayBuffer) => Promise<{ bytes: ArrayBuffer } | null>) => {
+			const result = await change(onDisk.slice().buffer);
+			if (!result) return false;
+			writes.push('view');
+			onDisk = new Uint8Array(result.bytes);
+			return true;
+		});
+		const annotate = { file: { path: 'Book.pdf' }, flushPendingWrites: vi.fn(async () => {}), rebuildFromOutside };
+		const app = {
+			vault,
+			workspace: { getLeavesOfType: (type: string) => (type === 'inkling-pdf-view' ? [{ view: annotate }] : []) },
+		};
+
+		expect(await deletePage(app as never, { path: 'Book.pdf', basename: 'Book' } as never, 1)).toBe(true);
+
+		expect(rebuildFromOutside).toHaveBeenCalledWith('delete-page', expect.any(String), expect.any(Function));
+		// The view did the write; this path did not also do one of its own.
+		expect(writes).toEqual(['view']);
+		expect(await widthsOf(onDisk)).toEqual([200, 300]);
+	});
+
+	it('deletes nothing when the annotate view cannot take the change yet', async () => {
+		let onDisk = await pdfOf([100, 200, 300]);
+		const vault = {
+			readBinary: async () => onDisk.slice().buffer,
+			modifyBinary: vi.fn(async (_file: unknown, bytes: ArrayBuffer) => {
+				onDisk = new Uint8Array(bytes);
+			}),
+			adapter: { stat: async () => ({ size: onDisk.byteLength }) },
+		};
+		const annotate = { file: { path: 'Book.pdf' }, flushPendingWrites: vi.fn(async () => {}), rebuildFromOutside: vi.fn(async () => null) };
+		const app = {
+			vault,
+			workspace: { getLeavesOfType: (type: string) => (type === 'inkling-pdf-view' ? [{ view: annotate }] : []) },
+		};
+
+		expect(await deletePage(app as never, { path: 'Book.pdf', basename: 'Book' } as never, 1)).toBe(false);
+		expect(vault.modifyBinary).not.toHaveBeenCalled();
+		expect(await widthsOf(onDisk)).toEqual([100, 200, 300]);
+	});
+
 	// Obsidian reloads the document of a reader whose PDF changes, but not its
 	// page count or its thumbnails, which then no longer match.
 	it('rebuilds every reader showing the PDF afterwards, at the page it was on', async () => {
